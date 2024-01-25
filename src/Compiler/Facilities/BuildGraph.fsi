@@ -3,7 +3,6 @@
 module internal FSharp.Compiler.BuildGraph
 
 open System
-open System.Diagnostics
 open System.Threading
 open System.Threading.Tasks
 open FSharp.Compiler.DiagnosticsLogger
@@ -52,6 +51,8 @@ type NodeCodeBuilder =
 
 /// Specifies code that can be run as part of the build graph.
 val node: NodeCodeBuilder
+
+val x: int
 
 /// Contains helpers to specify code that can be run as part of the build graph.
 [<AbstractClass; Sealed>]
