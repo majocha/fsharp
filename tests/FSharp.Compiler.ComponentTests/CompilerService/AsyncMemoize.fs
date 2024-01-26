@@ -107,7 +107,7 @@ let ``We can cancel a job`` () =
         cts1.Cancel()
         cts2.Cancel()
 
-        waitFor jobStarted
+        //waitFor jobStarted
 
         cts3.Cancel()
 

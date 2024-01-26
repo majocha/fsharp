@@ -27,6 +27,19 @@ open OpenTelemetry.Trace
 
 #nowarn "57"
 
+open TypeChecks.TestUtils
+
+let internal recordEvents(forCache: FSharpChecker -> AsyncMemoize<_, _, _>) =
+        let cacheEvents = ConcurrentQueue()
+        let subscribe checker = (forCache checker).OnEvent cacheEvents.Enqueue
+        let assertEvents fileName (expected: JobEvent seq) =
+            Assert.Equal<JobEvent seq>(
+                expected, 
+                cacheEvents |> Seq.choose 
+                    (function (e, (_l, (f: string, _p), _)) when Path.GetFileName f = fileName -> Some e | _ -> None)
+            )
+        subscribe, assertEvents
+
 [<Fact>]
 let ``Use Transparent Compiler`` () =
 
@@ -219,49 +232,30 @@ let ``Changes in a referenced project`` () =
 [<Fact>]
 let ``File is not checked twice`` () =
 
-    let cacheEvents = ConcurrentQueue()
+    let subscribe, assertEvents = recordEvents _.Caches.TcIntermediate
 
     testWorkflow() {
-        withChecker (fun checker ->
-            async {
-                do! Async.Sleep 50 // wait for events from initial project check
-                checker.Caches.TcIntermediate.OnEvent cacheEvents.Enqueue
-            })
+        withChecker subscribe
         updateFile "First" updatePublicSurface
         checkFile "Third" expectOk
     } |> ignore
 
-    let intermediateTypeChecks =
-        cacheEvents
-        |> Seq.groupBy (fun (_e, (_l, (f, _p), _)) -> f |> Path.GetFileName)
-        |> Seq.map (fun (k, g) -> k, g |> Seq.map fst |> Seq.toList)
-        |> Map
-
-    Assert.Equal<JobEvent list>([Weakened; Requested; Started; Finished], intermediateTypeChecks["FileFirst.fs"])
-    Assert.Equal<JobEvent list>([Weakened; Requested; Started; Finished], intermediateTypeChecks["FileThird.fs"])
+    assertEvents "FileFirst.fs" [Requested; Started; Weakened; Finished]
+    assertEvents "FileThird.fs" [Requested; Started; Weakened; Finished]
 
 [<Fact>]
 let ``If a file is checked as a dependency it's not re-checked later`` () =
-    let cacheEvents = ConcurrentQueue()
+
+    let subscribe, assertEvents = recordEvents _.Caches.TcIntermediate
 
     testWorkflow() {
-        withChecker (fun checker ->
-            async {
-                do! Async.Sleep 50 // wait for events from initial project check
-                checker.Caches.TcIntermediate.OnEvent cacheEvents.Enqueue
-            })
+        withChecker subscribe
         updateFile "First" updatePublicSurface
         checkFile "Last" expectOk
         checkFile "Third" expectOk
     } |> ignore
 
-    let intermediateTypeChecks =
-        cacheEvents
-        |> Seq.groupBy (fun (_e, (_l, (f, _p), _)) -> f |> Path.GetFileName)
-        |> Seq.map (fun (k, g) -> k, g |> Seq.map fst |> Seq.toList)
-        |> Map
-
-    Assert.Equal<JobEvent list>([Weakened; Requested; Started; Finished; Requested], intermediateTypeChecks["FileThird.fs"])
+    assertEvents "FileThird.fs" [Requested; Started; Weakened; Finished; Requested]
 
 
 // [<Fact>] TODO: differentiate complete and minimal checking requests
@@ -272,27 +266,17 @@ let ``We don't check files that are not depended on`` () =
         sourceFile "Third" ["First"],
         sourceFile "Last" ["Third"])
 
-    let cacheEvents = ConcurrentQueue()
-
+    let subscribe, assertEvents = recordEvents _.Caches.TcIntermediate
+               
     ProjectWorkflowBuilder(project, useTransparentCompiler = true) {
-        withChecker (fun checker ->
-            async {
-                do! Async.Sleep 50 // wait for events from initial project check
-                checker.Caches.TcIntermediate.OnEvent cacheEvents.Enqueue
-            })
+        withChecker subscribe
         updateFile "First" updatePublicSurface
         checkFile "Last" expectOk
     } |> ignore
 
-    let intermediateTypeChecks =
-        cacheEvents
-        |> Seq.groupBy (fun (_e, (_l, (f, _p), _)) -> Path.GetFileName f)
-        |> Seq.map (fun (k, g) -> k, g |> Seq.map fst |> Seq.toList)
-        |> Map
-
-    Assert.Equal<JobEvent list>([Started; Finished], intermediateTypeChecks["FileFirst.fs"])
-    Assert.Equal<JobEvent list>([Started; Finished], intermediateTypeChecks["FileThird.fs"])
-    Assert.False (intermediateTypeChecks.ContainsKey "FileSecond.fs")
+    assertEvents "FileFirst.fs" [Started; Finished]
+    assertEvents "FileThird.fs" [Started; Finished]
+    assertEvents "FileSecond.fs" []
 
 // [<Fact>] TODO: differentiate complete and minimal checking requests
 let ``Files that are not depended on don't invalidate cache`` () =
