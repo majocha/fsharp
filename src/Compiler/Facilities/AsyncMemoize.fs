@@ -28,9 +28,7 @@ module internal Utils =
 
         $"{dir}{Path.GetFileName path}"
 
-    let replayDiagnostics (logger: DiagnosticsLogger) =
-        failwith "replayDiagnostics"
-        Seq.iter ((<|) logger.DiagnosticSink)
+    let replayDiagnostics (logger: DiagnosticsLogger) = Seq.iter ((<|) logger.DiagnosticSink)
 
     let (|TaskCancelled|_|) (ex: exn) =
         match ex with
@@ -278,15 +276,10 @@ type internal AsyncMemoize<'TKey, 'TVersion, 'TValue when 'TKey: equality and 'T
                                 ()
 
                              else
-                                //// We need to restart the computation
-
-                                                // fake it for now
-                                                log (Restarted, key)
-                                                Interlocked.Increment &restarted |> ignore
-                                                System.Diagnostics.Trace.TraceInformation $"{name} Restarted {key.Label}"
-
-
-
+                                //fake it
+                                log (Restarted, key)
+                                Interlocked.Increment &restarted |> ignore
+                                System.Diagnostics.Trace.TraceInformation $"{name} Restarted {key.Label}"
 
                         | CancelRequest, Some(Running(_, cts, _)) ->
 
@@ -366,6 +359,7 @@ type internal AsyncMemoize<'TKey, 'TVersion, 'TValue when 'TKey: equality and 'T
 
         lock.Do(fun () ->
             task {
+                log (Requested, key)
 
                 let cached, otherVersions = cache.GetAll(key.Key, key.Version)
 
@@ -402,7 +396,8 @@ type internal AsyncMemoize<'TKey, 'TVersion, 'TValue when 'TKey: equality and 'T
                         
                         let cts = new CancellationTokenSource()
 
-                        let job = task {
+                        let job =
+                            backgroundTask {
                                 log (Started, key)
 
                                 let logger = CachingDiagnosticsLogger None
@@ -440,8 +435,6 @@ type internal AsyncMemoize<'TKey, 'TVersion, 'TValue when 'TKey: equality and 'T
                                 cts.Cancel())
 
                         New job
-
-                log (Requested, key)
                 return result
             })
 
@@ -472,8 +465,7 @@ type internal AsyncMemoize<'TKey, 'TVersion, 'TValue when 'TKey: equality and 'T
             let callerDiagnosticLogger = DiagnosticsThreadStatics.DiagnosticsLogger
 
             match!
-                processRequest (key, GetOrCompute(computation, ct))
-                |> NodeCode.AwaitTask
+                processRequest (key, GetOrCompute(computation, ct)) |> NodeCode.AwaitTask
             with
             | New job
             | Existing job ->
