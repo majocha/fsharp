@@ -279,7 +279,27 @@ type internal AsyncMemoize<'TKey, 'TVersion, 'TValue when 'TKey: equality and 'T
                             post (key, OriginatorCanceled))
                         |> saveRegistration key
 
+                        
                         let cts = new CancellationTokenSource()
+
+                        let job = task {
+                                log (Started, key)
+
+                                let logger = CachingDiagnosticsLogger None
+                                use _ = UseDiagnosticsLogger logger
+
+                                try
+                                    let! result = Async.StartImmediateAsTask(computation |> Async.AwaitNodeCode, cts.Token)
+                                    return JobCompleted(result, logger.CapturedDiagnostics)
+                                with
+                                | :? OperationCanceledException -> return CancelRequest
+                                | exn -> return JobFailed(exn, logger.CapturedDiagnostics)
+                        }
+
+                        let _postResult = task {
+                            let! stateUpdate = job
+                            post(key, stateUpdate)
+                        }
 
                         cache.Set(
                             key.Key,
@@ -485,20 +505,7 @@ type internal AsyncMemoize<'TKey, 'TVersion, 'TValue when 'TKey: equality and 'T
                 try
                     return!
                         Async.StartAsTask(
-                            async {
-                                // TODO: Should unify starting and restarting
-                                let currentLogger = DiagnosticsThreadStatics.DiagnosticsLogger
-                                DiagnosticsThreadStatics.DiagnosticsLogger <- cachingLogger
 
-                                log (Started, key)
-
-                                try
-                                    let! result = computation |> Async.AwaitNodeCode
-                                    post (key, (JobCompleted(result, cachingLogger.CapturedDiagnostics)))
-                                    return result
-                                finally
-                                    DiagnosticsThreadStatics.DiagnosticsLogger <- currentLogger
-                            },
                             cancellationToken = linkedCtSource.Token
                         )
                         |> NodeCode.AwaitTask
