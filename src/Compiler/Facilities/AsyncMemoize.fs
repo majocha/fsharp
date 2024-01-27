@@ -277,38 +277,16 @@ type internal AsyncMemoize<'TKey, 'TVersion, 'TValue when 'TKey: equality and 'T
                                 use _ = Activity.start $"{name}: Canceled job" [| "key", key.Label |]
                                 ()
 
-                            // else
+                             else
                                 //// We need to restart the computation
-                                //Task.Run(fun () ->
-                                //    Async.StartAsTask(
-                                //        async {
 
-                                //            let cachingLogger = new CachingDiagnosticsLogger(None)
+                                                // fake it for now
+                                                log (Restarted, key)
+                                                Interlocked.Increment &restarted |> ignore
+                                                System.Diagnostics.Trace.TraceInformation $"{name} Restarted {key.Label}"
 
-                                //            try
-                                //                // TODO: Should unify starting and restarting
-                                //                log (Restarted, key)
-                                //                Interlocked.Increment &restarted |> ignore
-                                //                System.Diagnostics.Trace.TraceInformation $"{name} Restarted {key.Label}"
-                                //                let currentLogger = DiagnosticsThreadStatics.DiagnosticsLogger
-                                //                DiagnosticsThreadStatics.DiagnosticsLogger <- cachingLogger
 
-                                //                try
-                                //                    let! result = computation |> Async.AwaitNodeCode
-                                //                    post (key, (JobCompleted(result, cachingLogger.CapturedDiagnostics)))
-                                //                    return ()
-                                //                finally
-                                //                    DiagnosticsThreadStatics.DiagnosticsLogger <- currentLogger
-                                //            with
-                                //            | TaskCancelled _ ->
-                                //                Interlocked.Increment &cancel_exception_subsequent |> ignore
-                                //                post (key, CancelRequest)
-                                //                ()
-                                //            | ex -> post (key, (JobFailed(ex, cachingLogger.CapturedDiagnostics)))
-                                //        }
-                                //    ),
-                                //    cts.Token)
-                                //|> ignore
+
 
                         | CancelRequest, Some(Running(_, cts, _)) ->
 
