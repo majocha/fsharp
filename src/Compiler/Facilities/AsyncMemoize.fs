@@ -56,14 +56,14 @@ type internal MemoizeRequest<'TValue> = GetOrCompute of NodeCode<'TValue> * Canc
 
 [<DebuggerDisplay("{DebuggerDisplay}")>]
 type internal Job<'TValue> =
-    | Running of Task<StateUpdate<'TValue>> * CancellationTokenSource * NodeCode<'TValue> * DateTime * ResizeArray<DiagnosticsLogger>
+    | Running of Task<StateUpdate<'TValue>> * CancellationTokenSource * NodeCode<'TValue> * DateTime
     | Completed of StateUpdate<'TValue> * (PhasedDiagnostic * FSharpDiagnosticSeverity) list
     | Canceled of DateTime
     | Failed of DateTime * exn // TODO: probably we don't need to keep this
 
     member this.DebuggerDisplay =
         match this with
-        | Running(_, cts, _, ts, _) ->
+        | Running(_, cts, _, ts) ->
             let cancellation =
                 if cts.IsCancellationRequested then
                     " ! Cancellation Requested"
@@ -242,7 +242,7 @@ type internal AsyncMemoize<'TKey, 'TVersion, 'TValue when 'TKey: equality and 'T
 
     let lock = new AsyncLock()
 
-    let processRequest post (key: KeyData<_, _>, msg) diagnosticLogger =
+    let processRequest post (key: KeyData<_, _>, msg) =
 
         lock.Do(fun () ->
             task {
@@ -253,10 +253,9 @@ type internal AsyncMemoize<'TKey, 'TVersion, 'TValue when 'TKey: equality and 'T
                     match msg, cached with
                     | GetOrCompute _, Some(Completed(result, diags)) ->
                         Interlocked.Increment &hits |> ignore
-                        diags |> replayDiagnostics diagnosticLogger
                         Existing(Task.FromResult result)
 
-                    | GetOrCompute(_, ct), Some(Running(job, _, _, _, loggers)) ->
+                    | GetOrCompute(_, ct), Some(Running(job, _, _, _)) ->
                         Interlocked.Increment &hits |> ignore
                         incrRequestCount key
 
@@ -265,8 +264,6 @@ type internal AsyncMemoize<'TKey, 'TVersion, 'TValue when 'TKey: equality and 'T
                             Interlocked.Increment &cancel_ct_registration_subsequent |> ignore
                             post (key, CancelRequest))
                         |> saveRegistration key
-
-                        loggers.Add diagnosticLogger
 
                         Existing job
 
@@ -288,12 +285,12 @@ type internal AsyncMemoize<'TKey, 'TVersion, 'TValue when 'TKey: equality and 'T
                             key.Key,
                             key.Version,
                             key.Label,
-                            (Running(job, cts, computation, DateTime.Now, ResizeArray()))
+                            (Running(job, cts, computation, DateTime.Now))
                         )
 
                         otherVersions
                         |> Seq.choose (function
-                            | v, Running(_tcs, cts, _, _, _) -> Some(v, cts)
+                            | v, Running(_tcs, cts, _, _) -> Some(v, cts)
                             | _ -> None)
                         |> Seq.iter (fun (_v, cts) ->
                             use _ = Activity.start $"{name}: Duplicate running job" [| "key", key.Label |]
@@ -326,7 +323,7 @@ type internal AsyncMemoize<'TKey, 'TVersion, 'TValue when 'TKey: equality and 'T
 
                         match action, cached with
 
-                        | OriginatorCanceled, Some(Running(tcs, cts, computation, _, _)) ->
+                        | OriginatorCanceled, Some(Running(tcs, cts, computation, _)) ->
 
                             Interlocked.Increment &cancel_original_processed |> ignore
 
@@ -376,7 +373,7 @@ type internal AsyncMemoize<'TKey, 'TVersion, 'TValue when 'TKey: equality and 'T
                                     cts.Token)
                                 |> ignore
 
-                        | CancelRequest, Some(Running(tcs, cts, _c, _, _)) ->
+                        | CancelRequest, Some(Running(tcs, cts, _c, _)) ->
 
                             Interlocked.Increment &cancel_subsequent_processed |> ignore
 
@@ -403,7 +400,7 @@ type internal AsyncMemoize<'TKey, 'TVersion, 'TValue when 'TKey: equality and 'T
                         | OriginatorCanceled, Some(Job.Canceled _)
                         | OriginatorCanceled, Some(Job.Failed _) -> ()
 
-                        | JobFailed(ex, diags), Some(Running(tcs, _cts, _c, _ts, loggers)) ->
+                        | JobFailed(ex, diags), Some(Running(tcs, _cts, _c, _ts)) ->
                             cancelRegistration key
                             cache.Set(key.Key, key.Version, key.Label, Job.Failed(DateTime.Now, ex))
                             requestCounts.Remove key |> ignore
@@ -411,12 +408,7 @@ type internal AsyncMemoize<'TKey, 'TVersion, 'TValue when 'TKey: equality and 'T
                             Interlocked.Increment &failed |> ignore
                             failures.Add(key.Label, ex)
 
-                            for logger in loggers do
-                                diags |> replayDiagnostics logger
-
-                            tcs.TrySetException ex |> ignore
-
-                        | JobCompleted(result, diags), Some(Running(tcs, _cts, _c, started, loggers)) ->
+                        | JobCompleted(result, diags), Some(Running(tcs, _cts, _c, started)) ->
                             cancelRegistration key
                             cache.Set(key.Key, key.Version, key.Label, (Completed(result, diags)))
                             requestCounts.Remove key |> ignore
@@ -429,9 +421,6 @@ type internal AsyncMemoize<'TKey, 'TVersion, 'TValue when 'TKey: equality and 'T
                                     duration
                                 else
                                     avgDurationMs + (duration - avgDurationMs) / float completed
-
-                            for logger in loggers do
-                                diags |> replayDiagnostics logger
 
                         // Sometimes job can be canceled but it still manages to complete (or fail)
                         | JobFailed _, Some(Job.Canceled _)
@@ -485,7 +474,7 @@ type internal AsyncMemoize<'TKey, 'TVersion, 'TValue when 'TKey: equality and 'T
             let callerDiagnosticLogger = DiagnosticsThreadStatics.DiagnosticsLogger
 
             match!
-                processRequest post (key, GetOrCompute(computation, ct)) callerDiagnosticLogger
+                processRequest post (key, GetOrCompute(computation, ct))
                 |> NodeCode.AwaitTask
             with
             | New internalCt ->
