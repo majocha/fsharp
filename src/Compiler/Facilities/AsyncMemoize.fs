@@ -28,7 +28,9 @@ module internal Utils =
 
         $"{dir}{Path.GetFileName path}"
 
-    let replayDiagnostics (logger: DiagnosticsLogger) = Seq.iter ((<|) logger.DiagnosticSink)
+    let replayDiagnostics (logger: DiagnosticsLogger) =
+        failwith "replayDiagnostics"
+        Seq.iter ((<|) logger.DiagnosticSink)
 
     let (|TaskCancelled|_|) (ex: exn) =
         match ex with
@@ -54,8 +56,8 @@ type internal MemoizeRequest<'TValue> = GetOrCompute of NodeCode<'TValue> * Canc
 
 [<DebuggerDisplay("{DebuggerDisplay}")>]
 type internal Job<'TValue> =
-    | Running of TaskCompletionSource<'TValue> * CancellationTokenSource * NodeCode<'TValue> * DateTime * ResizeArray<DiagnosticsLogger>
-    | Completed of 'TValue * (PhasedDiagnostic * FSharpDiagnosticSeverity) list
+    | Running of Task<StateUpdate<'TValue>> * CancellationTokenSource * NodeCode<'TValue> * DateTime * ResizeArray<DiagnosticsLogger>
+    | Completed of StateUpdate<'TValue> * (PhasedDiagnostic * FSharpDiagnosticSeverity) list
     | Canceled of DateTime
     | Failed of DateTime * exn // TODO: probably we don't need to keep this
 
@@ -253,7 +255,8 @@ type internal AsyncMemoize<'TKey, 'TVersion, 'TValue when 'TKey: equality and 'T
                         Interlocked.Increment &hits |> ignore
                         diags |> replayDiagnostics diagnosticLogger
                         Existing(Task.FromResult result)
-                    | GetOrCompute(_, ct), Some(Running(tcs, _, _, _, loggers)) ->
+
+                    | GetOrCompute(_, ct), Some(Running(job, _, _, _, loggers)) ->
                         Interlocked.Increment &hits |> ignore
                         incrRequestCount key
 
@@ -265,7 +268,7 @@ type internal AsyncMemoize<'TKey, 'TVersion, 'TValue when 'TKey: equality and 'T
 
                         loggers.Add diagnosticLogger
 
-                        Existing tcs.Task
+                        Existing job
 
                     | GetOrCompute(computation, ct), None
                     | GetOrCompute(computation, ct), Some(Job.Canceled _)
@@ -285,7 +288,7 @@ type internal AsyncMemoize<'TKey, 'TVersion, 'TValue when 'TKey: equality and 'T
                             key.Key,
                             key.Version,
                             key.Label,
-                            (Running(TaskCompletionSource(), cts, computation, DateTime.Now, ResizeArray()))
+                            (Running(job, cts, computation, DateTime.Now, ResizeArray()))
                         )
 
                         otherVersions
@@ -332,7 +335,6 @@ type internal AsyncMemoize<'TKey, 'TVersion, 'TValue when 'TKey: equality and 'T
                             if requestCounts[key] < 1 then
                                 cancelRegistration key
                                 cts.Cancel()
-                                tcs.TrySetCanceled() |> ignore
                                 // Remember the job in case it completes after cancellation
                                 cache.Set(key.Key, key.Version, key.Label, Job.Canceled DateTime.Now)
                                 requestCounts.Remove key |> ignore
@@ -383,7 +385,6 @@ type internal AsyncMemoize<'TKey, 'TVersion, 'TValue when 'TKey: equality and 'T
                             if requestCounts[key] < 1 then
                                 cancelRegistration key
                                 cts.Cancel()
-                                tcs.TrySetCanceled() |> ignore
                                 // Remember the job in case it completes after cancellation
                                 cache.Set(key.Key, key.Version, key.Label, Job.Canceled DateTime.Now)
                                 requestCounts.Remove key |> ignore
@@ -431,9 +432,6 @@ type internal AsyncMemoize<'TKey, 'TVersion, 'TValue when 'TKey: equality and 'T
 
                             for logger in loggers do
                                 diags |> replayDiagnostics logger
-
-                            if tcs.TrySetResult result = false then
-                                internalError key.Label "Invalid state: Completed job already completed"
 
                         // Sometimes job can be canceled but it still manages to complete (or fail)
                         | JobFailed _, Some(Job.Canceled _)
