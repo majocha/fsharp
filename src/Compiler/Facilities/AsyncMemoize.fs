@@ -240,13 +240,97 @@ type internal AsyncMemoize<'TKey, 'TVersion, 'TValue when 'TKey: equality and 'T
 
     let lock = new AsyncLock()
 
-    let internalError key message =
+    let rec processRequest (key: KeyData<_, _>, msg: MemoizeRequest<'TValue>) =
+
+        lock.Do(fun () ->
+            task {
+                log (Requested, key)
+
+                let cached, otherVersions = cache.GetAll(key.Key, key.Version)
+
+                let result =
+                    match msg, cached with
+                    | GetOrCompute _, Some(Completed(result, _)) ->
+                        Interlocked.Increment &hits |> ignore
+                        Existing(Task.FromResult result)
+
+                    | GetOrCompute(_, ct), Some(Running(job, _, _)) ->
+                        Interlocked.Increment &hits |> ignore
+                        incrRequestCount key
+
+                        ct.Register(fun _ ->
+                            let _name = name
+                            Interlocked.Increment &cancel_ct_registration_subsequent |> ignore
+                            post (key, CancelRequest))
+                        |> saveRegistration key
+
+                        Existing job
+
+                    | GetOrCompute(computation, ct), None
+                    | GetOrCompute(computation, ct), Some(Job.Canceled _)
+                    | GetOrCompute(computation, ct), Some(Job.Failed _) ->
+                        Interlocked.Increment &started |> ignore
+                        incrRequestCount key
+
+                        ct.Register(fun _ ->
+                            let _name = name
+                            Interlocked.Increment &cancel_ct_registration_original |> ignore
+                            post (key, OriginatorCanceled))
+                        |> saveRegistration key
+
+                        
+                        let cts = new CancellationTokenSource()
+
+                        let job =
+                            backgroundTask {
+                                log (Started, key)
+
+                                let logger = CachingDiagnosticsLogger None
+                                use _ = UseDiagnosticsLogger logger
+
+                                try
+                                    let! result = Async.StartImmediateAsTask(computation |> Async.AwaitNodeCode, cts.Token)
+                                    return JobCompleted(result, logger.CapturedDiagnostics)
+                                with
+                                | :? OperationCanceledException -> return CancelRequest
+                                | exn -> return JobFailed(exn, logger.CapturedDiagnostics)
+                        }
+
+                        let _postResult = task {
+                            let! stateUpdate = job
+                            post(key, stateUpdate)
+                        }
+
+                        cache.Set(
+                            key.Key,
+                            key.Version,
+                            key.Label,
+                            (Running(job, cts, DateTime.Now))
+                        )
+
+                        otherVersions
+                        |> Seq.choose (function
+                            | v, Running(_, cts, _) -> Some(v, cts)
+                            | _ -> None)
+                        |> Seq.iter (fun (_v, cts) ->
+                            use _ = Activity.start $"{name}: Duplicate running job" [| "key", key.Label |]
+                            //System.Diagnostics.Trace.TraceWarning($"{name} Duplicate {key.Label}")
+                            if cancelDuplicateRunningJobs then
+                                //System.Diagnostics.Trace.TraceWarning("Canceling")
+                                cts.Cancel())
+
+                        New job
+                return result
+            })
+
+
+    and internalError key message =
         let ex = exn (message)
         failures.Add(key, ex)
         Interlocked.Increment &errors |> ignore
     // raise ex -- Suppose there's no need to raise here - where does it even go?
 
-    let processStateUpdate (key: KeyData<_, _>, action: StateUpdate<'TValue>) =
+    and processStateUpdate (key: KeyData<_, _>, action: StateUpdate<'TValue>) =
         task {
             do! Task.Delay 0
 
@@ -353,91 +437,7 @@ type internal AsyncMemoize<'TKey, 'TVersion, 'TValue when 'TKey: equality and 'T
                     })
         }
 
-    let post msg = Task.Run(fun () -> processStateUpdate msg :> Task) |> ignore
-
-    let processRequest (key: KeyData<_, _>, msg: MemoizeRequest<'TValue>) =
-
-        lock.Do(fun () ->
-            task {
-                log (Requested, key)
-
-                let cached, otherVersions = cache.GetAll(key.Key, key.Version)
-
-                let result =
-                    match msg, cached with
-                    | GetOrCompute _, Some(Completed(result, _)) ->
-                        Interlocked.Increment &hits |> ignore
-                        Existing(Task.FromResult result)
-
-                    | GetOrCompute(_, ct), Some(Running(job, _, _)) ->
-                        Interlocked.Increment &hits |> ignore
-                        incrRequestCount key
-
-                        ct.Register(fun _ ->
-                            let _name = name
-                            Interlocked.Increment &cancel_ct_registration_subsequent |> ignore
-                            post (key, CancelRequest))
-                        |> saveRegistration key
-
-                        Existing job
-
-                    | GetOrCompute(computation, ct), None
-                    | GetOrCompute(computation, ct), Some(Job.Canceled _)
-                    | GetOrCompute(computation, ct), Some(Job.Failed _) ->
-                        Interlocked.Increment &started |> ignore
-                        incrRequestCount key
-
-                        ct.Register(fun _ ->
-                            let _name = name
-                            Interlocked.Increment &cancel_ct_registration_original |> ignore
-                            post (key, OriginatorCanceled))
-                        |> saveRegistration key
-
-                        
-                        let cts = new CancellationTokenSource()
-
-                        let job =
-                            backgroundTask {
-                                log (Started, key)
-
-                                let logger = CachingDiagnosticsLogger None
-                                use _ = UseDiagnosticsLogger logger
-
-                                try
-                                    let! result = Async.StartImmediateAsTask(computation |> Async.AwaitNodeCode, cts.Token)
-                                    return JobCompleted(result, logger.CapturedDiagnostics)
-                                with
-                                | :? OperationCanceledException -> return CancelRequest
-                                | exn -> return JobFailed(exn, logger.CapturedDiagnostics)
-                        }
-
-                        let _postResult = task {
-                            let! stateUpdate = job
-                            post(key, stateUpdate)
-                        }
-
-                        cache.Set(
-                            key.Key,
-                            key.Version,
-                            key.Label,
-                            (Running(job, cts, DateTime.Now))
-                        )
-
-                        otherVersions
-                        |> Seq.choose (function
-                            | v, Running(_, cts, _) -> Some(v, cts)
-                            | _ -> None)
-                        |> Seq.iter (fun (_v, cts) ->
-                            use _ = Activity.start $"{name}: Duplicate running job" [| "key", key.Label |]
-                            //System.Diagnostics.Trace.TraceWarning($"{name} Duplicate {key.Label}")
-                            if cancelDuplicateRunningJobs then
-                                //System.Diagnostics.Trace.TraceWarning("Canceling")
-                                cts.Cancel())
-
-                        New job
-                return result
-            })
-
+    and post msg = Task.Run(fun () -> processStateUpdate msg :> Task) |> ignore
 
     member this.Get'(key, computation) =
 
