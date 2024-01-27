@@ -281,31 +281,31 @@ type internal AsyncMemoize<'TKey, 'TVersion, 'TValue when 'TKey: equality and 'T
                         
                         let cts = new CancellationTokenSource()
 
-                        let job =
-                            backgroundTask {
+                        let job = Async.StartAsTask(
+                            node {
                                 log (Started, key)
 
                                 let logger = CachingDiagnosticsLogger None
                                 use _ = UseDiagnosticsLogger logger
 
                                 try
-                                    let! result = Async.StartImmediateAsTask(computation |> Async.AwaitNodeCode, cts.Token)
+                                    let! result = computation
                                     return JobCompleted(result, logger.CapturedDiagnostics)
                                 with
                                 | :? OperationCanceledException -> return CancelRequest
                                 | exn -> return JobFailed(exn, logger.CapturedDiagnostics)
-                        }
+                            } |> Async.AwaitNodeCode, cancellationToken = cts.Token)
 
-                        let _postResult = task {
+                        let postResult = task {
                             let! stateUpdate = job
-                            post(key, stateUpdate)
+                            return! processStateUpdate(key, stateUpdate)
                         }
 
                         cache.Set(
                             key.Key,
                             key.Version,
                             key.Label,
-                            (Running(job, cts, DateTime.Now))
+                            (Running(postResult, cts, DateTime.Now))
                         )
 
                         otherVersions
@@ -331,10 +331,6 @@ type internal AsyncMemoize<'TKey, 'TVersion, 'TValue when 'TKey: equality and 'T
     // raise ex -- Suppose there's no need to raise here - where does it even go?
 
     and processStateUpdate (key: KeyData<_, _>, action: StateUpdate<'TValue>) =
-        task {
-            do! Task.Delay 0
-
-            do!
                 lock.Do(fun () ->
                     task {
 
@@ -434,10 +430,11 @@ type internal AsyncMemoize<'TKey, 'TVersion, 'TValue when 'TKey: equality and 'T
 
                         | JobCompleted(_result, _diags), Some(Job.Failed(_, ex2)) ->
                             internalError key.Label $"Invalid state: Completed Failed job \n%A{ex2}"
-                    })
-        }
 
-    and post msg = Task.Run(fun () -> processStateUpdate msg :> Task) |> ignore
+                        return action
+                    })
+
+    and post msg = processStateUpdate msg |> ignore
 
     member this.Get'(key, computation) =
 
