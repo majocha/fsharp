@@ -49,8 +49,8 @@ type internal StateUpdate<'TValue> =
     | JobFailed of exn * (PhasedDiagnostic * FSharpDiagnosticSeverity) list
 
 type internal MemoizeReply<'TValue> =
-    | New of CancellationToken
-    | Existing of Task<'TValue>
+    | New of Task<StateUpdate<'TValue>>
+    | Existing of Task<StateUpdate<'TValue>>
 
 type internal MemoizeRequest<'TValue> = GetOrCompute of NodeCode<'TValue> * CancellationToken
 
@@ -310,7 +310,7 @@ type internal AsyncMemoize<'TKey, 'TVersion, 'TValue when 'TKey: equality and 'T
 
                         otherVersions
                         |> Seq.choose (function
-                            | v, Running(_tcs, cts, _, _) -> Some(v, cts)
+                            | v, Running(_, cts, _, _) -> Some(v, cts)
                             | _ -> None)
                         |> Seq.iter (fun (_v, cts) ->
                             use _ = Activity.start $"{name}: Duplicate running job" [| "key", key.Label |]
@@ -319,7 +319,7 @@ type internal AsyncMemoize<'TKey, 'TVersion, 'TValue when 'TKey: equality and 'T
                                 //System.Diagnostics.Trace.TraceWarning("Canceling")
                                 cts.Cancel())
 
-                        New cts.Token
+                        New job
 
                 log (Requested, key)
                 return result
@@ -497,35 +497,17 @@ type internal AsyncMemoize<'TKey, 'TVersion, 'TValue when 'TKey: equality and 'T
                 processRequest post (key, GetOrCompute(computation, ct))
                 |> NodeCode.AwaitTask
             with
-            | New internalCt ->
-
-                let linkedCtSource = CancellationTokenSource.CreateLinkedTokenSource(ct, internalCt)
-                let cachingLogger = new CachingDiagnosticsLogger(Some callerDiagnosticLogger)
-
-                try
-                    return!
-                        Async.StartAsTask(
-
-                            cancellationToken = linkedCtSource.Token
-                        )
-                        |> NodeCode.AwaitTask
-                with
-                | TaskCancelled ex ->
-                    // TODO: do we need to do anything else here? Presumably it should be done by the registration on
-                    // the cancellation token or before we triggered our own cancellation
-
-                    // Let's send this again just in case. It seems sometimes it's not triggered from the registration?
-
-                    Interlocked.Increment &cancel_exception_original |> ignore
-
-                    post (key, (OriginatorCanceled))
-                    return raise ex
-                | ex ->
-                    post (key, (JobFailed(ex, cachingLogger.CapturedDiagnostics)))
-                    return raise ex
-
-            | Existing job -> return! job |> NodeCode.AwaitTask
-
+            | New job
+            | Existing job ->
+                match! job |> NodeCode.AwaitTask with
+                | JobCompleted(result, diags) ->
+                    replayDiagnostics callerDiagnosticLogger diags
+                    return result
+                | JobFailed(exn, diags) ->
+                    replayDiagnostics callerDiagnosticLogger diags
+                    return raise exn
+                | CancelRequest
+                | OriginatorCanceled -> return raise (new OperationCanceledException())
         }
 
     member _.Clear() = cache.Clear()
