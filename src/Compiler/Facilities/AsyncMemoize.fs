@@ -132,7 +132,7 @@ type internal AsyncMemoize<'TKey, 'TVersion, 'TValue when 'TKey: equality and 'T
 
     let name = defaultArg name "N/A"
     let cancelDuplicateRunningJobs = defaultArg cancelDuplicateRunningJobs false
-    let restartJobs = defaultArg startJobsImmediate true
+    let restartJobs = defaultArg startJobsImmediate false
 
     let event = Event<_>()
 
@@ -223,6 +223,8 @@ type internal AsyncMemoize<'TKey, 'TVersion, 'TValue when 'TKey: equality and 'T
 
     let lock = new AsyncLock()
 
+    let maxConcurrencyLock = new SemaphoreSlim(System.Environment.ProcessorCount)
+
     let fromTask (state: Task<StateUpdate<'TValue>>) callerDiagnosticsLogger =
         task {
             match! state with
@@ -280,8 +282,8 @@ type internal AsyncMemoize<'TKey, 'TVersion, 'TValue when 'TKey: equality and 'T
 
                         let job  =
                             node {
-                                use _ = UseDiagnosticsLogger capturingLogger
                                 try
+                                    use _ = UseDiagnosticsLogger capturingLogger
                                     let! result = computation
                                     post(key, JobCompleted(result, capturingLogger))
                                     return ()
@@ -457,12 +459,16 @@ type internal AsyncMemoize<'TKey, 'TVersion, 'TValue when 'TKey: equality and 'T
 
         node {
             let! ct = NodeCode.CancellationToken
-
-            let! response = processRequest (key, GetOrCompute(computation, ct)) |> NodeCode.AwaitTask
             let callerDiagnosticsLogger = DiagnosticsThreadStatics.DiagnosticsLogger
+            let! response = processRequest (key, GetOrCompute(computation, ct)) |> NodeCode.AwaitTask
+
             match response with       
             | New (startJob, onComplete) ->
-                    startJob()
+                    try
+                        do! maxConcurrencyLock.WaitAsync(ct) |> NodeCode.AwaitTask
+                        startJob()
+                    finally
+                        maxConcurrencyLock.Release() |> ignore
                     return! onComplete callerDiagnosticsLogger
                 | Existing onComplete ->
                     return! onComplete callerDiagnosticsLogger
