@@ -133,7 +133,7 @@ type internal AsyncMemoize<'TKey, 'TVersion, 'TValue when 'TKey: equality and 'T
 
     let name = defaultArg name "N/A"
     let cancelDuplicateRunningJobs = defaultArg cancelDuplicateRunningJobs false
-    let restartJobs = defaultArg startJobsImmediate false
+    let restartJobs = defaultArg startJobsImmediate true
 
     let event = Event<_>()
 
