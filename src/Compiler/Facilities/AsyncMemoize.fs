@@ -28,8 +28,6 @@ module internal Utils =
 
         $"{dir}{Path.GetFileName path}"
 
-    let replayDiagnostics (logger: DiagnosticsLogger) = Seq.iter ((<|) logger.DiagnosticSink)
-
     let (|TaskCancelled|_|) (ex: exn) =
         match ex with
         | :? System.Threading.Tasks.TaskCanceledException as tce -> Some tce
@@ -43,19 +41,19 @@ module internal Utils =
 type internal StateUpdate<'TValue> =
     | CancelRequest
     | OriginatorCanceled
-    | JobCompleted of 'TValue * (PhasedDiagnostic * FSharpDiagnosticSeverity) list
-    | JobFailed of exn * (PhasedDiagnostic * FSharpDiagnosticSeverity) list
+    | JobCompleted of 'TValue * CapturingDiagnosticsLogger
+    | JobFailed of exn * CapturingDiagnosticsLogger
 
 type internal MemoizeReply<'TValue> =
-    | New of Task<StateUpdate<'TValue>>
-    | Existing of Task<StateUpdate<'TValue>>
+    | New of (unit -> unit) * (DiagnosticsLogger -> NodeCode<'TValue>) 
+    | Existing of (DiagnosticsLogger -> NodeCode<'TValue>)
 
 type internal MemoizeRequest<'TValue> = GetOrCompute of NodeCode<'TValue> * CancellationToken
 
 [<DebuggerDisplay("{DebuggerDisplay}")>]
 type internal Job<'TValue> =
-    | Running of Task<StateUpdate<'TValue>> * CancellationTokenSource * DateTime
-    | Completed of StateUpdate<'TValue> * (PhasedDiagnostic * FSharpDiagnosticSeverity) list
+    | Running of TaskCompletionSource<StateUpdate<'TValue>> * CancellationTokenSource * DateTime
+    | Completed of StateUpdate<'TValue> * CapturingDiagnosticsLogger
     | Canceled of DateTime
     | Failed of DateTime * exn // TODO: probably we don't need to keep this
 
@@ -69,7 +67,7 @@ type internal Job<'TValue> =
                     ""
 
             $"Running since {ts.ToShortTimeString()}{cancellation}"
-        | Completed(value, diags) -> $"Completed {value}" + (if diags.Length > 0 then $" ({diags.Length})" else "")
+        | Completed(value, logger) -> $"Completed {value}" + (if logger.Diagnostics.Length > 0 then $" ({logger.Diagnostics.Length})" else "")
         | Canceled _ -> "Canceled"
         | Failed(_, ex) -> $"Failed {ex}"
 
@@ -128,28 +126,13 @@ type internal AsyncLock() =
     interface IDisposable with
         member _.Dispose() = semaphore.Dispose()
 
-type internal CachingDiagnosticsLogger(originalLogger: DiagnosticsLogger option) =
-    inherit DiagnosticsLogger($"CachingDiagnosticsLogger")
-
-    let capturedDiagnostics = ResizeArray()
-
-    override _.ErrorCount =
-        originalLogger
-        |> Option.map (fun x -> x.ErrorCount)
-        |> Option.defaultValue capturedDiagnostics.Count
-
-    override _.DiagnosticSink(diagnostic: PhasedDiagnostic, severity: FSharpDiagnosticSeverity) =
-        originalLogger |> Option.iter (fun x -> x.DiagnosticSink(diagnostic, severity))
-        capturedDiagnostics.Add(diagnostic, severity)
-
-    member _.CapturedDiagnostics = capturedDiagnostics |> Seq.toList
-
 [<DebuggerDisplay("{DebuggerDisplay}")>]
 type internal AsyncMemoize<'TKey, 'TVersion, 'TValue when 'TKey: equality and 'TVersion: equality>
-    (?keepStrongly, ?keepWeakly, ?name: string, ?cancelDuplicateRunningJobs: bool) =
+    (?keepStrongly, ?keepWeakly, ?name: string, ?cancelDuplicateRunningJobs: bool, ?restartJobs) =
 
     let name = defaultArg name "N/A"
     let cancelDuplicateRunningJobs = defaultArg cancelDuplicateRunningJobs false
+    let restartJobs = defaultArg restartJobs true
 
     let event = Event<_>()
 
@@ -240,21 +223,33 @@ type internal AsyncMemoize<'TKey, 'TVersion, 'TValue when 'TKey: equality and 'T
 
     let lock = new AsyncLock()
 
+    let fromTask (state: Task<StateUpdate<'TValue>>) callerDiagnosticsLogger =
+        task {
+            match! state with
+            | JobFailed(exn, logger) ->
+                logger.CommitDelayedDiagnostics callerDiagnosticsLogger
+                return raise exn
+            | JobCompleted(result, logger) ->
+                logger.CommitDelayedDiagnostics callerDiagnosticsLogger
+                return result
+            | _ -> return raise (TaskCanceledException())
+        } |> NodeCode.AwaitTask
+
     let rec processRequest (key: KeyData<_, _>, msg: MemoizeRequest<'TValue>) =
 
         lock.Do(fun () ->
             task {
+
                 log (Requested, key)
 
                 let cached, otherVersions = cache.GetAll(key.Key, key.Version)
-
-                let result =
+                return
                     match msg, cached with
                     | GetOrCompute _, Some(Completed(result, _)) ->
                         Interlocked.Increment &hits |> ignore
-                        Existing(Task.FromResult result)
+                        Existing (Task.FromResult result |> fromTask)
 
-                    | GetOrCompute(_, ct), Some(Running(job, _, _)) ->
+                    | GetOrCompute(_, ct), Some(Running(tcs, _, _)) ->
                         Interlocked.Increment &hits |> ignore
                         incrRequestCount key
 
@@ -264,7 +259,7 @@ type internal AsyncMemoize<'TKey, 'TVersion, 'TValue when 'TKey: equality and 'T
                             post (key, CancelRequest))
                         |> saveRegistration key
 
-                        Existing job
+                        Existing (fromTask tcs.Task)
 
                     | GetOrCompute(computation, ct), None
                     | GetOrCompute(computation, ct), Some(Job.Canceled _)
@@ -278,34 +273,38 @@ type internal AsyncMemoize<'TKey, 'TVersion, 'TValue when 'TKey: equality and 'T
                             post (key, OriginatorCanceled))
                         |> saveRegistration key
 
-                        
+                        let capturingLogger = CapturingDiagnosticsLogger key.Label
+
                         let cts = new CancellationTokenSource()
+                        let tcs = TaskCompletionSource()
 
-                        let job = Async.StartAsTask(
+                        let job  =
                             node {
-                                log (Started, key)
-
-                                let logger = CachingDiagnosticsLogger None
-                                use _ = UseDiagnosticsLogger logger
-
+                                use _ = UseDiagnosticsLogger capturingLogger
                                 try
                                     let! result = computation
-                                    return JobCompleted(result, logger.CapturedDiagnostics)
+                                    post(key, JobCompleted(result, capturingLogger))
+                                    return ()
                                 with
-                                | :? OperationCanceledException -> return CancelRequest
-                                | exn -> return JobFailed(exn, logger.CapturedDiagnostics)
-                            } |> Async.AwaitNodeCode, cancellationToken = cts.Token)
+                                | :? TaskCanceledException -> tcs.SetCanceled()
+                                | exn -> post(key, JobFailed(exn, capturingLogger))
+                            }
 
-                        let postResult = task {
-                            let! stateUpdate = job
-                            return! processStateUpdate(key, stateUpdate)
-                        }
+                        let newJob () =
+                            if restartJobs then
+                                Async.StartImmediate(job |> Async.AwaitNodeCode, cancellationToken = cts.Token)
+                            else
+                                Async.Start(job |> Async.AwaitNodeCode, cancellationToken = cts.Token)
+                                
+                        let onComplete = fromTask tcs.Task
+
+                        log (Started, key)
 
                         cache.Set(
                             key.Key,
                             key.Version,
                             key.Label,
-                            (Running(postResult, cts, DateTime.Now))
+                            Running(tcs, cts, DateTime.Now)
                         )
 
                         otherVersions
@@ -319,10 +318,9 @@ type internal AsyncMemoize<'TKey, 'TVersion, 'TValue when 'TKey: equality and 'T
                                 //System.Diagnostics.Trace.TraceWarning("Canceling")
                                 cts.Cancel())
 
-                        New job
-                return result
-            })
+                        New(newJob, onComplete)
 
+            })
 
     and internalError key message =
         let ex = exn (message)
@@ -338,7 +336,7 @@ type internal AsyncMemoize<'TKey, 'TVersion, 'TValue when 'TKey: equality and 'T
 
                         match action, cached with
 
-                        | OriginatorCanceled, Some(Running(_, cts, _)) ->
+                        | OriginatorCanceled, Some(Running(tcs, cts, _)) ->
 
                             Interlocked.Increment &cancel_original_processed |> ignore
 
@@ -347,6 +345,7 @@ type internal AsyncMemoize<'TKey, 'TVersion, 'TValue when 'TKey: equality and 'T
                             if requestCounts[key] < 1 then
                                 cancelRegistration key
                                 cts.Cancel()
+                                tcs.TrySetCanceled() |> ignore
                                 // Remember the job in case it completes after cancellation
                                 cache.Set(key.Key, key.Version, key.Label, Job.Canceled DateTime.Now)
                                 requestCounts.Remove key |> ignore
@@ -354,14 +353,13 @@ type internal AsyncMemoize<'TKey, 'TVersion, 'TValue when 'TKey: equality and 'T
                                 Interlocked.Increment &canceled |> ignore
                                 use _ = Activity.start $"{name}: Canceled job" [| "key", key.Label |]
                                 ()
-
-                             else
+                            else
                                 //fake it
                                 log (Restarted, key)
                                 Interlocked.Increment &restarted |> ignore
                                 System.Diagnostics.Trace.TraceInformation $"{name} Restarted {key.Label}"
 
-                        | CancelRequest, Some(Running(_, cts, _)) ->
+                        | CancelRequest, Some(Running(tcs, cts, _)) ->
 
                             Interlocked.Increment &cancel_subsequent_processed |> ignore
 
@@ -370,6 +368,7 @@ type internal AsyncMemoize<'TKey, 'TVersion, 'TValue when 'TKey: equality and 'T
                             if requestCounts[key] < 1 then
                                 cancelRegistration key
                                 cts.Cancel()
+                                tcs.TrySetCanceled() |> ignore
                                 // Remember the job in case it completes after cancellation
                                 cache.Set(key.Key, key.Version, key.Label, Job.Canceled DateTime.Now)
                                 requestCounts.Remove key |> ignore
@@ -388,7 +387,8 @@ type internal AsyncMemoize<'TKey, 'TVersion, 'TValue when 'TKey: equality and 'T
                         | OriginatorCanceled, Some(Job.Canceled _)
                         | OriginatorCanceled, Some(Job.Failed _) -> ()
 
-                        | JobFailed(ex, _), Some(Running(_, _cts, _ts)) ->
+                        | JobFailed(ex, _) as result, Some(Running(tcs, _cts, _ts)) ->
+                            tcs.SetResult result
                             cancelRegistration key
                             cache.Set(key.Key, key.Version, key.Label, Job.Failed(DateTime.Now, ex))
                             requestCounts.Remove key |> ignore
@@ -396,9 +396,10 @@ type internal AsyncMemoize<'TKey, 'TVersion, 'TValue when 'TKey: equality and 'T
                             Interlocked.Increment &failed |> ignore
                             failures.Add(key.Label, ex)
 
-                        | JobCompleted(_, diags) as stateUpdate, Some(Running(_, _cts, started)) ->
+                        | JobCompleted(_, logger) as result, Some(Running(tcs, _cts, started)) ->
+                            tcs.SetResult result
                             cancelRegistration key
-                            cache.Set(key.Key, key.Version, key.Label, Completed(stateUpdate, diags))
+                            cache.Set(key.Key, key.Version, key.Label, Completed(result, logger))
                             requestCounts.Remove key |> ignore
                             log (Finished, key)
                             Interlocked.Increment &completed |> ignore
@@ -430,8 +431,6 @@ type internal AsyncMemoize<'TKey, 'TVersion, 'TValue when 'TKey: equality and 'T
 
                         | JobCompleted(_result, _diags), Some(Job.Failed(_, ex2)) ->
                             internalError key.Label $"Invalid state: Completed Failed job \n%A{ex2}"
-
-                        return action
                     })
 
     and post msg = processStateUpdate msg |> ignore
@@ -459,22 +458,14 @@ type internal AsyncMemoize<'TKey, 'TVersion, 'TValue when 'TKey: equality and 'T
         node {
             let! ct = NodeCode.CancellationToken
 
-            let callerDiagnosticLogger = DiagnosticsThreadStatics.DiagnosticsLogger
-
-            match!
-                processRequest (key, GetOrCompute(computation, ct)) |> NodeCode.AwaitTask
-            with
-            | New job
-            | Existing job ->
-                match! job |> NodeCode.AwaitTask with
-                | JobCompleted(result, diags) ->
-                    replayDiagnostics callerDiagnosticLogger diags
-                    return result
-                | JobFailed(exn, diags) ->
-                    replayDiagnostics callerDiagnosticLogger diags
-                    return raise exn
-                | CancelRequest
-                | OriginatorCanceled -> return raise (new OperationCanceledException())
+            let! response = processRequest (key, GetOrCompute(computation, ct)) |> NodeCode.AwaitTask
+            let callerDiagnosticsLogger = DiagnosticsThreadStatics.DiagnosticsLogger
+            match response with       
+            | New (startJob, onComplete) ->
+                    startJob()
+                    return! onComplete callerDiagnosticsLogger
+                | Existing onComplete ->
+                    return! onComplete callerDiagnosticsLogger
         }
 
     member _.Clear() = cache.Clear()

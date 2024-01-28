@@ -58,7 +58,7 @@ type internal AsyncMemoize<'TKey, 'TVersion, 'TValue when 'TKey: equality and 'T
     /// <param name="name">Name of the cache - used in tracing messages</param>
     /// <param name="cancelDuplicateRunningJobs">If true, when a job is started, all other jobs with the same key will be canceled.</param>
     new:
-        ?keepStrongly: int * ?keepWeakly: int * ?name: string * ?cancelDuplicateRunningJobs: bool ->
+        ?keepStrongly: int * ?keepWeakly: int * ?name: string * ?cancelDuplicateRunningJobs: bool * ?restartJobs: bool ->
             AsyncMemoize<'TKey, 'TVersion, 'TValue>
 
     member Clear: unit -> unit
