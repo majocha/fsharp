@@ -114,7 +114,8 @@ type internal AsyncLock() =
     member _.Semaphore = semaphore
 
     member _.Do(f) =
-        task {
+        backgroundTask {
+            do! Task.Yield()
             do! semaphore.WaitAsync()
 
             try
@@ -226,7 +227,7 @@ type internal AsyncMemoize<'TKey, 'TVersion, 'TValue when 'TKey: equality and 'T
     let maxConcurrencyLock = new SemaphoreSlim(System.Environment.ProcessorCount)
 
     let fromTask (state: Task<StateUpdate<'TValue>>) callerDiagnosticsLogger =
-        task {
+        backgroundTask {
             match! state with
             | JobFailed(exn, logger) ->
                 logger.CommitDelayedDiagnostics callerDiagnosticsLogger
@@ -240,7 +241,7 @@ type internal AsyncMemoize<'TKey, 'TVersion, 'TValue when 'TKey: equality and 'T
     let rec processRequest (key: KeyData<_, _>, msg: MemoizeRequest<'TValue>) =
 
         lock.Do(fun () ->
-            task {
+            backgroundTask {
 
                 log (Requested, key)
 
@@ -332,7 +333,7 @@ type internal AsyncMemoize<'TKey, 'TVersion, 'TValue when 'TKey: equality and 'T
 
     and processStateUpdate (key: KeyData<_, _>, action: StateUpdate<'TValue>) =
                 lock.Do(fun () ->
-                    task {
+                    backgroundTask {
 
                         let cached = cache.TryGet(key.Key, key.Version)
 
