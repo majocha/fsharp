@@ -57,8 +57,9 @@ type internal AsyncMemoize<'TKey, 'TVersion, 'TValue when 'TKey: equality and 'T
     /// <param name="keepWeakly">Maximum number of weakly held results to keep in the cache</param>
     /// <param name="name">Name of the cache - used in tracing messages</param>
     /// <param name="cancelDuplicateRunningJobs">If true, when a job is started, all other jobs with the same key will be canceled.</param>
+    /// <param name="startJobsImmediate">Attempt to start new jobs in the caller thread.</param>
     new:
-        ?keepStrongly: int * ?keepWeakly: int * ?name: string * ?cancelDuplicateRunningJobs: bool * ?restartJobs: bool ->
+        ?keepStrongly: int * ?keepWeakly: int * ?name: string * ?cancelDuplicateRunningJobs: bool * ?startJobsImmediate: bool ->
             AsyncMemoize<'TKey, 'TVersion, 'TValue>
 
     member Clear: unit -> unit

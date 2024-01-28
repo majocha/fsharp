@@ -128,11 +128,11 @@ type internal AsyncLock() =
 
 [<DebuggerDisplay("{DebuggerDisplay}")>]
 type internal AsyncMemoize<'TKey, 'TVersion, 'TValue when 'TKey: equality and 'TVersion: equality>
-    (?keepStrongly, ?keepWeakly, ?name: string, ?cancelDuplicateRunningJobs: bool, ?restartJobs) =
+    (?keepStrongly, ?keepWeakly, ?name: string, ?cancelDuplicateRunningJobs: bool, ?startJobsImmediate) =
 
     let name = defaultArg name "N/A"
     let cancelDuplicateRunningJobs = defaultArg cancelDuplicateRunningJobs false
-    let restartJobs = defaultArg restartJobs true
+    let restartJobs = defaultArg startJobsImmediate true
 
     let event = Event<_>()
 
