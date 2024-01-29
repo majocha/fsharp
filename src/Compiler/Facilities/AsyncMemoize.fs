@@ -74,7 +74,6 @@ type internal Job<'TValue> =
 type internal JobEvent =
     | Requested
     | Started
-    | Restarted
     | Finished
     | Canceled
     | Evicted
@@ -133,7 +132,7 @@ type internal AsyncMemoize<'TKey, 'TVersion, 'TValue when 'TKey: equality and 'T
 
     let name = defaultArg name "N/A"
     let cancelDuplicateRunningJobs = defaultArg cancelDuplicateRunningJobs false
-    let restartJobs = defaultArg startJobsImmediate true
+    let startJobsImmediate = defaultArg startJobsImmediate true
 
     let event = Event<_>()
 
@@ -287,14 +286,15 @@ type internal AsyncMemoize<'TKey, 'TVersion, 'TValue when 'TKey: equality and 'T
                                     use _ = UseDiagnosticsLogger capturingLogger
                                     let! result = computation
                                     post(key, JobCompleted(result, capturingLogger))
-                                    return ()
                                 with
-                                | :? TaskCanceledException -> tcs.SetCanceled()
+                                | :? TaskCanceledException ->
+                                    //tcs.SetCanceled()
+                                    post(key, CancelRequest)
                                 | exn -> post(key, JobFailed(exn, capturingLogger))
                             }
 
                         let newJob () =
-                            if restartJobs then
+                            if startJobsImmediate then
                                 Async.StartImmediate(job |> Async.AwaitNodeCode, cancellationToken = cts.Token)
                             else
                                 Async.Start(job |> Async.AwaitNodeCode, cancellationToken = cts.Token)
@@ -339,7 +339,7 @@ type internal AsyncMemoize<'TKey, 'TVersion, 'TValue when 'TKey: equality and 'T
 
                         match action, cached with
 
-                        | OriginatorCanceled, Some(Running(tcs, cts, _)) ->
+                        | OriginatorCanceled, Some(Running(tcs, _, _)) ->
 
                             Interlocked.Increment &cancel_original_processed |> ignore
 
@@ -347,8 +347,8 @@ type internal AsyncMemoize<'TKey, 'TVersion, 'TValue when 'TKey: equality and 'T
 
                             if requestCounts[key] < 1 then
                                 cancelRegistration key
-                                cts.Cancel()
-                                tcs.TrySetCanceled() |> ignore
+                                //cts.Cancel()
+                                tcs.TrySetResult action |> ignore
                                 // Remember the job in case it completes after cancellation
                                 cache.Set(key.Key, key.Version, key.Label, Job.Canceled DateTime.Now)
                                 requestCounts.Remove key |> ignore
@@ -356,13 +356,8 @@ type internal AsyncMemoize<'TKey, 'TVersion, 'TValue when 'TKey: equality and 'T
                                 Interlocked.Increment &canceled |> ignore
                                 use _ = Activity.start $"{name}: Canceled job" [| "key", key.Label |]
                                 ()
-                            else
-                                //fake it
-                                log (Restarted, key)
-                                Interlocked.Increment &restarted |> ignore
-                                System.Diagnostics.Trace.TraceInformation $"{name} Restarted {key.Label}"
 
-                        | CancelRequest, Some(Running(tcs, cts, _)) ->
+                        | CancelRequest, Some(Running(tcs, _, _)) ->
 
                             Interlocked.Increment &cancel_subsequent_processed |> ignore
 
@@ -370,8 +365,8 @@ type internal AsyncMemoize<'TKey, 'TVersion, 'TValue when 'TKey: equality and 'T
 
                             if requestCounts[key] < 1 then
                                 cancelRegistration key
-                                cts.Cancel()
-                                tcs.TrySetCanceled() |> ignore
+                                //cts.Cancel()
+                                tcs.TrySetResult action |> ignore
                                 // Remember the job in case it completes after cancellation
                                 cache.Set(key.Key, key.Version, key.Label, Job.Canceled DateTime.Now)
                                 requestCounts.Remove key |> ignore

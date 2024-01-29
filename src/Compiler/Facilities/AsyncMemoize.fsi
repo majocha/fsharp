@@ -14,7 +14,6 @@ module internal Utils =
 type internal JobEvent =
     | Requested
     | Started
-    | Restarted
     | Finished
     | Canceled
     | Evicted

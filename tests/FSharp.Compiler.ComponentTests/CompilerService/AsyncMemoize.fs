@@ -118,7 +118,6 @@ let ``We can cancel a job`` () =
             Started, key
             Requested, key
             Requested, key
-            Restarted, key
             Canceled, key
         |], eventLog |> Seq.toArray )
     }
@@ -174,7 +173,6 @@ let ``Job is restarted if first requestor cancels`` () =
             Started, key
             Requested, key
             Requested, key
-            Restarted, key
             Finished, key ]
 
         Assert.Equal<_ list>(expected, orderedLog)
@@ -233,7 +231,6 @@ let ``Job is restarted if first requestor cancels but keeps running if second re
             Started, key
             Requested, key
             Requested, key
-            Restarted, key
             Finished, key ]
 
         Assert.Equal<_ list>(expected, orderedLog)
