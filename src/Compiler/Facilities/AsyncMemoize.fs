@@ -45,7 +45,7 @@ type internal StateUpdate<'TValue> =
     | JobFailed of exn * CapturingDiagnosticsLogger
 
 type internal MemoizeReply<'TValue> =
-    | New of (unit -> unit) * (DiagnosticsLogger -> NodeCode<'TValue>) 
+    | New of (bool -> unit) * (DiagnosticsLogger -> NodeCode<'TValue>) 
     | Existing of (DiagnosticsLogger -> NodeCode<'TValue>)
 
 type internal MemoizeRequest<'TValue> = GetOrCompute of NodeCode<'TValue> * CancellationToken
@@ -225,7 +225,24 @@ type internal AsyncMemoize<'TKey, 'TVersion, 'TValue when 'TKey: equality and 'T
 
     let maxConcurrencyLock = new SemaphoreSlim(System.Environment.ProcessorCount)
 
-    let fromTask (state: Task<StateUpdate<'TValue>>) callerDiagnosticsLogger =
+    let startNewJob update key computation capturingLogger jobCt startJobsImmediate =
+        let job =
+            node {
+                try
+                    use _ = UseDiagnosticsLogger capturingLogger
+                    let! result = computation
+                    update(key, JobCompleted(result, capturingLogger))
+                with
+                | :? TaskCanceledException ->update(key, CancelRequest)
+                | exn -> update(key, JobFailed(exn, capturingLogger))
+            }
+
+        if startJobsImmediate then
+            Async.StartImmediate(job |> Async.AwaitNodeCode, cancellationToken = jobCt)
+        else
+            Async.Start(job |> Async.AwaitNodeCode, cancellationToken = jobCt)
+
+    let onComplete (state: Task<StateUpdate<'TValue>>) callerDiagnosticsLogger =
         backgroundTask {
             match! state with
             | JobFailed(exn, logger) ->
@@ -249,7 +266,7 @@ type internal AsyncMemoize<'TKey, 'TVersion, 'TValue when 'TKey: equality and 'T
                     match msg, cached with
                     | GetOrCompute _, Some(Completed(result, _)) ->
                         Interlocked.Increment &hits |> ignore
-                        Existing (Task.FromResult result |> fromTask)
+                        Existing (Task.FromResult result |> onComplete)
 
                     | GetOrCompute(_, ct), Some(Running(tcs, _, _)) ->
                         Interlocked.Increment &hits |> ignore
@@ -261,7 +278,7 @@ type internal AsyncMemoize<'TKey, 'TVersion, 'TValue when 'TKey: equality and 'T
                             post (key, CancelRequest))
                         |> saveRegistration key
 
-                        Existing (fromTask tcs.Task)
+                        Existing (onComplete tcs.Task)
 
                     | GetOrCompute(computation, ct), None
                     | GetOrCompute(computation, ct), Some(Job.Canceled _)
@@ -275,31 +292,14 @@ type internal AsyncMemoize<'TKey, 'TVersion, 'TValue when 'TKey: equality and 'T
                             post (key, OriginatorCanceled))
                         |> saveRegistration key
 
-                        let capturingLogger = CapturingDiagnosticsLogger key.Label
-
                         let cts = new CancellationTokenSource()
                         let tcs = TaskCompletionSource()
+                      
+                        let capturingLogger = CapturingDiagnosticsLogger key.Label
+                               
+                        let startNewJob = startNewJob post key computation capturingLogger cts.Token
 
-                        let job  =
-                            node {
-                                try
-                                    use _ = UseDiagnosticsLogger capturingLogger
-                                    let! result = computation
-                                    post(key, JobCompleted(result, capturingLogger))
-                                with
-                                | :? TaskCanceledException ->
-                                    //tcs.SetCanceled()
-                                    post(key, CancelRequest)
-                                | exn -> post(key, JobFailed(exn, capturingLogger))
-                            }
-
-                        let newJob () =
-                            if startJobsImmediate then
-                                Async.StartImmediate(job |> Async.AwaitNodeCode, cancellationToken = cts.Token)
-                            else
-                                Async.Start(job |> Async.AwaitNodeCode, cancellationToken = cts.Token)
-                                
-                        let onComplete = fromTask tcs.Task
+                        let onComplete = onComplete tcs.Task
 
                         log (Started, key)
 
@@ -321,7 +321,7 @@ type internal AsyncMemoize<'TKey, 'TVersion, 'TValue when 'TKey: equality and 'T
                                 //System.Diagnostics.Trace.TraceWarning("Canceling")
                                 cts.Cancel())
 
-                        New(newJob, onComplete)
+                        New(startNewJob, onComplete)
 
             })
 
@@ -462,7 +462,7 @@ type internal AsyncMemoize<'TKey, 'TVersion, 'TValue when 'TKey: equality and 'T
             | New (startJob, onComplete) ->
                     try
                         do! maxConcurrencyLock.WaitAsync(ct) |> NodeCode.AwaitTask
-                        startJob()
+                        startJob startJobsImmediate
                     finally
                         maxConcurrencyLock.Release() |> ignore
                     return! onComplete callerDiagnosticsLogger
