@@ -43,6 +43,16 @@ type Async =
 
             return results.ToArray()
         }
+
+// Poor man's Task.WaitAsync(ct), since we don't have the real thing.
+let taskWaitAsync (attachedTask: Task<'T>) (cancellationToken: CancellationToken) =
+    task { 
+        let detach = TaskCompletionSource<_>()
+        cancellationToken.Register(fun () -> detach.SetCanceled()) |> ignore
+        let! resultAsTask = Task.WhenAny<'T>(attachedTask, detach.Task)
+        return! resultAsTask
+    }
+
 type ComputationState<'T> =
     | Initial of Async<'T>
     | Started of TaskCompletionSource<'T> * (unit -> unit)
@@ -61,44 +71,42 @@ type GraphNode<'T> private (initialState: ComputationState<'T>) =
         let tcs = TaskCompletionSource()
         let cts = new CancellationTokenSource()
 
-        let primeForRestart = fun () ->
-            match state with
-            | Started _ -> cts.Cancel(); state <- Initial computation
-            | _ -> ()
+        let onCancel () =
+            cts.Cancel()
+            state <- Initial computation
 
-        state <- Started(tcs, primeForRestart)
+        state <- Started(tcs, onCancel)
 
         let start () = 
             Async.StartWithContinuations(
                 computation,
-                (fun result -> state <- Completed result; tcs.SetResult result),
-                (fun ex -> withLock primeForRestart; tcs.SetException(ex)),
+                (tcs.SetResult),
+                (tcs.SetException),
                 (fun _ -> tcs.SetCanceled()),
                 cts.Token)
 
-        tcs.Task, start, primeForRestart
-
-    let cancelIfLastRequestCancels onCancel =
-        withLock (fun () -> if requestCount = 1 then onCancel())
+        tcs.Task, start
 
     member _.GetOrComputeValue() =
-        let awaitResult (tcsTask, start, primeForRestart) =
-            start()
-            async {
-                Interlocked.Increment &requestCount |> ignore
-                use! __ = Async.OnCancel (fun () -> cancelIfLastRequestCancels primeForRestart)
-                try
-                    return! tcsTask |> Async.AwaitTask
-                finally
-                    if Interlocked.Decrement &requestCount = 0 then primeForRestart()
-            }
+        let compute, start =
+            withLock( fun () ->
+                match state with
+                | Completed result -> Task.FromResult result, ignore
+                | Initial computation -> startCompute computation
+                | Started (tcs, _) -> tcs.Task, ignore)
 
-        withLock( fun () ->
-            match state with
-            | Completed result -> Task.FromResult result, ignore, ignore
-            | Initial computation -> startCompute computation
-            | Started (tcs, primeForRestart) -> tcs.Task, ignore, primeForRestart)
-        |> awaitResult
+        start()
+        async {
+            Interlocked.Increment &requestCount |> ignore
+            try
+                let! ct = Async.CancellationToken
+                return! taskWaitAsync compute ct |> Async.AwaitTask
+            finally
+                withLock <| fun () ->
+                    match state, Interlocked.Decrement &requestCount with
+                    | Started(_, onCancel), 0 -> onCancel()
+                    | _ -> ()
+        }
 
     new(computation) = GraphNode(Initial computation)
 
