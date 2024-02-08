@@ -5,7 +5,6 @@ module FSharp.Compiler.BuildGraph
 open System
 open System.Threading
 open System.Threading.Tasks
-open System.Globalization
 open Internal.Utilities.Library
 open FSharp.Compiler.DiagnosticsLogger
 
@@ -44,106 +43,71 @@ type Async =
 
             return results.ToArray()
         }
-
-[<RequireQualifiedAccess>]
-module GraphNode =
-
-    // We need to store the culture for the VS thread that is executing now,
-    // so that when the agent in the async lazy object picks up thread from the thread pool we can set the culture
-    let mutable culture = CultureInfo(CultureInfo.CurrentUICulture.Name)
-
-    let SetPreferredUILang (preferredUiLang: string option) =
-        match preferredUiLang with
-        | Some s ->
-            culture <- CultureInfo s
-#if FX_RESHAPED_GLOBALIZATION
-            CultureInfo.CurrentUICulture <- culture
-#else
-            Thread.CurrentThread.CurrentUICulture <- culture
-#endif
-        | None -> ()
+type ComputationState<'T> =
+    | Initial of Async<'T>
+    | Started of TaskCompletionSource<'T> * (unit -> unit)
+    | Completed of 'T
 
 [<Sealed>]
-type GraphNode<'T> private (computation: Async<'T>, cachedResult: ValueOption<'T>, cachedResultNode: Async<'T>) =
+type GraphNode<'T> private (initialState: ComputationState<'T>) =
 
-    let mutable computation = computation
+    // Any locking we do is for very short synchronous state updates.
+    let gate = obj()
+    let withLock f = lock gate f
     let mutable requestCount = 0
+    let mutable state = initialState
 
-    let mutable cachedResult = cachedResult
-    let mutable cachedResultNode: Async<'T> = cachedResultNode
+    let startCompute computation =
+        let tcs = TaskCompletionSource()
+        let cts = new CancellationTokenSource()
 
-    let isCachedResultNodeNotNull () =
-        not (obj.ReferenceEquals(cachedResultNode, null))
+        let primeForRestart = fun () ->
+            match state with
+            | Started _ -> cts.Cancel(); state <- Initial computation
+            | _ -> ()
 
-    let semaphore = new SemaphoreSlim(1, 1)
+        state <- Started(tcs, primeForRestart)
+
+        let start () = 
+            Async.StartWithContinuations(
+                computation,
+                (fun result -> state <- Completed result; tcs.SetResult result),
+                (fun ex -> withLock primeForRestart; tcs.SetException(ex)),
+                (fun _ -> tcs.SetCanceled()),
+                cts.Token)
+
+        tcs.Task, start, primeForRestart
+
+    let cancelIfLastRequestCancels onCancel =
+        withLock (fun () -> if requestCount = 1 then onCancel())
 
     member _.GetOrComputeValue() =
-        // fast path
-        if isCachedResultNodeNotNull () then
-            cachedResultNode
-        else
+        let awaitResult (tcsTask, start, primeForRestart) =
+            start()
             async {
-                Interlocked.Increment(&requestCount) |> ignore
-
+                Interlocked.Increment &requestCount |> ignore
+                use! __ = Async.OnCancel (fun () -> cancelIfLastRequestCancels primeForRestart)
                 try
-                    let! ct = Async.CancellationToken
-
-                    // We must set 'taken' before any implicit cancellation checks
-                    // occur, making sure we are under the protection of the 'try'.
-                    // For example, NodeCode's 'try/finally' (TryFinally) uses async.TryFinally which does
-                    // implicit cancellation checks even before the try is entered, as do the
-                    // de-sugaring of 'do!' and other NodeCode constructs.
-                    let mutable taken = false
-
-                    try
-                        do!
-                            semaphore
-                                .WaitAsync(ct)
-                                .ContinueWith(
-                                    (fun _ -> taken <- true),
-                                    (TaskContinuationOptions.NotOnCanceled
-                                     ||| TaskContinuationOptions.NotOnFaulted
-                                     ||| TaskContinuationOptions.ExecuteSynchronously)
-                                )
-                            |> Async.AwaitTask
-
-                        match cachedResult with
-                        | ValueSome value -> return value
-                        | _ ->
-                            let tcs = TaskCompletionSource<'T>()
-                            let p = computation
-
-                            Async.StartWithContinuations(
-                                async {
-                                    Thread.CurrentThread.CurrentUICulture <- GraphNode.culture
-                                    return! p |> Async.CompilationScope
-                                },
-                                (fun res ->
-                                    cachedResult <- ValueSome res
-                                    cachedResultNode <- async.Return res
-                                    computation <- Unchecked.defaultof<_>
-                                    tcs.SetResult(res)),
-                                (fun ex -> tcs.SetException(ex)),
-                                (fun _ -> tcs.SetCanceled()),
-                                ct
-                            )
-
-                            return! tcs.Task |> Async.AwaitTask
-                    finally
-                        if taken then
-                            semaphore.Release() |> ignore
+                    return! tcsTask |> Async.AwaitTask
                 finally
-                    Interlocked.Decrement(&requestCount) |> ignore
+                    if Interlocked.Decrement &requestCount = 0 then primeForRestart()
             }
 
-    member _.TryPeekValue() = cachedResult
+        withLock( fun () ->
+            match state with
+            | Completed result -> Task.FromResult result, ignore, ignore
+            | Initial computation -> startCompute computation
+            | Started (tcs, primeForRestart) -> tcs.Task, ignore, primeForRestart)
+        |> awaitResult
 
-    member _.HasValue = cachedResult.IsSome
+    new(computation) = GraphNode(Initial computation)
+
+    member _.TryPeekValue() =
+        match state with Completed v -> ValueSome v | _ -> ValueNone
+
+    member _.HasValue =
+        match state with Completed _ -> true | _ -> false
 
     member _.IsComputing = requestCount > 0
 
-    static member FromResult(result: 'T) =
-        let nodeResult = async.Return result
-        GraphNode(nodeResult, ValueSome result, nodeResult)
-
-    new(computation) = GraphNode(computation, ValueNone, Unchecked.defaultof<_>)
+    static member FromResult(result: 'T) = Completed result |> GraphNode

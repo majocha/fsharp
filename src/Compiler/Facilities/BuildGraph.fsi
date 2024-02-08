@@ -26,13 +26,6 @@ type Async =
 
     static member SequentialImmediate: computations: Async<'T> seq -> Async<'T array>
 
-/// Contains helpers related to the build graph
-[<RequireQualifiedAccess>]
-module internal GraphNode =
-
-    /// Allows to specify the language for error messages
-    val SetPreferredUILang: preferredUiLang: string option -> unit
-
 /// Evaluate the computation, allowing asynchronous waits on existing ongoing evaluations of the
 /// same node, and strongly cache the result.
 ///

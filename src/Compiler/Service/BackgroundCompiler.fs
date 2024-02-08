@@ -310,7 +310,7 @@ type internal BackgroundCompiler
                     { new IProjectReference with
                         member x.EvaluateRawContents() =
                             async {
-                                let! ilReaderOpt = delayedReader.TryGetILModuleReader() |> Async.FromCancellableWithScope
+                                let! ilReaderOpt = delayedReader.TryGetILModuleReader()
 
                                 match ilReaderOpt with
                                 | Some ilReader ->
@@ -731,7 +731,6 @@ type internal BackgroundCompiler
                 )
                 |> Async.FromCancellableWithScope
 
-            GraphNode.SetPreferredUILang tcConfig.preferredUiLang
             return (parseResults, checkAnswer, sourceText.GetHashCode() |> int64, tcPrior.ProjectTimeStamp)
         }
 
@@ -911,7 +910,6 @@ type internal BackgroundCompiler
                             options.UseScriptResolutionRules
                         )
 
-                    GraphNode.SetPreferredUILang tcPrior.TcConfig.preferredUiLang
                     let! ct = Async.CancellationToken
 
                     let parseDiagnostics, parseTree, anyErrors =

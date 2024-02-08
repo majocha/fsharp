@@ -57,6 +57,7 @@ open FSharp.Compiler.AbstractIL.ILBinaryReader
 open System.Threading.Tasks
 open System.Runtime.CompilerServices
 open Internal.Utilities.Hashing
+open FSharp.Compiler.BuildGraph
 
 type FSharpUnresolvedReferencesSet = FSharpUnresolvedReferencesSet of UnresolvedAssemblyReference list
 
@@ -65,59 +66,47 @@ type DocumentSource =
     | FileSystem
     | Custom of (string -> Async<ISourceText option>)
 
+exception UnableToGetILModuleReader
+exception UnableToGetILModuleReaderStream
+
 [<Sealed>]
-type DelayedILModuleReader =
-    val private name: string
-    val private gate: obj
-    val mutable private getStream: (CancellationToken -> Stream option)
-    val mutable private result: ILModuleReader
+type DelayedILModuleReader(name, getStream) =
+    let node =
+        async {
+            let! ct = Async.CancellationToken
+            try
+                let streamOpt = getStream ct
 
-    new(name, getStream) =
-        {
-            name = name
-            gate = obj ()
-            getStream = getStream
-            result = Unchecked.defaultof<_>
+                match streamOpt with
+                | Some stream ->
+                    let ilReaderOptions: ILReaderOptions =
+                        {
+                            pdbDirPath = None
+                            reduceMemoryUsage = ReduceMemoryFlag.Yes
+                            metadataOnly = MetadataOnlyFlag.Yes
+                            tryGetMetadataSnapshot = fun _ -> None
+                        }
+
+                    let ilReader = OpenILModuleReaderFromStream name stream ilReaderOptions
+                    return ilReader
+                | _ -> return raise UnableToGetILModuleReaderStream
+            with ex ->
+                Trace.TraceInformation("FCS: Unable to get an ILModuleReader: {0}", ex)
+                return raise UnableToGetILModuleReader
         }
+        |> GraphNode
 
-    member this.OutputFile = this.name
+    member _.OutputFile = name
 
-    member this.TryGetILModuleReader() =
-        // fast path
-        match box this.result with
-        | null ->
-            cancellable {
-                let! ct = Cancellable.token ()
+    member _.TryGetILModuleReader() =
+        async {
+            match! node.GetOrComputeValue() |> Async.Catch with
+            | Choice1Of2 v -> return Some v
+            | _ -> return None
+        }
+            
 
-                return
-                    lock this.gate (fun () ->
-                        // see if we have a result or not after the lock so we do not evaluate the stream more than once
-                        match box this.result with
-                        | null ->
-                            try
-                                let streamOpt = this.getStream ct
 
-                                match streamOpt with
-                                | Some stream ->
-                                    let ilReaderOptions: ILReaderOptions =
-                                        {
-                                            pdbDirPath = None
-                                            reduceMemoryUsage = ReduceMemoryFlag.Yes
-                                            metadataOnly = MetadataOnlyFlag.Yes
-                                            tryGetMetadataSnapshot = fun _ -> None
-                                        }
-
-                                    let ilReader = OpenILModuleReaderFromStream this.name stream ilReaderOptions
-                                    this.result <- ilReader
-                                    this.getStream <- Unchecked.defaultof<_> // clear out the function so we do not hold onto anything
-                                    Some ilReader
-                                | _ -> None
-                            with ex ->
-                                Trace.TraceInformation("FCS: Unable to get an ILModuleReader: {0}", ex)
-                                None
-                        | _ -> Some this.result)
-            }
-        | _ -> cancellable.Return(Some this.result)
 
 [<RequireQualifiedAccess; NoComparison; CustomEquality>]
 type FSharpReferencedProject =

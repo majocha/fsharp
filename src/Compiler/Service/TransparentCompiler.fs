@@ -597,7 +597,7 @@ type internal TransparentCompiler
                     { new IProjectReference with
                         member x.EvaluateRawContents() =
                             async {
-                                let! ilReaderOpt = delayedReader.TryGetILModuleReader() |> Async.FromCancellableWithScope
+                                let! ilReaderOpt = delayedReader.TryGetILModuleReader()
 
                                 match ilReaderOpt with
                                 | Some ilReader ->
