@@ -80,9 +80,9 @@ type GraphNode<'T> private (initialState: ComputationState<'T>) =
         let start () = 
             Async.StartWithContinuations(
                 computation,
-                (tcs.SetResult),
-                (tcs.SetException),
-                (fun _ -> tcs.SetCanceled()),
+                (fun result -> withLock(fun () -> state <- Completed result); tcs.SetResult result),
+                (fun ex-> withLock( fun () -> state <- Initial computation); tcs.SetException ex),
+                (fun _ -> tcs.SetCanceled()), // State will be already set in finally block of GetOrComputeValue.
                 cts.Token)
 
         tcs.Task, start
