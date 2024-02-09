@@ -67,7 +67,6 @@ type DocumentSource =
     | Custom of (string -> Async<ISourceText option>)
 
 exception UnableToGetILModuleReader
-exception UnableToGetILModuleReaderStream
 
 [<Sealed>]
 type DelayedILModuleReader(name, getStream) =
@@ -89,7 +88,7 @@ type DelayedILModuleReader(name, getStream) =
 
                     let ilReader = OpenILModuleReaderFromStream name stream ilReaderOptions
                     return ilReader
-                | _ -> return raise UnableToGetILModuleReaderStream
+                | _ -> return raise UnableToGetILModuleReader
             with ex ->
                 Trace.TraceInformation("FCS: Unable to get an ILModuleReader: {0}", ex)
                 return raise UnableToGetILModuleReader
