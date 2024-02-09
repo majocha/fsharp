@@ -4560,7 +4560,7 @@ type FsiEvaluationSession
 
     do
         match tcConfigB.preferredUiLang with
-        | Some s -> Thread.CurrentThread.CurrentUICulture <- CultureInfo(s)
+        | Some s -> CultureInfo.CurrentUICulture <- CultureInfo(s)
         | None -> ()
 
     do

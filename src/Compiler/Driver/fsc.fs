@@ -272,7 +272,7 @@ let AdjustForScriptCompile (tcConfigB: TcConfigBuilder, commandLineSourceFiles, 
 
 let SetProcessThreadLocals tcConfigB =
     match tcConfigB.preferredUiLang with
-    | Some s -> Thread.CurrentThread.CurrentUICulture <- CultureInfo(s)
+    | Some s -> CultureInfo.CurrentUICulture <- CultureInfo(s)
     | None -> ()
 
     if tcConfigB.utf8output then

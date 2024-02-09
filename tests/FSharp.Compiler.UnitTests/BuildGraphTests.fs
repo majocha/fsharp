@@ -11,6 +11,12 @@ open FSharp.Test.Compiler
 open FSharp.Compiler.BuildGraph
 open FSharp.Compiler.DiagnosticsLogger
 open Internal.Utilities.Library
+open FSharp.Compiler.Tokenization.FSharpTokenTag
+open System.Globalization
+open System.Globalization
+open System.Globalization
+open Xunit
+open System.Globalization
 
 module BuildGraphTests =
     
@@ -222,6 +228,30 @@ module BuildGraphTests =
         Assert.shouldBeTrue graphNode.HasValue
         Assert.shouldBe (ValueSome 1) (graphNode.TryPeekValue())
 
+    [<Fact>]
+    let ``CurrentUICulture will flow across threads in async computation`` () =
+        let work = async {
+            for i in 0 .. 48 do
+                do! Async.SwitchToNewThread()
+
+            return CultureInfo.CurrentUICulture.Name
+        }
+
+        let names = [| "cz"; "pl"; "es"; "jp"; ""; "es" |]
+
+        let current = CultureInfo.CurrentUICulture
+
+        names
+        |> Seq.map (fun n ->
+            async {
+                CultureInfo.CurrentUICulture <- CultureInfo n
+                return! work 
+            })
+        |> Async.Parallel
+        |> Async.RunSynchronously
+        |> Assert.shouldBeEqualWith names "CurrentUICulture changed during async execution" 
+
+        current |> Assert.shouldBeEqualWith CultureInfo.CurrentUICulture "CurrentUICulture changed after async execution"
     
     [<Fact>]
     let internal ``NodeCode preserves DiagnosticsThreadStatics`` () =

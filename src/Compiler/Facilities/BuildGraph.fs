@@ -61,10 +61,8 @@ type ComputationState<'T> =
 [<Sealed>]
 type GraphNode<'T> private (initialState: ComputationState<'T>) =
     let mutable requestCount = 0
-    // Latches to ensure we are running the computation at most once at a time.
     let gate = obj()
     let withLock f = lock gate f
-    // State is mutated only after entering the latch.
     let mutable state = initialState
 
     let startOrContinueCompute() =
@@ -104,7 +102,6 @@ type GraphNode<'T> private (initialState: ComputationState<'T>) =
                     let! ct = Async.CancellationToken
                     return! taskWaitAsync compute ct |> Async.AwaitTask 
                 finally
-                    // The computation didn't complete but no requestor awaits the result.
                     if Interlocked.Decrement &requestCount = 0 then withLock reset
             }
         | _ -> failwith "GraphNode.GetOrComputeValue invalid state: computation not started"
