@@ -53,6 +53,14 @@ let taskWaitAsync (attachedTask: Task<'T>) (cancellationToken: CancellationToken
         return! resultAsTask
     }
 
+let withLock (semaphore: SemaphoreSlim) f = async {
+    do! semaphore.WaitAsync() |> Async.AwaitTask
+    try
+        return! f
+    finally
+        semaphore.Release() |> ignore       
+}
+
 type ComputationState<'T> =
     | Initial of Async<'T>
     | Started of Task<'T> * (unit -> unit)
@@ -61,48 +69,50 @@ type ComputationState<'T> =
 [<Sealed>]
 type GraphNode<'T> private (initialState: ComputationState<'T>) =
     let mutable requestCount = 0
-    let gate = obj()
-    let withLock f = lock gate f
+    let gate = new SemaphoreSlim(1, 1)
     let mutable state = initialState
 
     member _.GetOrComputeValue() =
-        let start, compute = withLock <| fun () ->
-            match state with
-            | Initial computation ->
-                let tcs = TaskCompletionSource<'T>()
-                let cts = new CancellationTokenSource()
-
-                let reset () =
-                    state <- Initial computation
-                    cts.Cancel()
-
-                state <- Started(tcs.Task, reset)
-
-                let start () = 
-                    Async.StartWithContinuations(
-                        computation,
-                        (fun result -> withLock(fun () -> state <- Completed result); tcs.SetResult result),
-                        (tcs.SetException),
-                        (fun _ -> tcs.SetCanceled()),
-                        cts.Token)
-
-                start, tcs.Task
-
-            | Completed result -> ignore, Task.FromResult result
-            | Started (compute, _) -> ignore, compute
-
-        start()
-
         async {
+            let! start, compute =
+                async {
+                    match state with
+                    | Initial computation ->
+                        let tcs = TaskCompletionSource<'T>()
+                        let cts = new CancellationTokenSource()
+
+                        let reset () =
+                            state <- Initial computation
+                            cts.Cancel()
+
+                        state <- Started(tcs.Task, reset)
+
+                        let start () = 
+                            Async.StartWithContinuations(
+                                computation,
+                                (fun result -> async { state <- Completed result } |> withLock gate |> Async.RunSynchronously; tcs.SetResult result),
+                                (tcs.SetException),
+                                (fun _ -> tcs.SetCanceled()),
+                                cts.Token)
+
+                        return start, tcs.Task
+
+                    | Completed result -> return ignore, Task.FromResult result
+                    | Started (compute, _) -> return ignore, compute
+                } |> withLock gate
+
+            start()
+
             Interlocked.Increment &requestCount |> ignore
             try
                 let! ct = Async.CancellationToken
                 return! taskWaitAsync compute ct |> Async.AwaitTask 
             finally
-                withLock <| fun () ->
+                async {
                     match state, Interlocked.Decrement &requestCount with
                     | Started (_, reset), 0 -> reset()
                     | _ -> ()
+                } |> withLock gate |> Async.RunSynchronously
         }
 
     new(computation) = GraphNode(Initial computation)
