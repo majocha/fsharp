@@ -7,6 +7,7 @@ open System.Threading
 open System.Threading.Tasks
 open Internal.Utilities.Library
 open FSharp.Compiler.DiagnosticsLogger
+open System
 
 [<AbstractClass; Sealed>]
 type Async =
@@ -53,76 +54,85 @@ let taskWaitAsync (attachedTask: Task<'T>) (cancellationToken: CancellationToken
         return! resultAsTask
     }
 
-let withLock (semaphore: SemaphoreSlim) f = async {
-    do! semaphore.WaitAsync() |> Async.AwaitTask
-    try
-        return! f
-    finally
-        semaphore.Release() |> ignore       
-}
-
+[<CustomEquality; NoComparison>]
 type ComputationState<'T> =
     | Initial of Async<'T>
-    | Started of Task<'T> * (unit -> unit)
+    | Running of Task<'T> * (ComputationState<'T> -> unit)
     | Completed of 'T
+    override this.Equals(that) = Object.ReferenceEquals(this, that)
+    override this.GetHashCode() = this.GetHashCode()
 
 [<Sealed>]
-type GraphNode<'T> private (initialState: ComputationState<'T>) =
+type GraphNode<'T> private (initialState) =
     let mutable requestCount = 0
-    let gate = new SemaphoreSlim(1, 1)
-    let mutable state = initialState
+    let mutable state: ComputationState<'T> = initialState
+    let tryUpdateState s expected =
+        Interlocked.CompareExchange(&state, s, expected) = expected
 
-    member _.GetOrComputeValue() =
+    let startOnce = new SemaphoreSlim(1, 1)
+
+    let rec startOrContinue() = async {
+        let! ct = Async.CancellationToken
+        let! enter = startOnce.WaitAsync(10_000, ct) |> Async.AwaitTask 
+        if not enter then return failwith "GraphNode: startOnce timeout."
+
+        match state with
+        | Initial computation ->
+            let tcs = TaskCompletionSource<'T>()
+            let cts = new CancellationTokenSource()
+
+            let reset runningState =
+                if 
+                    tryUpdateState (Initial computation) runningState
+                then 
+                    cts.Cancel()
+
+            state <- Running(tcs.Task, reset)
+            let currentState = state
+            
+            startOnce.Release() |> ignore
+
+            Async.StartWithContinuations(
+                computation,
+                (fun result ->
+                    state <- Completed result
+                    tcs.SetResult result),
+                (fun ex -> 
+                    tryUpdateState (Initial computation) currentState |> ignore
+                    tcs.SetException ex),
+                (fun _ -> tcs.SetCanceled()),
+                cts.Token)
+
+            return currentState
+        | state ->
+            startOnce.Release() |> ignore
+            return state
+    }
+
+    member this.GetOrComputeValue() =
         async {
-            let! start, compute =
-                async {
-                    match state with
-                    | Initial computation ->
-                        let tcs = TaskCompletionSource<'T>()
-                        let cts = new CancellationTokenSource()
+            let! state = startOrContinue()
+            match state with
+            | Completed result -> return result
+            | Running(compute, reset) ->
+                Interlocked.Increment &requestCount |> ignore
 
-                        let reset () =
-                            state <- Initial computation
-                            cts.Cancel()
-
-                        state <- Started(tcs.Task, reset)
-
-                        let start () = 
-                            Async.StartWithContinuations(
-                                computation,
-                                (fun result -> async { state <- Completed result } |> withLock gate |> Async.RunSynchronously; tcs.SetResult result),
-                                (tcs.SetException),
-                                (fun _ -> tcs.SetCanceled()),
-                                cts.Token)
-
-                        return start, tcs.Task
-
-                    | Completed result -> return ignore, Task.FromResult result
-                    | Started (compute, _) -> return ignore, compute
-                } |> withLock gate
-
-            start()
-
-            Interlocked.Increment &requestCount |> ignore
-            try
                 let! ct = Async.CancellationToken
-                return! taskWaitAsync compute ct |> Async.AwaitTask 
-            finally
-                async {
-                    match state, Interlocked.Decrement &requestCount with
-                    | Started (_, reset), 0 -> reset()
-                    | _ -> ()
-                } |> withLock gate |> Async.RunSynchronously
+                try 
+                    return! taskWaitAsync compute ct |> Async.AwaitTask              
+                finally
+                    if Interlocked.Decrement &requestCount = 0 then reset state   
+            | _ -> return failwith "invalid state in GraphNode."
         }
 
     new(computation) = GraphNode(Initial computation)
 
     member _.TryPeekValue() =
-        match state with Completed v -> ValueSome v | _ -> ValueNone
+        match state with Completed result -> ValueSome result  | _ -> ValueNone
 
     member _.HasValue =
         match state with Completed _ -> true | _ -> false
 
-    member _.IsComputing = match state with Started _ -> true | _ -> false
+    member _.IsComputing = requestCount > 0
 
     static member FromResult(result: 'T) = Completed result |> GraphNode

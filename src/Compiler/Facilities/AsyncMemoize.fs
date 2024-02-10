@@ -76,68 +76,63 @@ type AsyncLazyCompilerTask<'T>(computation, log) =
     let mutable status = TaskInactive
     let mutable requestCount = 0
 
-    let semaphore = new SemaphoreSlim(1, 1)
+    let enterLatch =
+        let mutable latch = 1
+        fun () -> Interlocked.CompareExchange(&latch, 0, 1) = 1
 
-    // let gate = obj()
-    // let withLock f = lock gate f
     let tcs = TaskCompletionSource<'T>()
     let cts = new CancellationTokenSource()
     let logger = CapturingDiagnosticsLogger("AsyncLazyCompilerTask")
 
-    let startOrContinue () =
+    let start () =
         match status with
         | TaskInactive ->
             status <- TaskRunning DateTime.Now
 
-            fun () ->
-                log Started
-                Async.StartWithContinuations(
-                    async {
-                        use _ = UseDiagnosticsLogger logger
-                        return! computation 
-                    },
-                    (fun result ->
-                        status <- TaskCompleted (result, DateTime.Now)
-                        log Finished
-                        tcs.SetResult result),
-                    (fun ex ->
-                        status <- TaskFailed(DateTime.Now, ex)
-                        log Failed
-                        tcs.SetException ex),
-                    (fun _ ->
-                        log Canceled
-                        tcs.SetCanceled()),
-                    cts.Token)
-        | _ -> ignore
+            log Started
+
+            Async.StartWithContinuations(
+                async {
+                    use _ = UseDiagnosticsLogger logger
+                    return! computation 
+                },
+                (fun result -> 
+                    log Finished
+                    status <- TaskCompleted (result, DateTime.Now)
+                    tcs.SetResult result),
+                (fun ex -> 
+                    log Failed
+                    status <- TaskFailed(DateTime.Now, ex)
+                    tcs.SetException ex),
+                (fun _ ->
+                    log Canceled
+                    status <- TaskCanceled DateTime.Now
+                    tcs.SetCanceled()),
+                cts.Token)
+        | _ -> ()
 
     member _.GetOrComputeValue() =
-        log Requested
-
-        let callerDiagnosticLogger =
-            if DiagnosticsAsyncState.DiagnosticsLogger = UninitializedDiagnosticsLogger then
-                // TODO: Telemetry?
-                DiagnosticsAsyncState.DiagnosticsLogger <- DiscardErrorsLogger
-            DiagnosticsAsyncState.DiagnosticsLogger
-
         async {
-            let! startOrContinue = async { return startOrContinue() } |> withLock semaphore
-            let! ct = Async.CancellationToken
             Interlocked.Increment &requestCount |> ignore
+
+            log Requested
+
+            let callerDiagnosticLogger =
+                if DiagnosticsAsyncState.DiagnosticsLogger = UninitializedDiagnosticsLogger then
+                    // TODO: Telemetry?
+                    DiagnosticsAsyncState.DiagnosticsLogger <- DiscardErrorsLogger
+                DiagnosticsAsyncState.DiagnosticsLogger
+
+            let! ct = Async.CancellationToken
             try
-                startOrContinue()
+                if enterLatch() then start()
                 return! taskWaitAsync tcs.Task ct |> Async.AwaitTask
             finally
-                if not ct.IsCancellationRequested then
+                if not ct.IsCancellationRequested && not tcs.Task.IsCanceled then
                     logger.CommitDelayedDiagnostics callerDiagnosticLogger
 
-                async {
-                    match status, Interlocked.Decrement &requestCount with
-                    | TaskRunning _, 0 when ct.IsCancellationRequested ->
-                        status <- TaskCanceled DateTime.Now
-                        cts.Cancel()
-                    | TaskRunning _, 0 -> failwithf $"Finished with invalid state {tcs.Task.Status}"
-                    | _ -> ()
-                } |> withLock semaphore |> Async.StartImmediate
+                let noMoreRequests = Interlocked.Decrement &requestCount = 0 
+                if noMoreRequests then cts.Cancel()
         } |> Async.CompilationScope
 
     member _.Cancel() = cts.Cancel()
