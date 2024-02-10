@@ -56,6 +56,14 @@ type internal JobEvent =
     | Failed
     | Cleared
 
+let withLock (semaphore: SemaphoreSlim) f = async {
+    do! semaphore.WaitAsync() |> Async.AwaitTask
+    try
+        return! f
+    finally
+        semaphore.Release() |> ignore       
+}
+
 type CompilerTaskStatus<'T> =
     | TaskInactive
     | TaskRunning of DateTime
@@ -67,8 +75,11 @@ type CompilerTaskStatus<'T> =
 type AsyncLazyCompilerTask<'T>(computation, log) =
     let mutable status = TaskInactive
     let mutable requestCount = 0
-    let gate = obj()
-    let withLock f = lock gate f
+
+    let semaphore = new SemaphoreSlim(1, 1)
+
+    // let gate = obj()
+    // let withLock f = lock gate f
     let tcs = TaskCompletionSource<'T>()
     let cts = new CancellationTokenSource()
     let logger = CapturingDiagnosticsLogger("AsyncLazyCompilerTask")
@@ -108,9 +119,8 @@ type AsyncLazyCompilerTask<'T>(computation, log) =
                 DiagnosticsAsyncState.DiagnosticsLogger <- DiscardErrorsLogger
             DiagnosticsAsyncState.DiagnosticsLogger
 
-        let startOrContinue = withLock startOrContinue 
-
         async {
+            let! startOrContinue = async { return startOrContinue() } |> withLock semaphore
             let! ct = Async.CancellationToken
             Interlocked.Increment &requestCount |> ignore
             try
@@ -120,13 +130,14 @@ type AsyncLazyCompilerTask<'T>(computation, log) =
                 if not ct.IsCancellationRequested then
                     logger.CommitDelayedDiagnostics callerDiagnosticLogger
 
-                withLock <| fun () ->
+                async {
                     match status, Interlocked.Decrement &requestCount with
                     | TaskRunning _, 0 when ct.IsCancellationRequested ->
                         status <- TaskCanceled DateTime.Now
                         cts.Cancel()
                     | TaskRunning _, 0 -> failwithf $"Finished with invalid state {tcs.Task.Status}"
                     | _ -> ()
+                } |> withLock semaphore |> Async.StartImmediate
         } |> Async.CompilationScope
 
     member _.Cancel() = cts.Cancel()
@@ -232,8 +243,10 @@ type internal AsyncMemoize<'TKey, 'TVersion, 'TValue when 'TKey: equality and 'T
     let log (keyData: KeyData<_, _>) eventType =
         event.Trigger(eventType, (keyData.Label, keyData.Key, keyData.Version))
 
+    let semaphore = new SemaphoreSlim(1, 1)
+
     let getTask key computation =
-        lock cache <| fun () ->
+        async {
             let cached, otherVersions = cache.GetAll(key.Key, key.Version)
 
             if cancelDuplicateRunningJobs then
@@ -246,9 +259,10 @@ type internal AsyncMemoize<'TKey, 'TVersion, 'TValue when 'TKey: equality and 'T
             | Some (TaskCanceledOrFailed _) ->
                 let newTask = AsyncLazyCompilerTask(computation, log key)
                 cache.Set(key.Key, key.Version, newTask)
-                newTask
+                return newTask
             | Some existingTask ->
-                existingTask
+                return existingTask
+        } |> withLock semaphore
 
     member this.Get'(key, computation) =
 
@@ -270,9 +284,10 @@ type internal AsyncMemoize<'TKey, 'TVersion, 'TValue when 'TKey: equality and 'T
                 Version = key.GetVersion()
             }
 
-        let compilerTask = getTask key computation
-        compilerTask.GetOrComputeValue()
-
+        async {
+            let! compilerTask = getTask key computation
+            return! compilerTask.GetOrComputeValue()
+        }
 
     member _.Clear() = cache.Clear()
 
