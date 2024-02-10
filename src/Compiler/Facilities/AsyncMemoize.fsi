@@ -1,20 +1,17 @@
-namespace Internal.Utilities.Collections
+module Internal.Utilities.Collections.AsyncMemoize
 
 open System.Threading.Tasks
 open FSharp.Compiler.BuildGraph
 
-[<AutoOpen>]
-module internal Utils =
+/// Return file name with one directory above it
+val shortPath: path: string -> string
 
-    /// Return file name with one directory above it
-    val shortPath: path: string -> string
-
-    val (|TaskCancelled|_|): ex: exn -> TaskCanceledException option
+val (|TaskCancelled|_|): ex: exn -> TaskCanceledException option
 
 type internal JobEvent =
     | Requested
     | Started
-    | Restarted
+    //| Restarted
     | Finished
     | Canceled
     | Evicted
@@ -37,13 +34,6 @@ type Extensions =
 
     [<System.Runtime.CompilerServices.Extension>]
     static member internal WithExtraVersion: cacheKey: ICacheKey<'a, 'b> * extraVersion: 'c -> ICacheKey<'a, ('b * 'c)>
-
-type internal AsyncLock =
-    interface System.IDisposable
-
-    new: unit -> AsyncLock
-
-    member Do: f: (unit -> #Task<'b>) -> Task<'b>
 
 /// <summary>
 /// A cache/memoization for computations that makes sure that the same computation wil only be computed once even if it's needed

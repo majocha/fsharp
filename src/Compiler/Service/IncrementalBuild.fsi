@@ -22,7 +22,7 @@ open FSharp.Compiler.TcGlobals
 open FSharp.Compiler.Text
 open FSharp.Compiler.TypedTree
 open FSharp.Compiler.BuildGraph
-open Internal.Utilities.Collections
+open Internal.Utilities.Collections.AsyncMemoize
 
 type internal FrameworkImportsCacheKey =
     | FrameworkImportsCacheKey of

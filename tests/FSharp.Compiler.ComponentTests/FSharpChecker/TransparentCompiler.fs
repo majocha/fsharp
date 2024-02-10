@@ -3,7 +3,7 @@
 open System.Collections.Concurrent
 open System.Diagnostics
 open FSharp.Compiler.CodeAnalysis
-open Internal.Utilities.Collections
+open Internal.Utilities.Collections.AsyncMemoize
 open FSharp.Compiler.CodeAnalysis.TransparentCompiler
 open Internal.Utilities.Library.Extras
 open FSharp.Compiler.GraphChecking.GraphProcessing

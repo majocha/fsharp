@@ -1,6 +1,6 @@
 namespace FSharp.Compiler.CodeAnalysis.TransparentCompiler
 
-open Internal.Utilities.Collections
+open Internal.Utilities.Collections.AsyncMemoize
 
 open FSharp.Compiler.AbstractIL.ILBinaryReader
 open FSharp.Compiler.BuildGraph

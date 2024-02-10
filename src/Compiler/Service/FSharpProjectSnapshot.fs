@@ -11,7 +11,7 @@ open Internal.Utilities.Library.Extras
 open FSharp.Core.Printf
 open FSharp.Compiler.Text
 
-open Internal.Utilities.Collections
+open Internal.Utilities.Collections.AsyncMemoize
 open System.Threading.Tasks
 open Internal.Utilities.Hashing
 open System.Collections.Immutable

@@ -65,46 +65,45 @@ type GraphNode<'T> private (initialState: ComputationState<'T>) =
     let withLock f = lock gate f
     let mutable state = initialState
 
-    let startOrContinueCompute() =
-        match state with
-        | Initial computation ->
-            let tcs = TaskCompletionSource()
-            let cts = new CancellationTokenSource()
+    member _.GetOrComputeValue() =
+        let start, compute = withLock <| fun () ->
+            match state with
+            | Initial computation ->
+                let tcs = TaskCompletionSource<'T>()
+                let cts = new CancellationTokenSource()
 
-            let reset () =
-                match state with
-                | Started _ -> 
+                let reset () =
                     state <- Initial computation
                     cts.Cancel()
-                | _ -> ()
 
-            state <- Started(tcs.Task, reset)
+                state <- Started(tcs.Task, reset)
 
-            fun () -> Async.StartWithContinuations(
-                computation,
-                (fun result -> withLock(fun () -> state <- Completed result); tcs.SetResult result),
-                (tcs.SetException),
-                (fun _ -> tcs.SetCanceled()),
-                cts.Token)
-        | _ -> ignore
+                let start () = 
+                    Async.StartWithContinuations(
+                        computation,
+                        (fun result -> withLock(fun () -> state <- Completed result); tcs.SetResult result),
+                        (tcs.SetException),
+                        (fun _ -> tcs.SetCanceled()),
+                        cts.Token)
 
-    member _.GetOrComputeValue() =
-        let startOrContinue = withLock startOrContinueCompute
+                start, tcs.Task
 
-        startOrContinue()
+            | Completed result -> ignore, Task.FromResult result
+            | Started (compute, _) -> ignore, compute
 
-        match state with
-        | Completed result -> async { return result }
-        | Started (compute, reset) ->
-            async {
-                Interlocked.Increment &requestCount |> ignore
-                try
-                    let! ct = Async.CancellationToken
-                    return! taskWaitAsync compute ct |> Async.AwaitTask 
-                finally
-                    if Interlocked.Decrement &requestCount = 0 then withLock reset
-            }
-        | _ -> failwith "GraphNode.GetOrComputeValue invalid state: computation not started"
+        start()
+
+        async {
+            Interlocked.Increment &requestCount |> ignore
+            try
+                let! ct = Async.CancellationToken
+                return! taskWaitAsync compute ct |> Async.AwaitTask 
+            finally
+                withLock <| fun () ->
+                    match state, Interlocked.Decrement &requestCount with
+                    | Started (_, reset), 0 -> reset()
+                    | _ -> ()
+        }
 
     new(computation) = GraphNode(Initial computation)
 

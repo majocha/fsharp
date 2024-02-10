@@ -6,7 +6,7 @@ open System.Runtime.CompilerServices
 open System.Diagnostics
 open System.IO
 
-open Internal.Utilities.Collections
+open Internal.Utilities.Collections.AsyncMemoize
 open Internal.Utilities.Library
 
 open FSharp.Compiler

@@ -10,6 +10,7 @@ open System.IO
 open System.Threading
 open Internal.Utilities.Library
 open Internal.Utilities.Collections
+open Internal.Utilities.Collections.AsyncMemoize
 open FSharp.Compiler
 open FSharp.Compiler.AbstractIL.IL
 open FSharp.Compiler.AbstractIL.ILBinaryReader

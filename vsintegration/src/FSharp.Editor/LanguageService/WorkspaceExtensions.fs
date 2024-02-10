@@ -15,7 +15,7 @@ open FSharp.Compiler.BuildGraph
 
 open CancellableTasks
 
-open Internal.Utilities.Collections
+open Internal.Utilities.Collections.AsyncMemoize
 open Newtonsoft.Json
 open Newtonsoft.Json.Linq
 open System.Text.Json.Nodes
