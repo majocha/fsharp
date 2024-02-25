@@ -785,31 +785,6 @@ let ParseOneInputFile (tcConfig: TcConfig, lexResourceManager, fileName, isLastC
         errorRecovery exn rangeStartup
         EmptyParsedInput(fileName, isLastCompiland)
 
-/// Prepare to process inputs independently, e.g. partially in parallel.
-///
-/// To do this we create one CapturingDiagnosticLogger for each input and
-/// then ensure the diagnostics are presented in deterministic order after processing completes.
-/// On completion all diagnostics are forwarded to the DiagnosticLogger given as input.
-///
-/// NOTE: Max errors is currently counted separately for each logger. When max errors is reached on one compilation
-/// the given Exiter will be called.
-///
-/// NOTE: this needs to be improved to commit diagnotics as soon as possible
-///
-/// NOTE: If StopProcessing is raised by any piece of work then the overall function raises StopProcessing.
-let UseMultipleDiagnosticLoggers (inputs, diagnosticsLogger, eagerFormat) f =
-
-    // Check input files and create delayed error loggers before we try to parallel parse.
-    let delayLoggers =
-        inputs
-        |> List.map (fun _ -> CapturingDiagnosticsLogger("TcDiagnosticsLogger", ?eagerFormat = eagerFormat))
-
-    try
-        f (List.zip inputs delayLoggers)
-    finally
-        for logger in delayLoggers do
-            logger.CommitDelayedDiagnostics diagnosticsLogger
-
 let ParseInputFilesInParallel (tcConfig: TcConfig, lexResourceManager, sourceFiles, delayLogger: DiagnosticsLogger, retryLocked) =
 
     let isLastCompiland, isExe = sourceFiles |> tcConfig.ComputeCanContainEntryPoint
@@ -819,15 +794,19 @@ let ParseInputFilesInParallel (tcConfig: TcConfig, lexResourceManager, sourceFil
 
     let sourceFiles = List.zip sourceFiles isLastCompiland
 
-    UseMultipleDiagnosticLoggers (sourceFiles, delayLogger, None) (fun sourceFilesWithDelayLoggers ->
-        sourceFilesWithDelayLoggers
-        |> ListParallel.map (fun ((fileName, isLastCompiland), delayLogger) ->
+    CaptureDiagnosticsConcurrently(
+        sourceFiles,
+        (fun (fileName, isLastCompiland) logger -> async {
             let directoryName = Path.GetDirectoryName fileName
 
             let input =
-                parseInputFileAux (tcConfig, lexResourceManager, fileName, (isLastCompiland, isExe), delayLogger, retryLocked)
+                parseInputFileAux (tcConfig, lexResourceManager, fileName, (isLastCompiland, isExe), logger, retryLocked)
 
-            (input, directoryName)))
+            return input, directoryName
+        }),
+        delayLogger,
+        None)
+    |> Async.RunImmediate |> List.ofArray
 
 let ParseInputFilesSequential (tcConfig: TcConfig, lexResourceManager, sourceFiles, diagnosticsLogger: DiagnosticsLogger, retryLocked) =
     let isLastCompiland, isExe = sourceFiles |> tcConfig.ComputeCanContainEntryPoint

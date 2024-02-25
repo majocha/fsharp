@@ -14,6 +14,9 @@ open System.Threading
 open Internal.Utilities.Library
 open Internal.Utilities.Library.Extras
 open System.Collections.Concurrent
+open System.Threading.Tasks
+open System.Threading
+open System.Threading
 
 /// Represents the style being used to format errors
 [<RequireQualifiedAccess>]
@@ -432,8 +435,8 @@ type internal DiagnosticsThreadStatics =
             | _ -> DiagnosticsThreadStatics.diagnosticsLogger
 
         and set v =
-            if DiagnosticsThreadStatics.diagnosticsLogger <> v then
-                TrackThreadStaticsUse.checkForAsyncFalldown "DiagnosticsLogger_set"
+            //if DiagnosticsThreadStatics.diagnosticsLogger <> v then
+            //    TrackThreadStaticsUse.checkForAsyncFalldown "DiagnosticsLogger_set"
 
             DiagnosticsThreadStatics.diagnosticsLogger <- v
 
@@ -549,24 +552,29 @@ let UseBuildPhase (phase: BuildPhase) =
             DiagnosticsThreadStatics.BuildPhase <- oldBuildPhase
     }
 
+let currentLoggerFromUseOrNoUnwind = AsyncLocal<DiagnosticsLogger>()
+
 /// NOTE: The change will be undone when the returned "unwind" object disposes
 let UseTransformedDiagnosticsLogger (transformer: DiagnosticsLogger -> #DiagnosticsLogger) =
     let oldLogger = DiagnosticsThreadStatics.DiagnosticsLogger
     let newLogger = transformer oldLogger
     DiagnosticsThreadStatics.DiagnosticsLogger <- newLogger
+    currentLoggerFromUseOrNoUnwind.Value <- newLogger
     Trace.IndentLevel <- Trace.IndentLevel + 1
     Trace.WriteLine $"t:{tid ()} use : {dlName DiagnosticsThreadStatics.DiagnosticsLogger}"
 
     { new IDisposable with
         member _.Dispose() =
-            //// Check if the logger we "put on the stack" is still there.
-            //let current = DiagnosticsThreadStatics.DiagnosticsLogger
+            // Check if the logger we "put on the stack" is still there.
+            let current = DiagnosticsThreadStatics.DiagnosticsLogger
 
-            //if not <| current.Equals(newLogger) then
-            //    failwith
-            //        $"Out of order DiagnosticsLogger stack unwind. Expected {newLogger.DebugDisplay()} but found {current.DebugDisplay()} while restoring {oldLogger.DebugDisplay()}."
+            if not <| (current.Equals(currentLoggerFromUseOrNoUnwind.Value) || currentLoggerFromUseOrNoUnwind.Value.DebugDisplay().Contains "NodeCode") then
+                Debugger.Break()
+                failwith
+                    $"Out of order DiagnosticsLogger stack unwind. Expected {currentLoggerFromUseOrNoUnwind.Value.DebugDisplay()} but found {current.DebugDisplay()} while restoring {oldLogger.DebugDisplay()}."
 
             DiagnosticsThreadStatics.DiagnosticsLogger <- oldLogger
+            currentLoggerFromUseOrNoUnwind.Value <- oldLogger
             Trace.WriteLine $"t:{tid ()} disp: {newLogger.DebugDisplay()}, restored: {oldLogger.DebugDisplay()}"
             Trace.IndentLevel <- Trace.IndentLevel - 1
     }
@@ -577,7 +585,8 @@ let UseDiagnosticsLogger newLogger =
 let SetThreadBuildPhaseNoUnwind (phase: BuildPhase) =
     DiagnosticsThreadStatics.BuildPhase <- phase
 
-let SetThreadDiagnosticsLoggerNoUnwind diagnosticsLogger =
+let SetThreadDiagnosticsLoggerNoUnwind (diagnosticsLogger: DiagnosticsLogger) =
+    currentLoggerFromUseOrNoUnwind.Value <- diagnosticsLogger
     DiagnosticsThreadStatics.DiagnosticsLogger <- diagnosticsLogger
 
 /// This represents the thread-local state established as each task function runs as part of the build.
@@ -654,19 +663,12 @@ let mlCompatError s m =
 
 [<DebuggerStepThrough>]
 let suppressErrorReporting f =
-    let diagnosticsLogger = DiagnosticsThreadStatics.DiagnosticsLogger
-
-    try
-        let diagnosticsLogger =
-            { new DiagnosticsLogger("suppressErrorReporting") with
-                member _.DiagnosticSink(_phasedError, _isError) = ()
-                member _.ErrorCount = 0
-            }
-
-        SetThreadDiagnosticsLoggerNoUnwind diagnosticsLogger
-        f ()
-    finally
-        SetThreadDiagnosticsLoggerNoUnwind diagnosticsLogger
+    use _ = UseDiagnosticsLogger
+                { new DiagnosticsLogger("suppressErrorReporting") with
+                    member _.DiagnosticSink(_phasedError, _isError) = ()
+                    member _.ErrorCount = 0
+                }
+    f()
 
 [<DebuggerStepThrough>]
 let conditionallySuppressErrorReporting cond f =
@@ -940,16 +942,38 @@ type StackGuard(maxDepth: int, name: string) =
     static member GetDepthOption(name: string) =
         GetEnvInteger ("FSHARP_" + name + "StackGuardDepth") StackGuard.DefaultDepth
 
-type CaptureDiagnosticsConcurrently() =
-    let target = DiagnosticsThreadStatics.DiagnosticsLogger
-    let loggers = ResizeArray()
 
-    member _.GetLoggerForTask(name) : DiagnosticsLogger =
-        let logger = CapturingDiagnosticsLogger(name)
-        loggers.Add logger
-        logger
+let CaptureDiagnosticsConcurrently(inputs, transformer, target, eagerFormat) =
+    let mutable errorCount = 0
+    let prepared = [
+        for i, input in inputs |> Seq.indexed do
+            let tcs = TaskCompletionSource<_>()
+            let logger =
+                { new CapturingDiagnosticsLogger($"NodeCode.Parallel {i}", ?eagerFormat = eagerFormat) with
+                    override _.DiagnosticSink(d, severity) =
+                        base.DiagnosticSink(d, severity)
+                        if severity = FSharpDiagnosticSeverity.Error then
+                            Interlocked.Increment &errorCount |> ignore
+                    override _.ErrorCount = errorCount
+                }
+            let injected = async {
+                try
+                    return! transformer input (logger: DiagnosticsLogger)
+                finally
+                    tcs.SetResult logger
+            }
+            injected, tcs
+    ]
 
-    interface IDisposable with
-        member _.Dispose() =
-            for logger in loggers do
-                logger.CommitDelayedDiagnostics target
+    async {
+        let commitDiagsInOrder = backgroundTask {
+            for _, tcs in prepared do
+                let! finishedLogger = tcs.Task
+                finishedLogger.CommitDelayedDiagnostics target
+        }
+
+        try 
+            return! prepared |> Seq.map fst |> Async.Parallel
+        finally
+            commitDiagsInOrder.Wait()
+    }

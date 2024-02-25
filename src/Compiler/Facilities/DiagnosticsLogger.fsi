@@ -466,9 +466,5 @@ type CompilationGlobalsScope =
 
     member BuildPhase: BuildPhase
 
-type CaptureDiagnosticsConcurrently =
-    new: unit -> CaptureDiagnosticsConcurrently
+val CaptureDiagnosticsConcurrently: inputs: 'T seq * transformer: ('T -> DiagnosticsLogger -> Async<'U>) * target: DiagnosticsLogger * eagerFormat: (PhasedDiagnostic -> PhasedDiagnostic) option -> Async<'U array>
 
-    member GetLoggerForTask: string -> DiagnosticsLogger
-
-    interface IDisposable
