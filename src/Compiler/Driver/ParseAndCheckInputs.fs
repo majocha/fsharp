@@ -1864,7 +1864,7 @@ let CheckMultipleInputsUsingGraphMode
 
         let (Finisher(finisher = finisher)) =
             cancellable {
-                use _ = UseDiagnosticsLogger logger
+                SetThreadDiagnosticsLoggerNoUnwind logger
                 let checkForErrors2 () = priorErrors || (logger.ErrorCount > 0)
                 let tcSink = TcResultsSink.NoSink
 

@@ -432,8 +432,8 @@ type internal DiagnosticsThreadStatics =
             | _ -> DiagnosticsThreadStatics.diagnosticsLogger
 
         and set v =
-            if DiagnosticsThreadStatics.diagnosticsLogger <> v then
-                TrackThreadStaticsUse.checkForAsyncFalldown "DiagnosticsLogger_set"
+            //if DiagnosticsThreadStatics.diagnosticsLogger <> v then
+            //    TrackThreadStaticsUse.checkForAsyncFalldown "DiagnosticsLogger_set"
 
             DiagnosticsThreadStatics.diagnosticsLogger <- v
 
@@ -465,10 +465,6 @@ module DiagnosticsLoggerExtensions =
     type DiagnosticsLogger with
 
         member x.EmitDiagnostic(exn, severity) =
-
-            // This is not foolproof, as there could always be direct access to DiagnosticsLogger's DiagnosticSink somewhere.
-            TrackThreadStaticsUse.checkForAsyncFalldown "DiagnosticsLogger.EmitDiagnostic"
-
             match exn with
             | InternalError(s, _)
             | InternalException(_, s, _)
@@ -549,24 +545,28 @@ let UseBuildPhase (phase: BuildPhase) =
             DiagnosticsThreadStatics.BuildPhase <- oldBuildPhase
     }
 
+let currentLogger = AsyncLocal<DiagnosticsLogger>()
+
 /// NOTE: The change will be undone when the returned "unwind" object disposes
 let UseTransformedDiagnosticsLogger (transformer: DiagnosticsLogger -> #DiagnosticsLogger) =
     let oldLogger = DiagnosticsThreadStatics.DiagnosticsLogger
     let newLogger = transformer oldLogger
+    currentLogger.Value <- newLogger
     DiagnosticsThreadStatics.DiagnosticsLogger <- newLogger
     Trace.IndentLevel <- Trace.IndentLevel + 1
     Trace.WriteLine $"t:{tid ()} use : {dlName DiagnosticsThreadStatics.DiagnosticsLogger}"
 
     { new IDisposable with
         member _.Dispose() =
-            //// Check if the logger we "put on the stack" is still there.
-            //let current = DiagnosticsThreadStatics.DiagnosticsLogger
+            // Check if the logger we "put on the stack" is still there.
+            let currentThreadStatic = DiagnosticsThreadStatics.DiagnosticsLogger
 
-            //if not <| current.Equals(newLogger) then
-            //    failwith
-            //        $"Out of order DiagnosticsLogger stack unwind. Expected {newLogger.DebugDisplay()} but found {current.DebugDisplay()} while restoring {oldLogger.DebugDisplay()}."
+            if not <| currentThreadStatic.Equals(currentLogger.Value) then
+                failwith
+                    $"Out of order DiagnosticsLogger stack unwind. Expected {currentLogger.Value.DebugDisplay()} but found {currentThreadStatic.DebugDisplay()} while restoring {oldLogger.DebugDisplay()}."
 
             DiagnosticsThreadStatics.DiagnosticsLogger <- oldLogger
+            currentLogger.Value <- oldLogger
             Trace.WriteLine $"t:{tid ()} disp: {newLogger.DebugDisplay()}, restored: {oldLogger.DebugDisplay()}"
             Trace.IndentLevel <- Trace.IndentLevel - 1
     }
@@ -578,6 +578,7 @@ let SetThreadBuildPhaseNoUnwind (phase: BuildPhase) =
     DiagnosticsThreadStatics.BuildPhase <- phase
 
 let SetThreadDiagnosticsLoggerNoUnwind diagnosticsLogger =
+    currentLogger.Value <- diagnosticsLogger
     DiagnosticsThreadStatics.DiagnosticsLogger <- diagnosticsLogger
 
 /// This represents the thread-local state established as each task function runs as part of the build.

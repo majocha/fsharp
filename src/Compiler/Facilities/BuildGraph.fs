@@ -9,6 +9,7 @@ open System.Diagnostics
 open System.Globalization
 open FSharp.Compiler.DiagnosticsLogger
 open Internal.Utilities.Library
+open System.Data
 
 [<NoEquality; NoComparison>]
 type NodeCode<'T> = Node of Async<'T>
@@ -122,14 +123,9 @@ type NodeCodeBuilder() =
     member _.Using(value: CompilationGlobalsScope, binder: CompilationGlobalsScope -> NodeCode<'U>) =
         Node(
             async {
-                DiagnosticsThreadStatics.DiagnosticsLogger <- value.DiagnosticsLogger
-                DiagnosticsThreadStatics.BuildPhase <- value.BuildPhase
-
-                try
-                    return! binder value |> Async.AwaitNodeCode
-                finally
-                    (value :> IDisposable).Dispose()
-            }
+                use _ = value
+                return! binder value |> Async.AwaitNodeCode
+            } |> wrapThreadStaticInfo
         )
 
     [<DebuggerHidden; DebuggerStepThrough>]
@@ -230,8 +226,8 @@ type NodeCode private () =
                 let logger = concurrentLogging.GetLoggerForTask($"NodeCode.Parallel {i}")
 
                 async {
-                    DiagnosticsThreadStatics.DiagnosticsLogger <- logger
-                    DiagnosticsThreadStatics.BuildPhase <- phase
+                    use _ = UseDiagnosticsLogger logger
+                    use _ = UseBuildPhase phase
                     return! unwrapNode computation
                 }
 
