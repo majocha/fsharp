@@ -67,6 +67,7 @@ param (
     [switch]$testEditor,
     [switch]$testBenchmarks,
     [string]$officialSkipTests = "false",
+    [switch]$parallel,
     [switch]$noVisualStudio,
     [switch]$sourceBuild,
     [switch]$skipBuild,
@@ -204,6 +205,10 @@ function Process-Arguments() {
         $script:testAOT = $False
         $script:testBenchmarks = $False
         $script:verifypackageshipstatus = $True
+    }
+
+    if ($parallel) {
+        $script:parallel = $True;
     }
 
     if ($noRestore) {
@@ -393,6 +398,30 @@ function TestUsingMSBuild([string] $testProject, [string] $targetFramework, [str
         Write-Host("$args")
         Exec-Console $dotnetExe $args
     }
+}
+
+function TestSolutionUsingMSBuild([string] $testSolution, [string] $targetFramework) {
+    $dotnetPath = InitializeDotNetCli
+    $dotnetExe = Join-Path $dotnetPath "dotnet.exe"
+    $solutionName = [System.IO.Path]::GetFileNameWithoutExtension($testSolution)
+    # $testLogPath = "$ArtifactsDir\TestResults\$configuration\${solutionName}_$targetFramework.xml"
+    $testBinLogPath = "$LogDir\${solutionName}_$targetFramework.binlog"
+    $args = "test $testSolution -c $configuration -f $targetFramework /bl:$testBinLogPath"
+    $args += " --blame --results-directory $ArtifactsDir\TestResults\$configuration -p:vstestusemsbuildoutput=false"
+    $args += " --blame-hang-timeout 3minutes"
+    $args += " --blame-hang-dump-type none"
+    # $args += " --logger ""nunit;LogFilePath=$testLogPath"""
+
+    if (-not $noVisualStudio -or $norestore) {
+        $args += " --no-restore"
+    }
+
+    if (-not $noVisualStudio) {
+        $args += " --no-build"
+    }
+
+    Write-Host("$args")
+    Exec-Console $dotnetExe $args
 }
 
 function Prepare-TempDir() {
@@ -588,7 +617,12 @@ try {
     $script:BuildCategory = "Test"
     $script:BuildMessage = "Failure running tests"
 
-    if ($testCoreClr) {
+
+    if ($testCoreClr -and $parallel) {
+        TestSolutionUsingMSBuild -testSolution "$RepoRoot\FSharp.sln" -targetFramework $script:coreclrTargetFramework
+    }
+
+    if ($testCoreClr -and !$parallel) {
         $bgJob = TestUsingMSBuild -testProject "$RepoRoot\tests\fsharp\FSharpSuite.Tests.fsproj" -targetFramework $script:coreclrTargetFramework -testadapterpath "$ArtifactsDir\bin\FSharpSuite.Tests\" -asBackgroundJob $true
 
         TestUsingMSBuild -testProject "$RepoRoot\tests\FSharp.Compiler.ComponentTests\FSharp.Compiler.ComponentTests.fsproj" -targetFramework $script:coreclrTargetFramework -testadapterpath "$ArtifactsDir\bin\FSharp.Compiler.ComponentTests\"
@@ -602,7 +636,11 @@ try {
         Receive-Job $bgJob -ErrorAction Stop
     }
 
-    if ($testDesktop) {
+    if ($testDesktop -and $parallel) {
+        TestSolutionUsingMSBuild -testSolution "$RepoRoot\FSharp.sln" -targetFramework $script:desktopTargetFramework
+    }
+
+    if ($testDesktop -and !$parallel) {
         $bgJob = TestUsingMSBuild -testProject "$RepoRoot\tests\fsharp\FSharpSuite.Tests.fsproj" -targetFramework $script:desktopTargetFramework -testadapterpath "$ArtifactsDir\bin\FSharpSuite.Tests\" -asBackgroundJob $true
 
         TestUsingMSBuild -testProject "$RepoRoot\tests\FSharp.Compiler.ComponentTests\FSharp.Compiler.ComponentTests.fsproj" -targetFramework $script:desktopTargetFramework -testadapterpath "$ArtifactsDir\bin\FSharp.Compiler.ComponentTests\"

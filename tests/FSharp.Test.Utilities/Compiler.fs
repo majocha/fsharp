@@ -12,7 +12,6 @@ open FSharp.Test.Utilities
 open FSharp.Test.ScriptHelpers
 open Microsoft.CodeAnalysis
 open Microsoft.CodeAnalysis.CSharp
-open NUnit.Framework
 open System
 open System.Collections.Immutable
 open System.IO
@@ -28,6 +27,7 @@ open TestFramework
 open System.Runtime.CompilerServices
 open System.Runtime.InteropServices
 open FSharp.Compiler.CodeAnalysis
+open Xunit
 
 
 module rec Compiler =
@@ -1142,7 +1142,7 @@ Actual:
             fOnFail()
             updateBaseLineIfEnvironmentSaysSo baseline
             createBaselineErrors baseline actual
-            Assert.AreEqual(expected, actual, convenienceBaselineInstructions baseline expected actual)
+            Assert.Equal(expected, actual) //, convenienceBaselineInstructions baseline expected actual)
         elif FileSystem.FileExistsShim baseline.FilePath then
             FileSystem.FileDeleteShim baseline.FilePath
 
@@ -1174,8 +1174,8 @@ Actual:
                 fs.CreateOutputDirectory()
                 createBaselineErrors bsl.FSBaseline errorsActual
                 updateBaseLineIfEnvironmentSaysSo bsl.FSBaseline
-                let errorMsg = (convenienceBaselineInstructions bsl.FSBaseline errorsExpectedBaseLine errorsActual)
-                Assert.AreEqual(errorsExpectedBaseLine, errorsActual, errorMsg)
+                // let errorMsg = (convenienceBaselineInstructions bsl.FSBaseline errorsExpectedBaseLine errorsActual)
+                Assert.Equal(errorsExpectedBaseLine, errorsActual) //, errorMsg)
             elif FileSystem.FileExistsShim(bsl.FSBaseline.FilePath) then
                 FileSystem.FileDeleteShim(bsl.FSBaseline.FilePath)
 
@@ -1507,7 +1507,7 @@ Actual:
 
             let inline checkEqual k a b =
              if a <> b then
-                 Assert.AreEqual(a, b, $"%s{what}: Mismatch in %s{k}, expected '%A{a}', got '%A{b}'.\nAll errors:\n%s{sourceErrorsAsStr}\nExpected errors:\n%s{expectedErrorsAsStr}")
+                 Assert.True((a = b), $"%s{what}: Mismatch in %s{k}, expected '%A{a}', got '%A{b}'.\nAll errors:\n%s{sourceErrorsAsStr}\nExpected errors:\n%s{expectedErrorsAsStr}")
 
             // For lists longer than 100 errors:
             expectedErrors |> List.iter System.Diagnostics.Debug.WriteLine
@@ -1518,7 +1518,7 @@ Actual:
             (sourceErrors, expectedErrors)
             ||> List.iter2 (fun actual expected ->
 
-                Assert.AreEqual(expected, actual, $"Mismatched error message:\nExpecting: {expected}\nActual:    {actual}\n"))
+                Assert.Equal(expected, actual)) //, $"Mismatched error message:\nExpecting: {expected}\nActual:    {actual}\n"))
 
         let adjust (adjust: int) (result: CompilationResult) : CompilationResult =
             match result with
@@ -1641,7 +1641,7 @@ Actual:
 
                 match Assert.shouldBeSameMultilineStringSets expectedContent actualErrors with
                 | None -> ()
-                | Some diff -> Assert.That(diff, Is.Empty, path)
+                | Some diff -> Assert.Empty(diff) //, Is.Empty, path)
 
                 result
 
@@ -1724,7 +1724,7 @@ Actual:
             | None -> failwith "Execution output is missing, cannot check exit code."
             | Some o ->
                 match o with
-                | ExecutionOutput e -> Assert.AreEqual(e.ExitCode, expectedExitCode, sprintf "Exit code was expected to be: %A, but got %A." expectedExitCode e.ExitCode)
+                | ExecutionOutput e -> Assert.Equal(expectedExitCode, e.ExitCode) //, sprintf "Exit code was expected to be: %A, but got %A." expectedExitCode e.ExitCode)
                 | _ -> failwith "Cannot check exit code on this run result."
             result
 
@@ -1763,7 +1763,7 @@ Actual:
             | None -> failwith "Execution output is missing cannot check value."
             | Some (EvalOutput output) ->
                 match output.Result with
-                | Ok (Some e) -> Assert.AreEqual(value, (selector e))
+                | Ok (Some e) -> Assert.Equal<'T>(value, (selector e))
                 | Ok None -> failwith "Cannot assert value of evaluation, since it is None."
                 | Result.Error ex -> raise ex
             | Some _ -> failwith "Only 'eval' output is supported."
