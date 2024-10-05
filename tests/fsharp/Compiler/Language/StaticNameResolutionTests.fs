@@ -5,6 +5,7 @@ namespace FSharp.Compiler.UnitTests
 open System.Collections.Immutable
 open Xunit
 open FSharp.Test
+open FSharp.Test.Compiler
 open FSharp.Test.Utilities
 open Microsoft.CodeAnalysis
 

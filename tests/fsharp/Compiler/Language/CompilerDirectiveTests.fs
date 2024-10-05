@@ -4,6 +4,7 @@ namespace FSharp.Compiler.UnitTests
 
 open Xunit
 open FSharp.Test
+open FSharp.Test.Compiler
 open FSharp.Compiler.Diagnostics
 
 

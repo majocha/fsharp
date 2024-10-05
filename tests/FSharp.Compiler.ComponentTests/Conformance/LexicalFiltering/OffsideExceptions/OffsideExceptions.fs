@@ -5,7 +5,7 @@ namespace Conformance.LexicalFiltering
 open Xunit
 open FSharp.Test
 open FSharp.Test.Compiler
-open FSharp.Test.Compiler.Assertions.StructuredResultsAsserts
+open StructuredResultsAsserts
 
 module OffsideExceptions =
 

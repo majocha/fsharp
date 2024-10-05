@@ -47,7 +47,7 @@ module ScriptRunner =
 /// This test file was created by porting over (slower) FsharpSuite.Tests
 /// In order to minimize human error, the test definitions have been copy-pasted and this adapter provides implementations of the test functions
 module TestFrameworkAdapter = 
-    open FSharp.Test.Compiler.Assertions.TextBasedDiagnosticAsserts
+    open TextBasedDiagnosticAsserts
 
     type ExecutionMode = 
         | FSC_DEBUG 

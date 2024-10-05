@@ -1,14 +1,12 @@
 // Copyright (c) Microsoft Corporation.  All Rights Reserved.  See License.txt in the project root for license information.
 
-namespace FSharp.Test
+namespace FSharp.Test.Compiler
 
 open FSharp.Compiler.Interactive.Shell
 open FSharp.Compiler.IO
 open FSharp.Compiler.Diagnostics
-open FSharp.Compiler.Symbols
 open FSharp.Compiler.Text
-open FSharp.Test.Assert
-open FSharp.Test.Utilities
+open FSharp.Test
 open FSharp.Test.ScriptHelpers
 open Microsoft.CodeAnalysis
 open Microsoft.CodeAnalysis.CSharp
@@ -23,124 +21,339 @@ open System.Reflection.Metadata
 open System.Reflection.PortableExecutable
 
 open FSharp.Test.CompilerAssertHelpers
-open TestFramework
-
-open System.Runtime.CompilerServices
-open System.Runtime.InteropServices
-open FSharp.Compiler.CodeAnalysis
+open FSharp.Test.Compiler
+open FSharp.Test.Utilities
 
 
-module rec Compiler =
-    [<AutoOpen>]
-    type SourceUtilities () =
-        static member getCurrentMethodName([<CallerMemberName; Optional; DefaultParameterValue("")>] memberName: string) = memberName
+[<AutoOpen>]
+module CompilerModule =
+    let private getErrors diagnostics = diagnostics |> List.filter (fun e -> match e.Error with Error _ -> true | _ -> false)
 
-    type BaselineFile =
+    let private getWarnings diagnostics = diagnostics |> List.filter (fun e -> match e.Error with Warning _ -> true | _ -> false)
+
+    let private adjustRange (range: Range) (adjust: int) : Range =
         {
-            FilePath: string
-            BslSource: string
-            Content: string option
+            StartLine   = range.StartLine   - adjust
+            StartColumn = range.StartColumn + 1
+            EndLine     = range.EndLine     - adjust
+            EndColumn   = range.EndColumn   + 1
         }
 
-    type Baseline =
-        {
-            SourceFilename: string option
-            FSBaseline: BaselineFile
-            ILBaseline: BaselineFile
-        }
+    let private getErrorNumber (error: ErrorType) : int =
+        match error with
+        | Error e | Warning e | Information e | Hidden e -> e
 
-    type TestType =
-        | Text of string
-        | Path of string
+    let private getErrorInfo (info: ErrorInfo) : string =
+        sprintf "%A %A" info.Error info.Message
 
-    type CompilationUnit =
-        | FS of FSharpCompilationSource
-        | CS of CSharpCompilationSource
-        | IL of ILCompilationSource
-        override this.ToString() = match this with | FS fs -> fs.ToString() | _ -> (sprintf "%A" this   )
-        member this.OutputDirectory =
-            let toString diOpt =
-                match diOpt: DirectoryInfo option with
-                | Some di -> di.FullName
-                | None -> ""
-            match this with
-            | FS fs -> fs.OutputDirectory |> toString
-            | CS cs -> cs.OutputDirectory |> toString
-            | _ -> raise (Exception "Not supported for this compilation type")
-        member this.WithStaticLink(staticLink: bool) = match this with | FS fs -> FS { fs with StaticLink = staticLink } | cu -> cu
+    let private assertErrorsLength (source: ErrorInfo list) (expected: 'a list) : unit =
+        if (List.length source) <> (List.length expected) then
+            failwith (sprintf "Expected list of issues differ from compilation result:\nExpected:\n %A\nActual:\n %A" expected (List.map getErrorInfo source))
+        ()
 
-    type FSharpCompilationSource =
-        { Source:           SourceCodeFileKind
-          AdditionalSources:SourceCodeFileKind list
-          Baseline:         Baseline option
-          Options:          string list
-          OutputType:       CompileOutput
-          OutputDirectory:  DirectoryInfo option
-          Name:             string option
-          IgnoreWarnings:   bool
-          References:       CompilationUnit list
-          TargetFramework:  TargetFramework
-          StaticLink:       bool
-          }
+    let private assertErrorMessages (source: ErrorInfo list) (expected: string list) : unit =
+        for exp in expected do
+            if not (List.exists (fun (el: ErrorInfo) ->
+                let msg = el.Message
+                msg = exp) source) then
+                failwith (sprintf "Mismatch in error message, expected '%A' was not found during compilation.\nAll errors:\n%A" exp (List.map getErrorInfo source))
+        assertErrorsLength source expected
 
-        member this.CreateOutputDirectory() =
-            match this.OutputDirectory with
-            | Some d -> d.Create()
+    let private assertErrorNumbers (source: ErrorInfo list) (expected: int list) : unit =
+        for exp in expected do
+            if not (List.exists (fun (el: ErrorInfo) -> (getErrorNumber el.Error) = exp) source) then
+                failwith (sprintf "Mismatch in ErrorNumber, expected '%A' was not found during compilation.\nAll errors:\n%A" exp (List.map getErrorInfo source))
+
+    let private assertErrors (what: string) libAdjust (source: ErrorInfo list) (expected: ErrorInfo list) : unit =
+
+        // (Error 67, Line 14, Col 3, Line 14, Col 24, "This type test or downcast will always hold")
+        let errorMessage error =
+            let { Error = err; Range = range; Message = message } = error
+            let errorType =
+                match err with
+                | ErrorType.Error n -> $"Error {n}"
+                | ErrorType.Warning n-> $"Warning {n}"
+                | ErrorType.Hidden n-> $"Hidden {n}"
+                | ErrorType.Information n-> $"Information {n}"
+            $"""({errorType}, Line {range.StartLine}, Col {range.StartColumn}, Line {range.EndLine}, Col {range.EndColumn}, "{message}")""".Replace("\r\n", "\n")
+
+        let expectedErrors = expected |> List.map (fun error -> errorMessage error)
+        let expectedErrorsAsStr = expectedErrors |> String.concat ";\n" |> sprintf "[%s]"
+        let sourceErrors = source |> List.map (fun error -> errorMessage { error with Range = adjustRange error.Range libAdjust })
+        let sourceErrorsAsStr = sourceErrors |> String.concat ";\n" |> sprintf "[%s]"
+
+        let inline checkEqual k a b =
+         if a <> b then
+             failwith $"%s{what}: Mismatch in %s{k}, expected '%A{a}', got '%A{b}'.\nAll errors:\n%s{sourceErrorsAsStr}\nExpected errors:\n%s{expectedErrorsAsStr}"
+
+        // For lists longer than 100 errors:
+        expectedErrors |> List.iter System.Diagnostics.Debug.WriteLine
+
+        // TODO: Check all "categories", collect all results and print alltogether.
+        checkEqual "Errors count" expectedErrors.Length sourceErrors.Length
+
+        (sourceErrors, expectedErrors)
+        ||> List.iter2 (fun actual expected ->
+            Assert.Equal(expected, actual))
+
+    let adjust (adjust: int) (result: CompilationResult) : CompilationResult =
+        match result with
+        | CompilationResult.Success s -> CompilationResult.Success { s with Adjust = adjust }
+        | CompilationResult.Failure f -> CompilationResult.Failure { f with Adjust = adjust }
+
+    let shouldSucceed (result: CompilationResult) : CompilationResult =
+        match result with
+        | CompilationResult.Success _ -> result
+        | CompilationResult.Failure r ->
+            let message =
+                [ sprintf "Operation failed (expected to succeed).\n All errors:\n%A\n" r.Diagnostics
+                  match r.Output with
+                  | Some (ExecutionOutput output) ->
+                      sprintf "----output-----\n%s\n----error-------\n%s\n----------" output.StdOut output.StdErr
+                  | Some (EvalOutput output) ->                                  
+                        match output.Result with
+                        | Result.Error exn ->
+                            sprintf "----script error-----\n%s\n----------" (exn.ToString())
+                            sprintf "----output-----\n%s\n----error-------\n%s\n----------" output.StdOut output.StdErr
+                        | Result.Ok fsiVal ->
+                            sprintf "----script output-----\n%A\n----------" (fsiVal)
+                            sprintf "----output-----\n%s\n----error-------\n%s\n----------" output.StdOut output.StdErr
+                  | _ -> () ]
+                |> String.concat "\n"
+            failwith message
+
+    let shouldFail (result: CompilationResult) : CompilationResult =
+        match result with
+        | CompilationResult.Success _ -> failwith "Operation succeeded (expected to fail)."
+        | CompilationResult.Failure _ -> result
+
+    let private assertResultsCategory (what: string) (selector: CompilationOutput -> ErrorInfo list) (expected: ErrorInfo list) (result: CompilationResult) : CompilationResult =
+        match result with
+        | CompilationResult.Success r
+        | CompilationResult.Failure r ->
+            assertErrors what r.Adjust (selector r) expected
+        result
+
+    let private withResultsIgnoreNativeRange (expectedResults: ErrorInfo list) result : CompilationResult =
+        assertResultsCategory "Results" (fun r -> r.Diagnostics) expectedResults result
+
+    let private withResultIgnoreNativeRange (expectedResult: ErrorInfo ) (result: CompilationResult) : CompilationResult =
+        withResultsIgnoreNativeRange [expectedResult] result
+
+    let withDiagnostics (expected: (ErrorType * Line * Col * Line * Col * string) list) (result: CompilationResult) : CompilationResult =
+        let expectedResults: ErrorInfo list =
+            [ for e in expected do
+                  let (error, Line startLine, Col startCol, Line endLine, Col endCol, message) = e
+                  { Error = error
+                    Range =
+                        { StartLine   = startLine
+                          StartColumn = startCol
+                          EndLine     = endLine
+                          EndColumn   = endCol }
+                    NativeRange = Unchecked.defaultof<_>
+                    SubCategory = ""
+                    Message     = message } ]
+        withResultsIgnoreNativeRange expectedResults result
+
+    let withSingleDiagnostic (expected: (ErrorType * Line * Col * Line * Col * string)) (result: CompilationResult) : CompilationResult =
+        withDiagnostics [expected] result
+
+    let withErrors (expectedErrors: ErrorInfo list) (result: CompilationResult) : CompilationResult =
+        assertResultsCategory "Errors" (fun r -> getErrors r.Diagnostics) expectedErrors result
+
+    let withError (expectedError: ErrorInfo) (result: CompilationResult) : CompilationResult =
+        withErrors [expectedError] result
+
+    module StructuredResultsAsserts =
+        type SimpleErrorInfo =
+            { Error:   ErrorType
+              Range:   Range
+              Message: string }
+
+        let withResults (expectedResults: SimpleErrorInfo list) result : CompilationResult =
+            let mappedResults = expectedResults |> List.map (fun s -> { Error = s.Error;Range = s.Range;  Message = s.Message; NativeRange = Unchecked.defaultof<_>; SubCategory = ""})
+            withResultsIgnoreNativeRange mappedResults result
+
+        let withResult (expectedResult: SimpleErrorInfo ) (result: CompilationResult) : CompilationResult =
+            withResults [expectedResult] result
+
+    module TextBasedDiagnosticAsserts =
+        open FSharp.Compiler.Text.Range
+
+        let private messageAndNumber errorType=
+            match errorType with
+            | ErrorType.Error n -> "error",n
+            | ErrorType.Warning n-> "warning",n
+            | ErrorType.Hidden n
+            | ErrorType.Information n-> "info",n
+
+        let normalizeNewLines (s:string) = s.Replace("\r\n","\n").Replace("\n",Environment.NewLine)
+
+        let private renderToString (cr:CompilationResult) =
+            [ for (file,err) in cr.Output.PerFileErrors do
+                let m = err.NativeRange
+                let file = file.Replace("/", "\\")
+                let severity,no = messageAndNumber err.Error
+                let adjustedMessage = err.Message |> normalizeNewLines
+                let location =
+                    if  (equals m range0) || (equals m rangeStartup) || (equals m rangeCmdArgs) then
+                        ""
+                    else
+                        // The baseline .bsl files use 1-based notation for columns, hence the +1's
+                        sprintf "%s(%d,%d,%d,%d):" file m.StartLine (m.StartColumn+1) m.EndLine (m.EndColumn+1)
+                Environment.NewLine + $"{location} {err.SubCategory} {severity} FS%04d{no}: {adjustedMessage}" + Environment.NewLine
+            ]
+            |> String.Concat
+
+        let withResultsMatchingFile (path:string) (result:CompilationResult) =
+            let expectedContent = File.ReadAllText(path) |> normalizeNewLines
+            let actualErrors = renderToString result
+
+            match Environment.GetEnvironmentVariable("TEST_UPDATE_BSL") with
+            | null -> ()
+            | _ when expectedContent = actualErrors -> ()
+            | _ -> File.WriteAllText(path, actualErrors)
+            //File.WriteAllText(path, actualErrors)
+
+            match Assert.shouldBeSameMultilineStringSets expectedContent actualErrors with
             | None -> ()
+            | Some diff -> Assert.True(String.IsNullOrEmpty(diff), path)
 
-        member this.FullName =
-            match this.OutputDirectory, this.Name with
-            | Some directory, Some name -> Some(Path.Combine(directory.FullName, name))
-            | None, _ -> this.Name
-            | _ -> None
+            result
 
-        member this.OutputFileName =
-            match this.FullName, this.OutputType with
-            | Some fullName, CompileOutput.Library -> Some (Path.ChangeExtension(fullName, ".dll"))
-            | Some fullName, CompileOutput.Exe -> Some (Path.ChangeExtension(fullName, ".exe"))
-            | _ -> None
+    let checkCodes (expected: int list) (selector: CompilationOutput -> ErrorInfo list) (result: CompilationResult) : CompilationResult =
+        match result with
+        | CompilationResult.Success r
+        | CompilationResult.Failure r ->
+            assertErrorNumbers (selector r) expected
+        result
 
-        override this.ToString() = match this.Name with | Some n -> n | _ -> (sprintf "%A" this)
+    let withErrorCodes (expectedCodes: int list) (result: CompilationResult) : CompilationResult =
+        checkCodes expectedCodes (fun r -> getErrors r.Diagnostics) result
 
-    type CSharpCompilationSource =
-        {
-            Source:          SourceCodeFileKind
-            LangVersion:     CSharpLanguageVersion
-            TargetFramework: TargetFramework
-            OutputType:      CompileOutput
-            OutputDirectory: DirectoryInfo option
-            Name:            string option
-            References:      CompilationUnit list
-        }
+    let withErrorCode (expectedCode: int) (result: CompilationResult) : CompilationResult =
+        withErrorCodes [expectedCode] result
 
-    type ILCompilationSource =
-        {
-            Source:     TestType
-            References: CompilationUnit list
-        }
+    let withWarnings (expectedWarnings: ErrorInfo list) (result: CompilationResult) : CompilationResult =
+        assertResultsCategory "Warnings" (fun r -> getWarnings r.Diagnostics) expectedWarnings result
 
-    type ErrorType = Error of int | Warning of int | Information of int | Hidden of int
+    let withWarning (expectedWarning: ErrorInfo) (result: CompilationResult) : CompilationResult =
+        withWarnings [expectedWarning] result
 
-    type SymbolType =
-        | MemberOrFunctionOrValue of string
-        | Entity of string
-        | GenericParameter of string
-        | Parameter of string
-        | StaticParameter of string
-        | ActivePatternCase of string
-        | UnionCase of string
-        | Field of string
+    let withWarningCodes (expectedCodes: int list) (result: CompilationResult) : CompilationResult =
+        checkCodes expectedCodes (fun r -> getWarnings r.Diagnostics) result
 
-        member this.FullName () =
-            match this with
-            | MemberOrFunctionOrValue fullname
-            | Entity fullname
-            | GenericParameter fullname
-            | Parameter fullname
-            | StaticParameter fullname
-            | ActivePatternCase fullname
-            | UnionCase fullname
-            | Field fullname -> fullname
+    let withWarningCode (expectedCode: int) (result: CompilationResult) : CompilationResult =
+        withWarningCodes [expectedCode] result
+
+    let private checkErrorMessages (messages: string list) (selector: CompilationOutput -> ErrorInfo list) (result: CompilationResult) : CompilationResult =
+        match result with
+        | CompilationResult.Success r
+        | CompilationResult.Failure r -> assertErrorMessages (selector r) messages
+        result
+
+    let private diagnosticMatches (pattern: string) (diagnostics: ErrorInfo list) : bool =
+        diagnostics |> List.exists (fun d -> Regex.IsMatch(d.Message, pattern))
+
+    let withDiagnosticMessage (message: string) (result: CompilationResult) : CompilationResult =
+        let messages = [for d in result.Output.Diagnostics -> d.Message]
+        if not (messages |> List.exists ((=) message)) then
+            failwith $"Message:\n{message}\n\nwas not found. All diagnostic messages:\n{messages}"
+        result
+
+    let withDiagnosticMessageMatches (pattern: string) (result: CompilationResult) : CompilationResult =
+        match result with
+        | CompilationResult.Success r
+        | CompilationResult.Failure r ->
+            if not <| diagnosticMatches pattern r.Diagnostics then
+                failwithf "Expected diagnostic message pattern was not found in compilation diagnostics.\nDiagnostics:\n%A" r.Diagnostics
+        result
+
+    let withDiagnosticMessageDoesntMatch (pattern: string) (result: CompilationResult) : CompilationResult =
+        match result with
+        | CompilationResult.Success r
+        | CompilationResult.Failure r ->
+            if diagnosticMatches pattern r.Diagnostics then
+                failwith "Diagnostic message pattern was not expected, but was present."
+        result
+
+    let withMessages (messages: string list) (result: CompilationResult) : CompilationResult =
+        checkErrorMessages messages (fun r -> r.Diagnostics) result
+
+    let withMessage (message: string) (result: CompilationResult) : CompilationResult =
+        withMessages [message] result
+
+    let withErrorMessages (messages: string list) (result: CompilationResult) : CompilationResult =
+        checkErrorMessages messages (fun r -> getErrors r.Diagnostics) result
+
+    let withErrorMessage (message: string) (result: CompilationResult) : CompilationResult =
+        withErrorMessages [message] result
+
+    let withWarningMessages (messages: string list) (result: CompilationResult) : CompilationResult =
+        checkErrorMessages messages (fun r -> getWarnings r.Diagnostics) result
+
+    let withWarningMessage (message: string) (result: CompilationResult) : CompilationResult =
+        withWarningMessages [message] result
+
+    let withExitCode (expectedExitCode: int) (result: CompilationResult) : CompilationResult =
+        match result.RunOutput with
+        | None -> failwith "Execution output is missing, cannot check exit code."
+        | Some o ->
+            match o with
+            | ExecutionOutput e -> Assert.Equal(expectedExitCode, e.ExitCode)
+            | _ -> failwith "Cannot check exit code on this run result."
+        result
+
+    let private checkOutputInOrder (category: string) (substrings: string list) (selector: ExecutionOutput -> string) (result: CompilationResult) : CompilationResult =
+        match result.RunOutput with
+        | None -> failwith (sprintf "Execution output is missing cannot check \"%A\"" category)
+        | Some o ->
+            match o with
+            | ExecutionOutput e ->
+                let where = selector e
+                let mutable searchPos = 0
+                for substring in substrings do
+                    match where.IndexOf(substring, searchPos) with
+                    | -1 -> failwith (sprintf "\nThe following substring:\n    %A\nwas not found in the %A\nOutput:\n    %A" substring category where)
+                    | pos -> searchPos <- pos + substring.Length
+            | _ -> failwith "Cannot check output on this run result."
+        result
+
+    let withOutputContainsAllInOrder (substrings: string list) (result: CompilationResult) : CompilationResult =
+        checkOutputInOrder "STDERR/STDOUT" substrings (fun o -> o.StdOut + "\n" + o.StdErr) result
+
+    let withStdOutContains (substring: string) (result: CompilationResult) : CompilationResult =
+        checkOutputInOrder "STDOUT" [substring] (fun o -> o.StdOut) result
+
+    let withStdOutContainsAllInOrder (substrings: string list) (result: CompilationResult) : CompilationResult =
+        checkOutputInOrder "STDOUT" substrings (fun o -> o.StdOut) result
+
+    let withStdErrContainsAllInOrder (substrings: string list) (result: CompilationResult) : CompilationResult =
+        checkOutputInOrder "STDERR" substrings (fun o -> o.StdErr) result
+
+    let withStdErrContains (substring: string) (result: CompilationResult) : CompilationResult =
+        checkOutputInOrder "STDERR" [substring] (fun o -> o.StdErr) result
+
+    let private assertEvalOutput (selector: FsiValue -> 'T) (value: 'T) (result: CompilationResult) : CompilationResult =
+        match result.RunOutput with
+        | None -> failwith "Execution output is missing cannot check value."
+        | Some (EvalOutput output) ->
+            match output.Result with
+            | Ok (Some e) -> Assert.Equal<'T>(value, (selector e))
+            | Ok None -> failwith "Cannot assert value of evaluation, since it is None."
+            | Result.Error ex -> raise ex
+        | Some _ -> failwith "Only 'eval' output is supported."
+        result
+
+    // TODO: Need to support for:
+    // STDIN, to test completions
+    // Contains
+    // Cancellation
+    let withEvalValueEquals (value: 'T) (result: CompilationResult) : CompilationResult =
+        assertEvalOutput (fun (x: FsiValue) -> x.ReflectionValue :?> 'T) value result
+
+    let withEvalTypeEquals t (result: CompilationResult) : CompilationResult =
+        assertEvalOutput (fun (x: FsiValue) -> x.ReflectionType) t result
 
     let mapDiagnosticSeverity severity errorNumber =
         match severity with
@@ -148,69 +361,6 @@ module rec Compiler =
         | FSharpDiagnosticSeverity.Info -> Information errorNumber
         | FSharpDiagnosticSeverity.Warning -> Warning errorNumber
         | FSharpDiagnosticSeverity.Error -> Error errorNumber
-
-    type Line = Line of int
-    type Col = Col of int
-
-    type Range =
-        { StartLine:   int
-          StartColumn: int
-          EndLine:     int
-          EndColumn:   int }
-
-    type Disposable (dispose : unit -> unit) =
-        interface IDisposable with
-            member this.Dispose() =
-                dispose()
-
-    type ErrorInfo =
-        { Error:   ErrorType
-          Range:   Range
-          NativeRange : FSharp.Compiler.Text.range
-          Message: string
-          SubCategory: string }
-
-    type ExecutionOutput =
-        { ExitCode: int
-          StdOut:   string
-          StdErr:   string }
-
-    type EvalOutput =
-        { Result: Result<FsiValue option, exn>
-          StdOut: string
-          StdErr: string }
-
-    type RunOutput =
-        | EvalOutput of EvalOutput
-        | ExecutionOutput of ExecutionOutput
-
-    type SourceCodeFileName = string
-
-    type CompilationOutput =
-        { OutputPath:    string option
-          Dependencies:  string list
-          Adjust:        int
-          Diagnostics:   ErrorInfo list
-          PerFileErrors: (SourceCodeFileName * ErrorInfo) list
-          Output:        RunOutput option
-          Compilation:   CompilationUnit }
-
-    [<RequireQualifiedAccess>]
-    type CompilationResult =
-        | Success of CompilationOutput
-        | Failure of CompilationOutput
-        with
-            member this.Output = match this with Success o | Failure o -> o
-            member this.RunOutput = this.Output.Output
-
-    type ExecutionPlatform =
-        | Anycpu = 0
-        | AnyCpu32bitPreferred = 1
-        | X86 = 2
-        | Itanium = 3
-        | X64 = 4
-        | Arm = 5
-        | Arm64 = 6
 
     let public defaultOptions : string list = ["--realsig+"]
 
@@ -319,19 +469,11 @@ module rec Compiler =
         |> List.distinctBy (fun e -> e.FileName,e.Severity, e.ErrorNumber, e.StartLine, e.StartColumn, e.EndLine, e.EndColumn, e.Message)
         |> List.map toErrorInfo
 
-    let private partitionErrors diagnostics = diagnostics |> List.partition (fun e -> match e.Error with Error _ -> true | _ -> false)
-
-    let private getErrors diagnostics = diagnostics |> List.filter (fun e -> match e.Error with Error _ -> true | _ -> false)
-
-    let private getWarnings diagnostics = diagnostics |> List.filter (fun e -> match e.Error with Warning _ -> true | _ -> false)
-
-    let private adjustRange (range: Range) (adjust: int) : Range =
-        {
-            StartLine   = range.StartLine   - adjust
-            StartColumn = range.StartColumn + 1
-            EndLine     = range.EndLine     - adjust
-            EndColumn   = range.EndColumn   + 1
-        }
+    let withName (name: string) (cUnit: CompilationUnit) : CompilationUnit =
+        match cUnit with
+        | FS src -> FS { src with Name = Some name }
+        | CS src -> CS { src with Name = Some name }
+        | IL _ -> failwith "IL Compilation cannot be named."
 
     let FsxSourceCode source =
         SourceCodeFileKind.Fsx({FileName="test.fsx"; SourceText=Some source})
@@ -414,17 +556,16 @@ module rec Compiler =
         | FS src -> FS {src with Source=SourceCodeFileKind.Fs({FileName=src.Source.GetSourceFileName; SourceText=src.Source.GetSourceText})}
         | _ -> failwith "Only F# compilation can be of type Fs."
 
-    let withName (name: string) (cUnit: CompilationUnit) : CompilationUnit =
-        match cUnit with
-        | FS src -> FS { src with Name = Some name }
-        | CS src -> CS { src with Name = Some name }
-        | IL _ -> failwith "IL Compilation cannot be named."
-
     let withFileName (name: string) (cUnit: CompilationUnit) : CompilationUnit =
         match cUnit with
         | FS compilationSource -> FS { compilationSource with Source = compilationSource.Source.WithFileName(name) }
         | CS cSharpCompilationSource -> CS { cSharpCompilationSource with Source = cSharpCompilationSource.Source.WithFileName(name) }
         | IL _ -> failwith "IL Compilation cannot be named."
+
+    let private withOptionsHelper (options: string list) (message:string) (cUnit: CompilationUnit) : CompilationUnit =
+        match cUnit with
+        | FS fs -> FS { fs with Options = fs.Options @ options }
+        | _ -> failwith message
 
     let withReferenceFSharpCompilerService (cUnit: CompilationUnit) : CompilationUnit =
         // Compute the location of the FSharp.Compiler.Service dll that matches the target framework used to build this test assembly
@@ -455,11 +596,6 @@ module rec Compiler =
         | FS fs -> FS { fs with AdditionalSources = fs.AdditionalSources @ [additionalSource]}
         | CS _ ->  failwith "References are not supported in C#"
         | IL _ ->  failwith "References are not supported in IL"
-
-    let private withOptionsHelper (options: string list) (message:string) (cUnit: CompilationUnit) : CompilationUnit =
-        match cUnit with
-        | FS fs -> FS { fs with Options = fs.Options @ options }
-        | _ -> failwith message
 
     let withCodepage (codepage:string) (cUnit: CompilationUnit) : CompilationUnit =
         withOptionsHelper [ $"--codepage:{codepage}" ] "codepage is only supported on F#" cUnit
@@ -658,6 +794,35 @@ module rec Compiler =
     let withCulture culture (cUnit: CompilationUnit) : CompilationUnit =
         withOptionsHelper [ $"--preferreduilang:%s{culture}" ] "preferreduilang is only supported for F#" cUnit
 
+    let private partitionErrors diagnostics = diagnostics |> List.partition (fun e -> match e.Error with Error _ -> true | _ -> false)
+
+    let private compileFSharpCompilation compilation ignoreWarnings (cUnit: CompilationUnit) : CompilationResult =
+
+        let ((err: FSharpDiagnostic[], rc: int, outputFilePath: string), deps) =
+            CompilerAssert.CompileRaw(compilation, ignoreWarnings)
+
+        // Create and stash the console output
+        let diagnostics = err |> fromFSharpDiagnostic
+
+        let result = {
+            OutputPath    = None
+            Dependencies  = deps
+            Adjust        = 0
+            PerFileErrors = diagnostics
+            Diagnostics   = diagnostics |> List.map snd
+            Output        = Some (RunOutput.ExecutionOutput { ExitCode = rc; StdOut = ParallelConsole.OutText; StdErr = ParallelConsole.ErrorText })
+            Compilation   = cUnit
+        }
+
+        let (errors, warnings) = partitionErrors result.Diagnostics
+
+        // Treat warnings as errors if "IgnoreWarnings" is false
+        if errors.Length > 0 || (warnings.Length > 0 && not ignoreWarnings) then
+            CompilationResult.Failure result
+        else
+            CompilationResult.Success { result with OutputPath = Some outputFilePath }
+
+
     let rec private asMetadataReference (cUnit: CompilationUnit) reference =
         match reference with
         | CompilationReference (cmpl, _) ->
@@ -701,32 +866,6 @@ module rec Compiler =
                 | IL _ -> failwith "TODO: Process references for IL"
         loop [] references
 
-    let private compileFSharpCompilation compilation ignoreWarnings (cUnit: CompilationUnit) : CompilationResult =
-
-        let ((err: FSharpDiagnostic[], rc: int, outputFilePath: string), deps) =
-            CompilerAssert.CompileRaw(compilation, ignoreWarnings)
-
-        // Create and stash the console output
-        let diagnostics = err |> fromFSharpDiagnostic
-
-        let result = {
-            OutputPath    = None
-            Dependencies  = deps
-            Adjust        = 0
-            PerFileErrors = diagnostics
-            Diagnostics   = diagnostics |> List.map snd
-            Output        = Some (RunOutput.ExecutionOutput { ExitCode = rc; StdOut = ParallelConsole.OutText; StdErr = ParallelConsole.ErrorText })
-            Compilation   = cUnit
-        }
-
-        let (errors, warnings) = partitionErrors result.Diagnostics
-
-        // Treat warnings as errors if "IgnoreWarnings" is false
-        if errors.Length > 0 || (warnings.Length > 0 && not ignoreWarnings) then
-            CompilationResult.Failure result
-        else
-            CompilationResult.Success { result with OutputPath = Some outputFilePath }
-
     let private compileFSharp (fs: FSharpCompilationSource) : CompilationResult =
         let output = fs.OutputType
         let options = fs.Options |> Array.ofList
@@ -734,7 +873,7 @@ module rec Compiler =
         let outputDirectory =
             match fs.OutputDirectory with
             | Some di -> di
-            | None -> DirectoryInfo(createTemporaryDirectory "compileFSharp")
+            | None -> DirectoryInfo(TestFramework.createTemporaryDirectory "compileFSharp")
         let references = processReferences fs.References outputDirectory
         let compilation = Compilation.CreateFromSources([fs.Source] @ fs.AdditionalSources, output, options, fs.TargetFramework, references, name, outputDirectory)
         compileFSharpCompilation compilation fs.IgnoreWarnings (FS fs)
@@ -779,12 +918,12 @@ module rec Compiler =
     let private compileCSharp (csSource: CSharpCompilationSource) : CompilationResult =
 
         let source = csSource.Source.GetSourceText |> Option.defaultValue ""
-        let name = defaultArg csSource.Name (getTemporaryFileName())
+        let name = defaultArg csSource.Name (TestFramework.getTemporaryFileName())
 
         let outputDirectory =
             match csSource.OutputDirectory with
             | Some di -> di
-            | None -> DirectoryInfo(createTemporaryDirectory "compileCSharp")
+            | None -> DirectoryInfo(TestFramework.createTemporaryDirectory "compileCSharp")
 
         let additionalReferences =
             processReferences csSource.References outputDirectory
@@ -841,17 +980,17 @@ module rec Compiler =
     let withMetadataReader func =
         withPeReader (fun reader -> reader.GetMetadataReader() |> func)
 
-    let compileGuid cUnit =
-        cUnit
-        |> compile
-        |> shouldSucceed
-        |> withMetadataReader (fun reader -> reader.GetModuleDefinition().Mvid |> reader.GetGuid)
-
     let compileAssembly cUnit =
         cUnit
         |> compile
         |> shouldSucceed
         |> getAssembly
+
+    let compileGuid cUnit =
+        cUnit
+        |> compile
+        |> shouldSucceed
+        |> withMetadataReader (fun reader -> reader.GetModuleDefinition().Mvid |> reader.GetGuid)
 
     let private parseFSharp (fsSource: FSharpCompilationSource) : CompilationResult =
         let source = fsSource.Source.GetSourceText |> Option.defaultValue ""
@@ -925,7 +1064,7 @@ module rec Compiler =
                 let outputDirectory =
                     match fsSource.OutputDirectory with
                     | Some di -> di
-                    | None -> DirectoryInfo(createTemporaryDirectory "typecheckResults")
+                    | None -> DirectoryInfo(TestFramework.createTemporaryDirectory "typecheckResults")
                 let references = processReferences fsSource.References outputDirectory
                 if references.IsEmpty then
                     Array.empty
@@ -991,7 +1130,7 @@ module rec Compiler =
 
     let compileExeAndRun = asExe >> compileAndRun
 
-    let private processScriptResults fs (evalResult: Result<FsiValue option, exn>, err: FSharpDiagnostic[]) outputWritten errorsWritten =
+    let processScriptResults fs (evalResult: Result<FsiValue option, exn>, err: FSharpDiagnostic[]) outputWritten errorsWritten =
         let perFileDiagnostics = err |> fromFSharpDiagnostic
         let diagnostics = perFileDiagnostics |> List.map snd
         let (errors, warnings) = partitionErrors diagnostics
@@ -1060,7 +1199,7 @@ module rec Compiler =
             let outputDirectory =
                 match fs.OutputDirectory with
                 | Some di -> di
-                | None -> DirectoryInfo(createTemporaryDirectory "runFsi")
+                | None -> DirectoryInfo(TestFramework.createTemporaryDirectory "runFsi")
             outputDirectory.Create()
 
             let references = processReferences fs.References outputDirectory
@@ -1121,6 +1260,12 @@ Actual:
             if FileSystem.FileExistsShim baseline.FilePath then
                 FileSystem.CopyShim(baseline.FilePath, baseline.BslSource, true)
 
+    let private createBaselineErrors (baselineFile: BaselineFile) (actualErrors: string) : unit =
+        printfn $"creating baseline error file for convenience: {baselineFile.FilePath}, expected: {baselineFile.BslSource}"
+        let file = FileSystem.OpenFileForWriteShim(baselineFile.FilePath)
+        file.SetLength(0)
+        file.WriteAllText(actualErrors)
+
     let assertBaseline expected actual baseline fOnFail =
         if expected <> actual then
             fOnFail()
@@ -1130,12 +1275,7 @@ Actual:
         elif FileSystem.FileExistsShim baseline.FilePath then
             FileSystem.FileDeleteShim baseline.FilePath
 
-    
-    let private createBaselineErrors (baselineFile: BaselineFile) (actualErrors: string) : unit =
-        printfn $"creating baseline error file for convenience: {baselineFile.FilePath}, expected: {baselineFile.BslSource}"
-        let file = FileSystem.OpenFileForWriteShim(baselineFile.FilePath)
-        file.SetLength(0)
-        file.WriteAllText(actualErrors)
+   
 
     let private verifyFSBaseline fs : unit =
         match fs.Baseline with
@@ -1443,324 +1583,6 @@ Actual:
         match result with
         | CompilationResult.Success r -> verifyPdbNotExists r
         | _ -> failwith "Result should be \"Success\" in order to verify PDB."
-
-    [<AutoOpen>]
-    module Assertions =
-        let private getErrorNumber (error: ErrorType) : int =
-            match error with
-            | Error e | Warning e | Information e | Hidden e -> e
-
-        let private getErrorInfo (info: ErrorInfo) : string =
-            sprintf "%A %A" info.Error info.Message
-
-        let private assertErrorsLength (source: ErrorInfo list) (expected: 'a list) : unit =
-            if (List.length source) <> (List.length expected) then
-                failwith (sprintf "Expected list of issues differ from compilation result:\nExpected:\n %A\nActual:\n %A" expected (List.map getErrorInfo source))
-            ()
-
-        let private assertErrorMessages (source: ErrorInfo list) (expected: string list) : unit =
-            for exp in expected do
-                if not (List.exists (fun (el: ErrorInfo) ->
-                    let msg = el.Message
-                    msg = exp) source) then
-                    failwith (sprintf "Mismatch in error message, expected '%A' was not found during compilation.\nAll errors:\n%A" exp (List.map getErrorInfo source))
-            assertErrorsLength source expected
-
-        let private assertErrorNumbers (source: ErrorInfo list) (expected: int list) : unit =
-            for exp in expected do
-                if not (List.exists (fun (el: ErrorInfo) -> (getErrorNumber el.Error) = exp) source) then
-                    failwith (sprintf "Mismatch in ErrorNumber, expected '%A' was not found during compilation.\nAll errors:\n%A" exp (List.map getErrorInfo source))
-
-        let private assertErrors (what: string) libAdjust (source: ErrorInfo list) (expected: ErrorInfo list) : unit =
-
-            // (Error 67, Line 14, Col 3, Line 14, Col 24, "This type test or downcast will always hold")
-            let errorMessage error =
-                let { Error = err; Range = range; Message = message } = error
-                let errorType =
-                    match err with
-                    | ErrorType.Error n -> $"Error {n}"
-                    | ErrorType.Warning n-> $"Warning {n}"
-                    | ErrorType.Hidden n-> $"Hidden {n}"
-                    | ErrorType.Information n-> $"Information {n}"
-                $"""({errorType}, Line {range.StartLine}, Col {range.StartColumn}, Line {range.EndLine}, Col {range.EndColumn}, "{message}")""".Replace("\r\n", "\n")
-
-            let expectedErrors = expected |> List.map (fun error -> errorMessage error)
-            let expectedErrorsAsStr = expectedErrors |> String.concat ";\n" |> sprintf "[%s]"
-            let sourceErrors = source |> List.map (fun error -> errorMessage { error with Range = adjustRange error.Range libAdjust })
-            let sourceErrorsAsStr = sourceErrors |> String.concat ";\n" |> sprintf "[%s]"
-
-            let inline checkEqual k a b =
-             if a <> b then
-                 failwith $"%s{what}: Mismatch in %s{k}, expected '%A{a}', got '%A{b}'.\nAll errors:\n%s{sourceErrorsAsStr}\nExpected errors:\n%s{expectedErrorsAsStr}"
-
-            // For lists longer than 100 errors:
-            expectedErrors |> List.iter System.Diagnostics.Debug.WriteLine
-
-            // TODO: Check all "categories", collect all results and print alltogether.
-            checkEqual "Errors count" expectedErrors.Length sourceErrors.Length
-
-            (sourceErrors, expectedErrors)
-            ||> List.iter2 (fun actual expected ->
-                Assert.Equal(expected, actual))
-
-        let adjust (adjust: int) (result: CompilationResult) : CompilationResult =
-            match result with
-            | CompilationResult.Success s -> CompilationResult.Success { s with Adjust = adjust }
-            | CompilationResult.Failure f -> CompilationResult.Failure { f with Adjust = adjust }
-
-        let shouldSucceed (result: CompilationResult) : CompilationResult =
-            match result with
-            | CompilationResult.Success _ -> result
-            | CompilationResult.Failure r ->
-                let message =
-                    [ sprintf "Operation failed (expected to succeed).\n All errors:\n%A\n" r.Diagnostics
-                      match r.Output with
-                      | Some (ExecutionOutput output) ->
-                          sprintf "----output-----\n%s\n----error-------\n%s\n----------" output.StdOut output.StdErr
-                      | Some (EvalOutput output) ->                                  
-                            match output.Result with
-                            | Result.Error exn ->
-                                sprintf "----script error-----\n%s\n----------" (exn.ToString())
-                                sprintf "----output-----\n%s\n----error-------\n%s\n----------" output.StdOut output.StdErr
-                            | Result.Ok fsiVal ->
-                                sprintf "----script output-----\n%A\n----------" (fsiVal)
-                                sprintf "----output-----\n%s\n----error-------\n%s\n----------" output.StdOut output.StdErr
-                      | _ -> () ]
-                    |> String.concat "\n"
-                failwith message
-
-        let shouldFail (result: CompilationResult) : CompilationResult =
-            match result with
-            | CompilationResult.Success _ -> failwith "Operation succeeded (expected to fail)."
-            | CompilationResult.Failure _ -> result
-
-        let private assertResultsCategory (what: string) (selector: CompilationOutput -> ErrorInfo list) (expected: ErrorInfo list) (result: CompilationResult) : CompilationResult =
-            match result with
-            | CompilationResult.Success r
-            | CompilationResult.Failure r ->
-                assertErrors what r.Adjust (selector r) expected
-            result
-
-        let private withResultsIgnoreNativeRange (expectedResults: ErrorInfo list) result : CompilationResult =
-            assertResultsCategory "Results" (fun r -> r.Diagnostics) expectedResults result
-
-        let private withResultIgnoreNativeRange (expectedResult: ErrorInfo ) (result: CompilationResult) : CompilationResult =
-            withResultsIgnoreNativeRange [expectedResult] result
-
-        let withDiagnostics (expected: (ErrorType * Line * Col * Line * Col * string) list) (result: CompilationResult) : CompilationResult =
-            let expectedResults: ErrorInfo list =
-                [ for e in expected do
-                      let (error, Line startLine, Col startCol, Line endLine, Col endCol, message) = e
-                      { Error = error
-                        Range =
-                            { StartLine   = startLine
-                              StartColumn = startCol
-                              EndLine     = endLine
-                              EndColumn   = endCol }
-                        NativeRange = Unchecked.defaultof<_>
-                        SubCategory = ""
-                        Message     = message } ]
-            withResultsIgnoreNativeRange expectedResults result
-
-        let withSingleDiagnostic (expected: (ErrorType * Line * Col * Line * Col * string)) (result: CompilationResult) : CompilationResult =
-            withDiagnostics [expected] result
-
-        let withErrors (expectedErrors: ErrorInfo list) (result: CompilationResult) : CompilationResult =
-            assertResultsCategory "Errors" (fun r -> getErrors r.Diagnostics) expectedErrors result
-
-        let withError (expectedError: ErrorInfo) (result: CompilationResult) : CompilationResult =
-            withErrors [expectedError] result
-
-        module StructuredResultsAsserts =
-            type SimpleErrorInfo =
-                { Error:   ErrorType
-                  Range:   Range
-                  Message: string }
-
-            let withResults (expectedResults: SimpleErrorInfo list) result : CompilationResult =
-                let mappedResults = expectedResults |> List.map (fun s -> { Error = s.Error;Range = s.Range;  Message = s.Message; NativeRange = Unchecked.defaultof<_>; SubCategory = ""})
-                Compiler.Assertions.withResultsIgnoreNativeRange mappedResults result
-
-            let withResult (expectedResult: SimpleErrorInfo ) (result: CompilationResult) : CompilationResult =
-                withResults [expectedResult] result
-
-        module TextBasedDiagnosticAsserts =
-            open FSharp.Compiler.Text.Range
-
-            let private messageAndNumber errorType=
-                match errorType with
-                | ErrorType.Error n -> "error",n
-                | ErrorType.Warning n-> "warning",n
-                | ErrorType.Hidden n
-                | ErrorType.Information n-> "info",n
-
-            let normalizeNewLines (s:string) = s.Replace("\r\n","\n").Replace("\n",Environment.NewLine)
-
-            let private renderToString (cr:CompilationResult) =
-                [ for (file,err) in cr.Output.PerFileErrors do
-                    let m = err.NativeRange
-                    let file = file.Replace("/", "\\")
-                    let severity,no = messageAndNumber err.Error
-                    let adjustedMessage = err.Message |> normalizeNewLines
-                    let location =
-                        if  (equals m range0) || (equals m rangeStartup) || (equals m rangeCmdArgs) then
-                            ""
-                        else
-                            // The baseline .bsl files use 1-based notation for columns, hence the +1's
-                            sprintf "%s(%d,%d,%d,%d):" file m.StartLine (m.StartColumn+1) m.EndLine (m.EndColumn+1)
-                    Environment.NewLine + $"{location} {err.SubCategory} {severity} FS%04d{no}: {adjustedMessage}" + Environment.NewLine
-                ]
-                |> String.Concat
-
-            let withResultsMatchingFile (path:string) (result:CompilationResult) =
-                let expectedContent = File.ReadAllText(path) |> normalizeNewLines
-                let actualErrors = renderToString result
-
-                match Environment.GetEnvironmentVariable("TEST_UPDATE_BSL") with
-                | null -> ()
-                | _ when expectedContent = actualErrors -> ()
-                | _ -> File.WriteAllText(path, actualErrors)
-                //File.WriteAllText(path, actualErrors)
-
-                match Assert.shouldBeSameMultilineStringSets expectedContent actualErrors with
-                | None -> ()
-                | Some diff -> Assert.True(String.IsNullOrEmpty(diff), path)
-
-                result
-
-        let checkCodes (expected: int list) (selector: CompilationOutput -> ErrorInfo list) (result: CompilationResult) : CompilationResult =
-            match result with
-            | CompilationResult.Success r
-            | CompilationResult.Failure r ->
-                assertErrorNumbers (selector r) expected
-            result
-
-        let withErrorCodes (expectedCodes: int list) (result: CompilationResult) : CompilationResult =
-            checkCodes expectedCodes (fun r -> getErrors r.Diagnostics) result
-
-        let withErrorCode (expectedCode: int) (result: CompilationResult) : CompilationResult =
-            withErrorCodes [expectedCode] result
-
-        let withWarnings (expectedWarnings: ErrorInfo list) (result: CompilationResult) : CompilationResult =
-            assertResultsCategory "Warnings" (fun r -> getWarnings r.Diagnostics) expectedWarnings result
-
-        let withWarning (expectedWarning: ErrorInfo) (result: CompilationResult) : CompilationResult =
-            withWarnings [expectedWarning] result
-
-        let withWarningCodes (expectedCodes: int list) (result: CompilationResult) : CompilationResult =
-            checkCodes expectedCodes (fun r -> getWarnings r.Diagnostics) result
-
-        let withWarningCode (expectedCode: int) (result: CompilationResult) : CompilationResult =
-            withWarningCodes [expectedCode] result
-
-        let private checkErrorMessages (messages: string list) (selector: CompilationOutput -> ErrorInfo list) (result: CompilationResult) : CompilationResult =
-            match result with
-            | CompilationResult.Success r
-            | CompilationResult.Failure r -> assertErrorMessages (selector r) messages
-            result
-
-        let private diagnosticMatches (pattern: string) (diagnostics: ErrorInfo list) : bool =
-            diagnostics |> List.exists (fun d -> Regex.IsMatch(d.Message, pattern))
-
-        let withDiagnosticMessage (message: string) (result: CompilationResult) : CompilationResult =
-            let messages = [for d in result.Output.Diagnostics -> d.Message]
-            if not (messages |> List.exists ((=) message)) then
-                failwith $"Message:\n{message}\n\nwas not found. All diagnostic messages:\n{messages}"
-            result
-
-        let withDiagnosticMessageMatches (pattern: string) (result: CompilationResult) : CompilationResult =
-            match result with
-            | CompilationResult.Success r
-            | CompilationResult.Failure r ->
-                if not <| diagnosticMatches pattern r.Diagnostics then
-                    failwithf "Expected diagnostic message pattern was not found in compilation diagnostics.\nDiagnostics:\n%A" r.Diagnostics
-            result
-
-        let withDiagnosticMessageDoesntMatch (pattern: string) (result: CompilationResult) : CompilationResult =
-            match result with
-            | CompilationResult.Success r
-            | CompilationResult.Failure r ->
-                if diagnosticMatches pattern r.Diagnostics then
-                    failwith "Diagnostic message pattern was not expected, but was present."
-            result
-
-        let withMessages (messages: string list) (result: CompilationResult) : CompilationResult =
-            checkErrorMessages messages (fun r -> r.Diagnostics) result
-
-        let withMessage (message: string) (result: CompilationResult) : CompilationResult =
-            withMessages [message] result
-
-        let withErrorMessages (messages: string list) (result: CompilationResult) : CompilationResult =
-            checkErrorMessages messages (fun r -> getErrors r.Diagnostics) result
-
-        let withErrorMessage (message: string) (result: CompilationResult) : CompilationResult =
-            withErrorMessages [message] result
-
-        let withWarningMessages (messages: string list) (result: CompilationResult) : CompilationResult =
-            checkErrorMessages messages (fun r -> getWarnings r.Diagnostics) result
-
-        let withWarningMessage (message: string) (result: CompilationResult) : CompilationResult =
-            withWarningMessages [message] result
-
-        let withExitCode (expectedExitCode: int) (result: CompilationResult) : CompilationResult =
-            match result.RunOutput with
-            | None -> failwith "Execution output is missing, cannot check exit code."
-            | Some o ->
-                match o with
-                | ExecutionOutput e -> Assert.Equal(expectedExitCode, e.ExitCode)
-                | _ -> failwith "Cannot check exit code on this run result."
-            result
-
-        let private checkOutputInOrder (category: string) (substrings: string list) (selector: ExecutionOutput -> string) (result: CompilationResult) : CompilationResult =
-            match result.RunOutput with
-            | None -> failwith (sprintf "Execution output is missing cannot check \"%A\"" category)
-            | Some o ->
-                match o with
-                | ExecutionOutput e ->
-                    let where = selector e
-                    let mutable searchPos = 0
-                    for substring in substrings do
-                        match where.IndexOf(substring, searchPos) with
-                        | -1 -> failwith (sprintf "\nThe following substring:\n    %A\nwas not found in the %A\nOutput:\n    %A" substring category where)
-                        | pos -> searchPos <- pos + substring.Length
-                | _ -> failwith "Cannot check output on this run result."
-            result
-
-        let withOutputContainsAllInOrder (substrings: string list) (result: CompilationResult) : CompilationResult =
-            checkOutputInOrder "STDERR/STDOUT" substrings (fun o -> o.StdOut + "\n" + o.StdErr) result
-
-        let withStdOutContains (substring: string) (result: CompilationResult) : CompilationResult =
-            checkOutputInOrder "STDOUT" [substring] (fun o -> o.StdOut) result
-
-        let withStdOutContainsAllInOrder (substrings: string list) (result: CompilationResult) : CompilationResult =
-            checkOutputInOrder "STDOUT" substrings (fun o -> o.StdOut) result
-
-        let withStdErrContainsAllInOrder (substrings: string list) (result: CompilationResult) : CompilationResult =
-            checkOutputInOrder "STDERR" substrings (fun o -> o.StdErr) result
-
-        let withStdErrContains (substring: string) (result: CompilationResult) : CompilationResult =
-            checkOutputInOrder "STDERR" [substring] (fun o -> o.StdErr) result
-
-        let private assertEvalOutput (selector: FsiValue -> 'T) (value: 'T) (result: CompilationResult) : CompilationResult =
-            match result.RunOutput with
-            | None -> failwith "Execution output is missing cannot check value."
-            | Some (EvalOutput output) ->
-                match output.Result with
-                | Ok (Some e) -> Assert.Equal<'T>(value, (selector e))
-                | Ok None -> failwith "Cannot assert value of evaluation, since it is None."
-                | Result.Error ex -> raise ex
-            | Some _ -> failwith "Only 'eval' output is supported."
-            result
-
-        // TODO: Need to support for:
-        // STDIN, to test completions
-        // Contains
-        // Cancellation
-        let withEvalValueEquals (value: 'T) (result: CompilationResult) : CompilationResult =
-            assertEvalOutput (fun (x: FsiValue) -> x.ReflectionValue :?> 'T) value result
-
-        let withEvalTypeEquals t (result: CompilationResult) : CompilationResult =
-            assertEvalOutput (fun (x: FsiValue) -> x.ReflectionType) t result
 
     let signatureText (pageWidth: int option) (checkResults: FSharp.Compiler.CodeAnalysis.FSharpCheckFileResults) =
         checkResults.GenerateSignature(?pageWidth = pageWidth)

@@ -81,7 +81,7 @@ type DirectoryAttribute(dir: string) =
                         FSBaseline = { FilePath = fsOutFilePath; BslSource = fsBslFilePath; Content = fsBslSource }
                         ILBaseline = { FilePath = ilOutFilePath; BslSource = ilBslFilePath; Content = ilBslSource }
                     }
-            Options           = Compiler.defaultOptions
+            Options           = defaultOptions
             OutputType        = Library
             Name              = Some filename
             IgnoreWarnings    = false

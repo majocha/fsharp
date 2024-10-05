@@ -33,6 +33,7 @@
     <Compile Include="TestFramework.fs" />
     <Compile Include="ILChecker.fs" />
     <Compile Include="Utilities.fs" />
+    <Compile Include="CompilerTypes.fs" />
     <Compile Include="CompilerAssert.fs" />
     <Compile Include="ProjectGeneration.fs" />
     <Compile Include="Assert.fs" />

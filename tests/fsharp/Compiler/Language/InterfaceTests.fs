@@ -6,6 +6,7 @@ open FSharp.Compiler.Diagnostics
 open Xunit
 open FSharp.Test
 open FSharp.Test.Utilities
+open FSharp.Test.Compiler
 
 module InterfaceTests =
 

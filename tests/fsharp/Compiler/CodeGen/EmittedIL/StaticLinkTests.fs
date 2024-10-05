@@ -5,6 +5,7 @@ namespace FSharp.Compiler.UnitTests.CodeGen.EmittedIL
 open System.IO
 open System.Reflection
 open FSharp.Test
+open FSharp.Test.Compiler
 open FSharp.Test.Utilities
 open Xunit
 

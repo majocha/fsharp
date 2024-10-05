@@ -4,7 +4,7 @@ namespace ErrorMessages
 
 open Xunit
 open FSharp.Test.Compiler
-open FSharp.Test.Compiler.Assertions.StructuredResultsAsserts
+open StructuredResultsAsserts
 
 module ``Unsupported Attributes`` =
 

@@ -1,7 +1,7 @@
 namespace ErrorMessages
 
 open FSharp.Test.Compiler
-open FSharp.Test.Compiler.Assertions.StructuredResultsAsserts
+open StructuredResultsAsserts
 
 module ``TailCall Attribute`` =
 
