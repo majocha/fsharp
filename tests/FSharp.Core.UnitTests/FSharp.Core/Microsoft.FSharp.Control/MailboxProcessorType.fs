@@ -322,8 +322,7 @@ type MailboxProcessorType() =
         postEv.Set() |> ignore
         post.Wait()
 
-    // TODO: Attempts to access disposed event at mailbox.fs:193
-    [<Fact(Skip="Possible bug in MailBoxProcessor disposal")>]
+    [<Fact>]
     member this.``After dispose is called, mailbox should stop receiving and processing messages``() = task {
         let mutable isSkip = false
         let mutable actualSkipMessagesCount = 0
