@@ -24,7 +24,7 @@ module PEVerifier =
 
     let private exec exe args =
         let arguments = args |> String.concat " "
-        let exitCode, _output, errors = Commands.executeProcess (Some exe) arguments ""
+        let exitCode, _output, errors = Commands.executeProcess exe arguments ""
         let errors = errors |> String.concat Environment.NewLine
         errors, exitCode
 
