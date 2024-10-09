@@ -37,7 +37,7 @@ module ScriptRunner =
             | CompilationResult.Failure _ -> res
             | CompilationResult.Success s ->
                 
-                if engine.GetOutput() |> TestFramework.outputPassed then
+                if Console.OutText |> TestFramework.outputPassed then
                     res
                 else
                     failwith $"Results looked correct, but 'TEST PASSED OK' was not printed. Result: %A{s}"       

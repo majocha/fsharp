@@ -6,6 +6,7 @@ open System.Text
 open System.Threading
 
 open Xunit.Sdk
+open Xunit.Abstractions
 
 module internal ParallelConsole =
     /// Redirects reads performed on different threads or async execution contexts to the relevant TextReader held by AsyncLocal.
@@ -44,7 +45,7 @@ module internal ParallelConsole =
         new StringWriter() |> localOut.Set
         new StringWriter() |> localError.Set
 
-type ParallelConsole =
+type Console =
     static member OutText =
         Console.Out.Flush()
         string ParallelConsole.localOut.Value
@@ -53,15 +54,71 @@ type ParallelConsole =
         Console.Error.Flush()
         string ParallelConsole.localError.Value
 
-[<AttributeUsage(AttributeTargets.Assembly)>]
-type ResetConsoleWriters() =
-    inherit BeforeAfterTestAttribute()
-    override _.Before (_methodUnderTest: Reflection.MethodInfo): unit =
-        // Ensure fresh empty writers before each individual test.
-        ParallelConsole.resetWriters()
+
+/// Passes captured console output to xUnit.
+type CustomTestRunner(test, messageBus, testClass, constructorArguments, testMethod, testMethodArguments, skipReason, beforeAfterAttributes, aggregator, cancellationTokenSource) =
+    inherit XunitTestRunner(test, messageBus, testClass, constructorArguments, testMethod, testMethodArguments, skipReason, beforeAfterAttributes, aggregator, cancellationTokenSource)
+
+    member _.BaseInvokeTestMethodAsync aggregator = base.InvokeTestMethodAsync aggregator
+    override this.InvokeTestAsync (aggregator: ExceptionAggregator): Tasks.Task<decimal * string> =
+        task {
+            ParallelConsole.resetWriters()
+            let! executionTime = this.BaseInvokeTestMethodAsync aggregator
+            let output =
+                seq {
+                    Console.OutText
+                    if not (String.IsNullOrEmpty Console.ErrorText) then
+                        ""
+                        "=========== Standard Error ==========="
+                        ""
+                        Console.ErrorText
+                } |> String.concat Environment.NewLine
+            return executionTime, output
+        }
+
+type CustomTestCase(decorated: XunitTestCase) =
+    interface IXunitTestCase with
+        member this.DisplayName = decorated.DisplayName
+            member this.InitializationException = decorated.InitializationException
+        member this.Method = decorated.Method
+        member this.SkipReason = decorated.SkipReason
+        member this.TestMethod = decorated.TestMethod
+        member this.TestMethodArguments = decorated.TestMethodArguments
+        member this.Timeout =decorated.Timeout
+        member this.Traits = decorated.Traits
+        member this.SourceInformation
+            with get() = decorated.SourceInformation
+            and set(value) = decorated.SourceInformation <- value
+        member this.UniqueID = decorated.UniqueID
+        member this.Deserialize(serializationInfo: IXunitSerializationInfo) = decorated.Deserialize(serializationInfo)
+        member this.Serialize(serializationInfo: IXunitSerializationInfo) = decorated.Serialize(serializationInfo)
+        member this.RunAsync (sink, messageBus, constructorArguments, aggregator, cancellationTokenSource) =
+            let  customTestCaseRunner : XunitTestCaseRunner =
+                match decorated with
+                | :? XunitTheoryTestCase ->
+                    { new XunitTheoryTestCaseRunner(decorated, decorated.DisplayName, decorated.SkipReason, constructorArguments, sink, messageBus, aggregator, cancellationTokenSource) with
+                        override this.CreateTestRunner(test, messageBus, testCase, constructorArguments, testMethod, testMethodArguments, skipReason, beforeAfterAttributes, aggregator, cancellationTokenSource) =
+                            CustomTestRunner(test, messageBus, testCase, constructorArguments, testMethod, testMethodArguments, skipReason, beforeAfterAttributes, aggregator, cancellationTokenSource)
+                    }
+                | _ ->
+                    { new XunitTestCaseRunner(decorated, decorated.DisplayName, decorated.SkipReason, constructorArguments, decorated.TestMethodArguments, messageBus, aggregator, cancellationTokenSource) with
+                        override this.CreateTestRunner(test, messageBus, testCase, constructorArguments, testMethod, testMethodArguments, skipReason, beforeAfterAttributes, aggregator, cancellationTokenSource) =
+                            CustomTestRunner(test, messageBus, testCase, constructorArguments, testMethod, testMethodArguments, skipReason, beforeAfterAttributes, aggregator, cancellationTokenSource)
+                    }
+            customTestCaseRunner.RunAsync()
+            
 
 type TestRun(sink) =
     inherit XunitTestFramework(sink)
     do
-        MessageSink.sinkWriter |> ignore
         ParallelConsole.initStreamsCapture()
+
+    override this.CreateExecutor assembly =
+        {
+            new XunitTestFrameworkExecutor(assembly, this.SourceInformationProvider, this.DiagnosticMessageSink) with
+                override _.Deserialize (value: string): Xunit.Abstractions.ITestCase =
+                    match base.Deserialize value with
+                    | :? XunitTestCase as xunitTestCase -> CustomTestCase xunitTestCase                     
+                    | testCase -> testCase
+        }
+

@@ -715,7 +715,7 @@ module rec Compiler =
             Adjust        = 0
             PerFileErrors = diagnostics
             Diagnostics   = diagnostics |> List.map snd
-            Output        = Some (RunOutput.ExecutionOutput { ExitCode = rc; StdOut = ParallelConsole.OutText; StdErr = ParallelConsole.ErrorText })
+            Output        = Some (RunOutput.ExecutionOutput { ExitCode = rc; StdOut = Console.OutText; StdErr = Console.ErrorText })
             Compilation   = cUnit
         }
 
@@ -1014,7 +1014,7 @@ module rec Compiler =
     let private evalFSharp (fs: FSharpCompilationSource) (script:FSharpScript) : CompilationResult =
         let source = fs.Source.GetSourceText |> Option.defaultValue ""
         let result = script.Eval(source)
-        let outputWritten, errorsWritten = script.GetOutput(), script.GetErrorOutput()
+        let outputWritten, errorsWritten = Console.OutText, Console.ErrorText
         processScriptResults fs result outputWritten errorsWritten
 
     let scriptingShim = Path.Combine(__SOURCE_DIRECTORY__,"ScriptingShims.fsx")
@@ -1028,7 +1028,7 @@ module rec Compiler =
             |> String.Concat
 
         let result = script.Eval("#load " + fileNames)
-        let outputWritten, errorsWritten = script.GetOutput(), script.GetErrorOutput()
+        let outputWritten, errorsWritten = Console.OutText, Console.ErrorText
         processScriptResults fs result outputWritten errorsWritten
 
     let eval (cUnit: CompilationUnit) : CompilationResult =

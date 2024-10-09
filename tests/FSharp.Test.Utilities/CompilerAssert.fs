@@ -350,7 +350,7 @@ module CompilerAssertHelpers =
             ParallelConsole.resetWriters()
             let assembly = Assembly.LoadFrom assemblyPath
             let ex = try executeAssemblyEntryPoint assembly isFsx; None with ex -> Some ex
-            ParallelConsole.OutText, ParallelConsole.ErrorText, ex
+            Console.OutText, Console.ErrorText, ex
                 
     let executeBuiltApp assembly dependecies isFsx =
         let thisAssemblyDirectory = Path.GetDirectoryName(typeof<Worker>.Assembly.Location)
@@ -688,7 +688,7 @@ Updated automatically, please check diffs in your pull request, changes must be 
         // If we execute in-process (true by default), then the only way of getting STDOUT is to redirect it to SB, and STDERR is from catching an exception.
         if not newProcess then
             let exitCode = try executeBuiltAppAndReturnResult outputFilePath deps isFsx; 0 with _ -> -1
-            exitCode, ParallelConsole.OutText, ParallelConsole.ErrorText      
+            exitCode, Console.OutText, Console.ErrorText      
         else
             executeBuiltAppNewProcessAndReturnResult outputFilePath
 

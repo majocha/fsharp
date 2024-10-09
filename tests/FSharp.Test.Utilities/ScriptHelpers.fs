@@ -39,9 +39,11 @@ type private EventedTextWriter() =
                 else v
             sb.Clear() |> ignore
             sw.WriteLine line
-            lineWritten.Trigger(line)
+            backgroundTask { lineWritten.Trigger(line) } |> ignore
         else sb.Append(c) |> ignore
-    override _.ToString() = sw.ToString()
+    override _.ToString() =
+        sw.Flush()
+        sw.ToString()
 
 type FSharpScript(?additionalArgs: string[], ?quiet: bool, ?langVersion: LangVersion, ?input: string) =
 
@@ -90,10 +92,6 @@ type FSharpScript(?additionalArgs: string[], ?quiet: bool, ?langVersion: LangVer
     member _.OutputProduced = outWriter.LineWritten
 
     member _.ErrorProduced = errorWriter.LineWritten
-
-    member _.GetOutput() = ParallelConsole.OutText
-
-    member _.GetErrorOutput() = ParallelConsole.ErrorText
 
     member this.Eval(code: string, ?cancellationToken: CancellationToken, ?desiredCulture: Globalization.CultureInfo) =
         let originalCulture = Thread.CurrentThread.CurrentCulture
