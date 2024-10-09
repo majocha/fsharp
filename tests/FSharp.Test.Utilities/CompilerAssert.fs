@@ -420,8 +420,8 @@ module CompilerAssertHelpers =
 
         // Generate a response file, purely for diagnostic reasons.
         File.WriteAllLines(Path.ChangeExtension(outputFilePath, ".rsp"), args)
-        let errors, rc = TestContext.Checker.Compile args |> Async.RunImmediate
-        errors, rc, outputFilePath
+        let errors, exn = TestContext.Checker.Compile args |> Async.RunImmediate
+        errors, exn, outputFilePath
 
     let compileDisposable (outputDirectory:DirectoryInfo) isExe options targetFramework nameOpt (sources:SourceCodeFileKind list) =
         let name =
@@ -509,7 +509,7 @@ module CompilerAssertHelpers =
         finally
             try Directory.Delete(tempDir, true) with | _ -> ()
 
-    let rec compileCompilationAux outputDirectory ignoreWarnings (cmpl: Compilation) : (FSharpDiagnostic[] * int * string) * string list =
+    let rec compileCompilationAux outputDirectory ignoreWarnings (cmpl: Compilation) : (FSharpDiagnostic[] * exn option * string) * string list =
 
         let compilationRefs, deps = evaluateReferences outputDirectory ignoreWarnings cmpl
         let isExe, sources, options, targetFramework, name =
@@ -547,7 +547,7 @@ module CompilerAssertHelpers =
                                 | _ -> getTemporaryFileNameInDirectory outputPath.FullName
                             let tmp = Path.Combine(outputPath.FullName, Path.ChangeExtension(fileName, ".dll"))
                             cmpl.EmitAsFile tmp
-                            (([||], 0, tmp), []), false)
+                            (([||], None, tmp), []), false)
 
             let compilationRefs =
                 compiledRefs
@@ -588,7 +588,8 @@ module CompilerAssertHelpers =
     let unwrapException (ex: exn) = ex.InnerException |> Option.ofObj |> Option.map _.Message |> Option.defaultValue ex.Message
 
     let executeBuiltAppAndReturnResult (outputFilePath: string) (deps: string list) isFsx =
-        executeBuiltApp outputFilePath deps isFsx
+        let exn = try executeBuiltApp outputFilePath deps isFsx; None with exn -> Some exn
+        None, Console.OutText, Console.ErrorText, exn
 
 
     let executeBuiltAppNewProcessAndReturnResult (outputFilePath: string) : (int * string * string) =
@@ -612,7 +613,7 @@ module CompilerAssertHelpers =
         let runtimeconfigPath = Path.ChangeExtension(outputFilePath, ".runtimeconfig.json")
         File.WriteAllText(runtimeconfigPath, runtimeconfig)
 #endif
-        let exitCode, output, errors = Commands.executeProcess (Some fileName) arguments (Path.GetDirectoryName(outputFilePath))
+        let exitCode, output, errors = Commands.executeProcess fileName arguments (Path.GetDirectoryName(outputFilePath))
         (exitCode, output |> String.concat "\n", errors |> String.concat "\n")
 
 open CompilerAssertHelpers
@@ -685,12 +686,11 @@ Updated automatically, please check diffs in your pull request, changes must be 
         returnCompilation cmpl (defaultArg ignoreWarnings false)
 
     static member ExecuteAndReturnResult (outputFilePath: string, isFsx: bool, deps: string list, newProcess: bool) =
-        // If we execute in-process (true by default), then the only way of getting STDOUT is to redirect it to SB, and STDERR is from catching an exception.
         if not newProcess then
-            let exitCode = try executeBuiltAppAndReturnResult outputFilePath deps isFsx; 0 with _ -> -1
-            exitCode, Console.OutText, Console.ErrorText      
+            executeBuiltAppAndReturnResult outputFilePath deps isFsx
         else
-            executeBuiltAppNewProcessAndReturnResult outputFilePath
+            let processExitCode, deps, isFsx = executeBuiltAppNewProcessAndReturnResult outputFilePath
+            Some processExitCode, deps, isFsx, None
 
     static member Execute(cmpl: Compilation, ?ignoreWarnings, ?beforeExecute, ?newProcess, ?onOutput) =
 
