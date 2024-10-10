@@ -39,13 +39,15 @@ type private EventedTextWriter() =
                 else v
             sb.Clear() |> ignore
             sw.WriteLine line
-            backgroundTask { lineWritten.Trigger(line) } |> ignore
+            lineWritten.Trigger(line)
         else sb.Append(c) |> ignore
     override _.ToString() =
         sw.Flush()
         sw.ToString()
 
 type FSharpScript(?additionalArgs: string[], ?quiet: bool, ?langVersion: LangVersion, ?input: string) =
+
+    do ignore input
 
     let additionalArgs = defaultArg additionalArgs [||]
     let quiet = defaultArg quiet true
@@ -73,17 +75,11 @@ type FSharpScript(?additionalArgs: string[], ?quiet: bool, ?langVersion: LangVer
         |]
 
     let argv = Array.append baseArgs additionalArgs
-
-    let inReader = new StringReader(defaultArg input "")
+  
     let outWriter = new EventedTextWriter()
     let errorWriter = new EventedTextWriter()
 
-    do
-        ParallelConsole.localIn.Set inReader
-        ParallelConsole.localOut.Set outWriter
-        ParallelConsole.localError.Set errorWriter
-
-    let fsi = FsiEvaluationSession.Create (config, argv, stdin, stdout, stderr)
+    let fsi = FsiEvaluationSession.Create (config, argv, stdin, outWriter, errorWriter)
 
     member _.ValueBound = fsi.ValueBound
 
@@ -93,12 +89,19 @@ type FSharpScript(?additionalArgs: string[], ?quiet: bool, ?langVersion: LangVer
 
     member _.ErrorProduced = errorWriter.LineWritten
 
+    member _.GetOutput() = string outWriter
+
+    member _.GetErrorOutput() = string errorWriter
+
     member this.Eval(code: string, ?cancellationToken: CancellationToken, ?desiredCulture: Globalization.CultureInfo) =
         let originalCulture = Thread.CurrentThread.CurrentCulture
         Thread.CurrentThread.CurrentCulture <- Option.defaultValue Globalization.CultureInfo.InvariantCulture desiredCulture
 
         let cancellationToken = defaultArg cancellationToken CancellationToken.None
         let ch, errors = fsi.EvalInteractionNonThrowing(code, cancellationToken)
+        // Replay output to test console.
+        printf $"{this.GetOutput()}"
+        eprintf $"{this.GetErrorOutput()}"
 
         Thread.CurrentThread.CurrentCulture <- originalCulture
 

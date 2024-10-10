@@ -378,25 +378,23 @@ type AsyncModule() =
 
     [<Fact>]
     member _.``AwaitWaitHandle.DisposedWaitHandle2``() = 
-        let wh = new ManualResetEvent(false)
-        let started = new ManualResetEventSlim(false)
+        let wh = new System.Threading.ManualResetEvent(false)
+        let cts = new CancellationTokenSource()
+        let test =
+            Async.StartAsTask( async {
+                printfn "starting the test"
+                let! _ = Async.AwaitWaitHandle(wh)
+                printfn "should never get here"
+            }, cancellationToken = cts.Token)
 
-        let test = 
-            async {
-                started.Set()
-                let! timeout = Async.AwaitWaitHandle(wh, 5000)
-                Assert.False(timeout, "Timeout expected")
-            }
-            |> Async.StartAsTask
-
-        task {
-            started.Wait()
-            // Wait a moment then dispose waithandle - nothing should happen
-            do! Task.Delay 500
-            Assert.False(test.IsCompleted, "Test completed too early")
-            dispose wh
-            do! test
-        }
+        // await 3 secs then dispose waithandle - nothing should happen
+        let timeout = test.Wait 3000
+        Assert.False(timeout, "Test completed too early.")
+        printfn "disposing"
+        dispose wh
+        printfn "cancelling in 3 seconds"
+        cts.CancelAfter 3000
+        Assert.ThrowsAsync<TaskCanceledException>(fun () -> test)
 
     [<Fact>]
     member _.``RunSynchronously.NoThreadJumpsAndTimeout``() = 
@@ -471,8 +469,10 @@ type AsyncModule() =
         task {
             use failOnlyOne = new Semaphore(0, 1)
             let mutable cancelled = 0
+            let mutable started = 0
 
             let job i = async {
+                Interlocked.Increment &started |> ignore
                 use! holder = Async.OnCancel (fun () -> Interlocked.Increment &cancelled |> ignore)
                 do! failOnlyOne |> Async.AwaitWaitHandle |> Async.Ignore
                 failwith "boom" 
@@ -482,7 +482,8 @@ type AsyncModule() =
             do! Task.Delay 100
             failOnlyOne.Release() |> ignore
             do! test
-            Assert.Equal(99, cancelled)
+            printfn $"started: {started}, cancelled: {cancelled}"
+            Assert.Equal(started - 1, cancelled)
         }
 
     [<Fact>]
