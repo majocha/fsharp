@@ -233,48 +233,35 @@ let singleNegTest name =
 
         SingleTest.singleNegTest cfg name
 
-module Neg1 = 
-    [<Theory>]
-    [<InlineData("neg1")>]
-    [<InlineData("neg2")>]
-    [<InlineData("neg2c")>]
-    [<InlineData("neg2e")>]
-    [<InlineData("neg2g")>]
-    [<InlineData("neg2h")>]
-    [<InlineData("neg4")>]
-    [<InlineData("neg6")>]
-    let ``negative type provider tests 1`` (name:string) = singleNegTest name
-
-module Neg2 =
-    [<Theory>]
-    [<InlineData("InvalidInvokerExpression")>]
-    [<InlineData("providerAttributeErrorConsume")>]
-    [<InlineData("ProviderAttribute_EmptyConsume")>]
-    [<InlineData("EVIL_PROVIDER_GetNestedNamespaces_Exception")>]
-    [<InlineData("EVIL_PROVIDER_NamespaceName_Exception")>]
-    [<InlineData("EVIL_PROVIDER_NamespaceName_Empty")>]
-    let ``negative type provider tests 2`` (name:string) = singleNegTest name
-
-module Neg3 =
-    [<Theory>]
-    [<InlineData("EVIL_PROVIDER_GetTypes_Exception")>]
-    [<InlineData("EVIL_PROVIDER_ResolveTypeName_Exception")>]
-    [<InlineData("EVIL_PROVIDER_GetNamespaces_Exception")>]
-    [<InlineData("EVIL_PROVIDER_GetStaticParameters_Exception")>]
-    [<InlineData("EVIL_PROVIDER_GetInvokerExpression_Exception")>]
-    [<InlineData("EVIL_PROVIDER_GetTypes_Null")>]
-    [<InlineData("EVIL_PROVIDER_ResolveTypeName_Null")>]
-    let ``negative type provider tests 3`` (name:string) = singleNegTest name
-
-module Neg4 =
-    [<Theory>]
-    [<InlineData("EVIL_PROVIDER_GetNamespaces_Null")>]
-    [<InlineData("EVIL_PROVIDER_GetStaticParameters_Null")>]
-    [<InlineData("EVIL_PROVIDER_GetInvokerExpression_Null")>]
-    [<InlineData("EVIL_PROVIDER_DoesNotHaveConstructor")>]
-    [<InlineData("EVIL_PROVIDER_ConstructorThrows")>]
-    [<InlineData("EVIL_PROVIDER_ReturnsTypeWithIncorrectNameFromApplyStaticArguments")>]
-    let ``negative type provider tests 4`` (name:string) = singleNegTest name
+[<Theory>]
+[<InlineData("neg1")>]
+[<InlineData("neg2")>]
+[<InlineData("neg2c")>]
+[<InlineData("neg2e")>]
+[<InlineData("neg2g")>]
+[<InlineData("neg2h")>]
+[<InlineData("neg4")>]
+[<InlineData("neg6")>]
+[<InlineData("InvalidInvokerExpression")>]
+[<InlineData("providerAttributeErrorConsume")>]
+[<InlineData("ProviderAttribute_EmptyConsume")>]
+[<InlineData("EVIL_PROVIDER_GetNestedNamespaces_Exception")>]
+[<InlineData("EVIL_PROVIDER_NamespaceName_Exception")>]
+[<InlineData("EVIL_PROVIDER_NamespaceName_Empty")>]
+[<InlineData("EVIL_PROVIDER_GetTypes_Exception")>]
+[<InlineData("EVIL_PROVIDER_ResolveTypeName_Exception")>]
+[<InlineData("EVIL_PROVIDER_GetNamespaces_Exception")>]
+[<InlineData("EVIL_PROVIDER_GetStaticParameters_Exception")>]
+[<InlineData("EVIL_PROVIDER_GetInvokerExpression_Exception")>]
+[<InlineData("EVIL_PROVIDER_GetTypes_Null")>]
+[<InlineData("EVIL_PROVIDER_ResolveTypeName_Null")>]
+[<InlineData("EVIL_PROVIDER_GetNamespaces_Null")>]
+[<InlineData("EVIL_PROVIDER_GetStaticParameters_Null")>]
+[<InlineData("EVIL_PROVIDER_GetInvokerExpression_Null")>]
+[<InlineData("EVIL_PROVIDER_DoesNotHaveConstructor")>]
+[<InlineData("EVIL_PROVIDER_ConstructorThrows")>]
+[<InlineData("EVIL_PROVIDER_ReturnsTypeWithIncorrectNameFromApplyStaticArguments")>]
+let ``negative type provider tests`` (name:string) = singleNegTest name
 
 let splitAssembly subdir project =
     let cfg = testConfig project

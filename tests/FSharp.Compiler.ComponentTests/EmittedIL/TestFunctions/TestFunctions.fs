@@ -5,7 +5,7 @@ open System.IO
 open FSharp.Test
 open FSharp.Test.Compiler
 
-module Helpers =
+module TestFunctions =
 
     let verifyCore compilation =
         compilation
@@ -25,10 +25,6 @@ module Helpers =
         compilation
         |> verifyCore
         |> verifyILBaseline
-
-open Helpers
-
-module TestFunctions1 =
 
     //SOURCE=TestFunction01.fs   SCFLAGS="-g --test:EmitFeeFeeAs100001 --optimize-" COMPILE_ONLY=1 POSTCMD="..\\CompareIL.cmd TestFunction01.exe"	# TestFunction01.fs
     [<Theory; Directory(__SOURCE_DIRECTORY__, Includes=[|"TestFunction01.fs"|])>]
@@ -120,8 +116,6 @@ module TestFunctions1 =
         compilation
         |> verifyCompilation
 
-module TestFunctions2 =
-
     //SOURCE=TestFunction09b4.fs SCFLAGS="-g --test:EmitFeeFeeAs100001 --optimize-" COMPILE_ONLY=1 POSTCMD="..\\CompareIL.cmd TestFunction09b4.exe"	# TestFunction09b4.fs
     [<Theory; Directory(__SOURCE_DIRECTORY__, Includes=[|"TestFunction09b4_RealInternalSignatureOff.fs"|])>]
     let ``TestFunction09b4_RealInternalSignatureOff_fs`` compilation =
@@ -201,8 +195,6 @@ module TestFunctions2 =
     let ``TestFunction20_fs`` compilation =
         compilation
         |> verifyCompilation
-
-module TestFunctions3 =
 
     //SOURCE=TestFunction21.fs  SCFLAGS="-g --test:EmitFeeFeeAs100001 --optimize-" COMPILE_ONLY=1 POSTCMD="..\\CompareIL.cmd TestFunction21.exe"	# TestFunction21.fs -
     [<Theory; Directory(__SOURCE_DIRECTORY__, Includes=[|"TestFunction21.fs"|])>]
@@ -300,8 +292,6 @@ module TestFunctions3 =
         compilation
         |> withRealInternalSignatureOff
         |> verifyCompilation
-
-module TestFunctions4 =
 
     //SOURCE=TestFunction22g.fs   SCFLAGS="-g --test:EmitFeeFeeAs100001 --optimize-" COMPILE_ONLY=1 POSTCMD="..\\CompareIL.cmd TestFunction22g.exe"	# TestFunction22g.fs
     [<Theory; Directory(__SOURCE_DIRECTORY__, Includes=[|"TestFunction22g_RealInternalSignatureOn.fs"|])>]

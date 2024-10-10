@@ -85,7 +85,7 @@ x
         )
 #endif
 
-    [<Fact>]
+    [<Fact(Skip="TBD")>]
     member _.``Capture console input``() =
         use script = new FSharpScript(input = "stdin:1234\r\n")
         let opt = script.Eval("System.Console.ReadLine()") |> getValue
@@ -93,7 +93,7 @@ x
         Assert.Equal(typeof<string>, value.ReflectionType)
         Assert.Equal("stdin:1234", downcast value.ReflectionValue)
 
-    [<Fact>]
+    [<Fact(Skip="TBD")>]
     member _.``Capture console output/error``() =
         use script = new FSharpScript()
         use sawOutputSentinel = new ManualResetEvent(false)

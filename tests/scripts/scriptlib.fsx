@@ -10,6 +10,14 @@ open System.IO
 open System.Text
 open System.Diagnostics
 
+module MessageSink =
+    let sinkWriter =
+#if DEBUG
+        Console.Out
+#else
+        TextWriter.Null
+#endif
+
 [<AutoOpen>]
 module Scripting =
 
@@ -77,7 +85,7 @@ module Scripting =
         if Directory.Exists output then 
             Directory.Delete(output, true) 
 
-    let log format = printfn format
+    let log format = fprintfn MessageSink.sinkWriter format
 
     type FilePath = string
 
@@ -155,11 +163,14 @@ module Scripting =
 
             p.WaitForExit() 
 
+            printf $"{string out}"
+            eprintf $"{string err}"
+
             match p.ExitCode with
             | 0 ->
                 Success(string out)
             | errCode ->
-                let msg = sprintf "Error running command '%s' with args '%s' in directory '%s'.\n---- stdout below --- \n%s\n---- stderr below --- \n%s " exePath arguments workDir (out.ToString()) (err.ToString())
+                let msg = sprintf "Error running command '%s' with args '%s' in directory '%s'" exePath arguments workDir
                 ErrorLevel (msg, errCode)
 
     type OutPipe (writer: TextWriter) =

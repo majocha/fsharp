@@ -63,6 +63,16 @@ module AssemblyResolver =
     do addResolver()
 #endif
 
+type ExecutionOutcome = 
+    | NoExitCode
+    | ExitCode of int
+    | Failure of exn
+
+type ExecutionOutput =
+    { Outcome:   ExecutionOutcome
+      StdOut:   string
+      StdErr:   string }
+
 [<Sealed>]
 type ILVerifier (dllFilePath: string) =
 
@@ -325,7 +335,14 @@ module CompilerAssertHelpers =
             else
                 entryPoint
         let args = mkDefaultArgs entryPoint
-        entryPoint.Invoke(Unchecked.defaultof<obj>, args) |> ignore
+        let outcome =
+            try 
+                match entryPoint.Invoke(Unchecked.defaultof<obj>, args) with 
+                | :? int as rc -> ExitCode rc
+                | _ -> NoExitCode
+            with
+            | exn -> Failure exn
+        outcome, TestConsole.OutText, TestConsole.ErrorText
 
 #if NETCOREAPP
     let executeBuiltApp assemblyPath deps isFsx =
@@ -337,7 +354,7 @@ module CompilerAssertHelpers =
                 |> Option.map ctxt.LoadFromAssemblyPath
                 |> Option.toObj)
 
-            executeAssemblyEntryPoint (ctxt.LoadFromAssemblyPath assemblyPath) isFsx 
+            executeAssemblyEntryPoint (ctxt.LoadFromAssemblyPath assemblyPath) isFsx
         finally
             ctxt.Unload()
 #else
@@ -346,12 +363,11 @@ module CompilerAssertHelpers =
 
         member x.ExecuteTestCase assemblyPath isFsx =
             // Set console streams for the AppDomain.
-            ParallelConsole.initStreamsCapture()
-            ParallelConsole.resetWriters()
+            TestConsole.initStreamsCapture()
+            TestConsole.resetWriters()
             let assembly = Assembly.LoadFrom assemblyPath
-            let ex = try executeAssemblyEntryPoint assembly isFsx; None with ex -> Some ex
-            Console.OutText, Console.ErrorText, ex
-                
+            executeAssemblyEntryPoint assembly isFsx
+
     let executeBuiltApp assembly dependecies isFsx =
         let thisAssemblyDirectory = Path.GetDirectoryName(typeof<Worker>.Assembly.Location)
         let setup = AppDomainSetup(ApplicationBase = thisAssemblyDirectory)
@@ -368,13 +384,15 @@ module CompilerAssertHelpers =
         let worker =
             (testCaseDomain.CreateInstanceFromAndUnwrap(typeof<Worker>.Assembly.CodeBase, typeof<Worker>.FullName)) :?> Worker
 
-        let out, error, ex = worker.ExecuteTestCase assembly isFsx
-
+        let outcome, output, errors = worker.ExecuteTestCase assembly isFsx
+        // Replay streams captured in appdomain.
+        printf $"{output}"
+        eprintf $"{errors}"
+        
         AppDomain.Unload testCaseDomain
+        
+        outcome, output, errors
 
-        printf $"{out}"
-        eprintf $"{error}"
-        ex |> Option.iter raise
 #endif
 
     let defaultProjectOptions (targetFramework: TargetFramework) =
@@ -420,8 +438,8 @@ module CompilerAssertHelpers =
 
         // Generate a response file, purely for diagnostic reasons.
         File.WriteAllLines(Path.ChangeExtension(outputFilePath, ".rsp"), args)
-        let errors, exn = TestContext.Checker.Compile args |> Async.RunImmediate
-        errors, exn, outputFilePath
+        let errors, ex = TestContext.Checker.Compile args |> Async.RunImmediate
+        errors, ex, outputFilePath
 
     let compileDisposable (outputDirectory:DirectoryInfo) isExe options targetFramework nameOpt (sources:SourceCodeFileKind list) =
         let name =
@@ -587,12 +605,7 @@ module CompilerAssertHelpers =
 
     let unwrapException (ex: exn) = ex.InnerException |> Option.ofObj |> Option.map _.Message |> Option.defaultValue ex.Message
 
-    let executeBuiltAppAndReturnResult (outputFilePath: string) (deps: string list) isFsx =
-        let exn = try executeBuiltApp outputFilePath deps isFsx; None with exn -> Some exn
-        None, Console.OutText, Console.ErrorText, exn
-
-
-    let executeBuiltAppNewProcessAndReturnResult (outputFilePath: string) : (int * string * string) =
+    let executeBuiltAppNewProcess (outputFilePath: string) =
 #if !NETCOREAPP
         let fileName = outputFilePath
         let arguments = ""
@@ -613,8 +626,10 @@ module CompilerAssertHelpers =
         let runtimeconfigPath = Path.ChangeExtension(outputFilePath, ".runtimeconfig.json")
         File.WriteAllText(runtimeconfigPath, runtimeconfig)
 #endif
-        let exitCode, output, errors = Commands.executeProcess fileName arguments (Path.GetDirectoryName(outputFilePath))
-        (exitCode, output |> String.concat "\n", errors |> String.concat "\n")
+        let rc, output, errors = Commands.executeProcess fileName arguments (Path.GetDirectoryName(outputFilePath))
+        String.Join(Environment.NewLine, output) |> printf "%s"
+        String.Join(Environment.NewLine, errors) |> eprintf "%s"
+        ExitCode rc, TestConsole.OutText, TestConsole.ErrorText
 
 open CompilerAssertHelpers
 
@@ -686,13 +701,14 @@ Updated automatically, please check diffs in your pull request, changes must be 
         returnCompilation cmpl (defaultArg ignoreWarnings false)
 
     static member ExecuteAndReturnResult (outputFilePath: string, isFsx: bool, deps: string list, newProcess: bool) =
-        if not newProcess then
-            executeBuiltAppAndReturnResult outputFilePath deps isFsx
-        else
-            let processExitCode, deps, isFsx = executeBuiltAppNewProcessAndReturnResult outputFilePath
-            Some processExitCode, deps, isFsx, None
+        let outcome, output, errors = 
+            if not newProcess then
+                executeBuiltApp outputFilePath deps isFsx
+            else
+                executeBuiltAppNewProcess outputFilePath
+        { Outcome = outcome; StdOut = output; StdErr = errors}
 
-    static member Execute(cmpl: Compilation, ?ignoreWarnings, ?beforeExecute, ?newProcess, ?onOutput) =
+    static member Execute(cmpl: Compilation, ?ignoreWarnings, ?beforeExecute, ?newProcess) =
 
         let copyDependenciesToOutputDir (outputFilePath:string) (deps: string list) =
             let outputDirectory = Path.GetDirectoryName(outputFilePath)
@@ -704,21 +720,24 @@ Updated automatically, please check diffs in your pull request, changes must be 
         let ignoreWarnings = defaultArg ignoreWarnings false
         let beforeExecute = defaultArg beforeExecute copyDependenciesToOutputDir
         let newProcess = defaultArg newProcess false
-        let onOutput = defaultArg onOutput (fun _ -> ())
         compileCompilation ignoreWarnings cmpl (fun ((errors, _, outputFilePath), deps) ->
             assertErrors 0 ignoreWarnings errors [||]
             beforeExecute outputFilePath deps
-            if newProcess then
-                let (exitCode, output, errors) = executeBuiltAppNewProcessAndReturnResult outputFilePath
-                if exitCode <> 0 then
-                    Assert.Fail errors
-                onOutput output
-            else
-                executeBuiltApp outputFilePath deps false
+            let outcome, _, _ =
+                if newProcess then 
+                    executeBuiltAppNewProcess outputFilePath
+                else
+                    executeBuiltApp outputFilePath deps false
+
+            match outcome with
+            | ExitCode n when n <> 0 -> failwith $"Process exited with code {n}."
+            | Failure exn -> raise exn
+            | _ -> ()
         )
 
     static member ExecutionHasOutput(cmpl: Compilation, expectedOutput: string) =
-        CompilerAssert.Execute(cmpl, newProcess = true, onOutput = (fun output -> Assert.Equal(expectedOutput, output)))  
+        CompilerAssert.Execute(cmpl, newProcess = true)
+        Assert.Equal(expectedOutput, TestConsole.OutText)  
 
     static member Pass (source: string) =
         let parseResults, fileAnswer = TestContext.Checker.ParseAndCheckFileInProject("test.fs", 0, SourceText.ofString source, defaultProjectOptions TargetFramework.Current) |> Async.RunImmediate
@@ -982,10 +1001,10 @@ Updated automatically, please check diffs in your pull request, changes must be 
         | Choice2Of2 ex -> errorMessages.Add(ex.Message)
         | _ -> ()
 
-        errorMessages, outStream.ToString()
+        errorMessages, string outStream, string errStream
 
     static member RunScriptWithOptions options (source: string) (expectedErrorMessages: string list) =
-        let errorMessages, _ = CompilerAssert.RunScriptWithOptionsAndReturnResult options source
+        let errorMessages, _, _ = CompilerAssert.RunScriptWithOptionsAndReturnResult options source
         if expectedErrorMessages.Length <> errorMessages.Count then
             Assert.Fail(sprintf "Expected error messages: %A \n\n Actual error messages: %A" expectedErrorMessages errorMessages)
         else
