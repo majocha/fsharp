@@ -216,8 +216,7 @@ type MailboxProcessorType() =
                         receiveEv.WaitOne() |> ignore
                         let! (msg) = inbox.Receive ()
                         finishedEv.Set() |> ignore
-                },
-                cancellationToken = cts.Token)
+                })
         let post =
             async {
                 while not cts.IsCancellationRequested do
@@ -252,8 +251,7 @@ type MailboxProcessorType() =
                         receiveEv.WaitOne() |> ignore
                         let! (msg) = inbox.Receive (5000)
                         finishedEv.Set() |> ignore
-                },
-                cancellationToken = cts.Token)
+                })
 
         let isErrored = mb.Error |> Async.AwaitEvent |> Async.StartAsTask
 
@@ -330,9 +328,8 @@ type MailboxProcessorType() =
         let sleepDueTime = 100
         let expectedMessagesCount = 2
         use mre = new ManualResetEventSlim(false)
-        use cts = new CancellationTokenSource()
         let mb =
-            MailboxProcessor.Start((fun b ->
+            MailboxProcessor.Start(fun b ->
                 let rec loop() =
                      async {
                         match! b.Receive() with
@@ -349,8 +346,7 @@ type MailboxProcessorType() =
                                 return! loop()
                         | _ -> ()
                     }
-                loop()),
-                cancellationToken = cts.Token
+                loop()
             )
         let post() = Increment 1 |> mb.Post
 
@@ -365,7 +361,6 @@ type MailboxProcessorType() =
         Assert.Equal(expectedMessagesCount, actualMessagesCount)
         Assert.Equal(0, actualSkipMessagesCount)
         Assert.Equal(0, mb.CurrentQueueLength)
-        cts.Cancel()
     }
 
     [<Fact>]
@@ -376,7 +371,6 @@ type MailboxProcessorType() =
         let sleepDueTime = 100
         let expectedMessagesCount = 2
         use mre = new ManualResetEventSlim(false)
-        use cts = new CancellationTokenSource()
         let mb =
             MailboxProcessor.Start((fun b ->
                 let rec loop() =
@@ -396,8 +390,7 @@ type MailboxProcessorType() =
                         | _ -> ()
                     }
                 loop()),
-                true,
-                cancellationToken = cts.Token
+                true
             )
         let post() = Increment 1 |> mb.Post
 
