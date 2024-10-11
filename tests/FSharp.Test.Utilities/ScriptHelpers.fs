@@ -79,7 +79,7 @@ type FSharpScript(?additionalArgs: string[], ?quiet: bool, ?langVersion: LangVer
     let outWriter = new EventedTextWriter()
     let errorWriter = new EventedTextWriter()
 
-    let fsi = FsiEvaluationSession.Create (config, argv, stdin, outWriter, errorWriter)
+    let fsi = FsiEvaluationSession.Create (config, argv, stdin, TextWriter.Synchronized outWriter, TextWriter.Synchronized errorWriter)
 
     member _.ValueBound = fsi.ValueBound
 

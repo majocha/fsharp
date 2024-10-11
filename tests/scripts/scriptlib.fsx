@@ -31,7 +31,7 @@ module Scripting =
         let info = ProcessStartInfo(Arguments=arguments, UseShellExecute=false, 
                                     RedirectStandardOutput=true, RedirectStandardError=true,
                                     CreateNoWindow=true, FileName=fileName)
-        let p = new Process(StartInfo=info)
+        use p = new Process(StartInfo=info)
         p.OutputDataReceived.Add(fun x -> processWriteMessage stdout x.Data)
         p.ErrorDataReceived.Add(fun x ->  processWriteMessage stderr x.Data)
         if p.Start() then
@@ -121,7 +121,7 @@ module Scripting =
 
             ignore envs  // work out what to do about this
 
-            let p = new Process()
+            use p = new Process()
             p.EnableRaisingEvents <- true
             p.StartInfo <- processInfo
             let out = StringBuilder()
@@ -193,7 +193,7 @@ module Scripting =
         let info = ProcessStartInfo(Arguments=arguments, UseShellExecute=false, 
                                     RedirectStandardOutput=true, RedirectStandardError=true,RedirectStandardInput=true,
                                     CreateNoWindow=true, FileName=fileName)
-        let p = new Process(StartInfo=info)
+        use p = new Process(StartInfo=info)
         if p.Start() then
 
             async { try 
