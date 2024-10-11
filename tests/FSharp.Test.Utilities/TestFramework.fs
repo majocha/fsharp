@@ -427,7 +427,7 @@ let outputPassed (output: string) = output.Contains "TEST PASSED OK"
 let checkResultPassed result =
     match result with
     | CmdResult.ErrorLevel (msg1, err) -> Assert.Fail (sprintf "%s. ERRORLEVEL %d" msg1 err)
-    | CmdResult.Success output -> Assert.True(outputPassed output, $"Output does not contain 'TEST PASSED OK':\n{output}")
+    | CmdResult.Success output -> Assert.True(outputPassed output, "Output does not contain 'TEST PASSED OK'")
 
 let checkResult result =
     match result with

@@ -311,12 +311,6 @@ module Helpers =
     let BIG = 10
     // let BIG = 10000
     let require x msg = if not x then failwith msg
-
-    let requireSet (e: ManualResetEventSlim) msg =
-        if not (e.Wait(TimeSpan.FromSeconds 5.)) then failwith msg
-
-    let requireNotSet (e: ManualResetEventSlim) msg = if e.IsSet then failwith msg
-
     let failtest str = raise (TestException str)
 
 [<Collection(nameof FSharp.Test.DoNotRunInParallel)>]
