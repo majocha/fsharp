@@ -252,7 +252,7 @@ let processGraphAsync<'Item, 'Result when 'Item: equality and 'Item: comparison>
         let rec queueNode node =
             Async.Start(
                 async {
-                    use! _catch = Async.OnCancel (completionSignal.TrySetCanceled >> ignore)
+                    use! _catch = Async.OnCancel(completionSignal.TrySetCanceled >> ignore)
                     let! res = processNode node |> Async.Catch
 
                     match res with

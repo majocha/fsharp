@@ -346,7 +346,6 @@ type Mailbox<'Msg>(cancellationSupported: bool, isThrowExceptionAfterDisposed: b
                     (pulse :> IDisposable).Dispose()
                     pulse <- null)
 
-
 #if DEBUG
     member x.UnsafeContents = (x.inbox, arrivals, pulse, savedCont) |> box
 #endif
