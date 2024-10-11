@@ -5019,7 +5019,7 @@ let createByteFileChunk opts fileName chunk =
         WeakByteFile(fileName, chunk) :> BinaryFile
     else
         let bytes =
-            use stream = FileSystem.OpenFileForReadShim(fileName, true)
+            use stream = FileSystem.OpenFileForReadShim(fileName)
 
             match chunk with
             | None -> stream.ReadAllBytes()
