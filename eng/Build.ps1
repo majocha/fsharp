@@ -362,21 +362,25 @@ function VerifyAssemblyVersionsAndSymbols() {
     }
 }
 
-function TestUsingMSBuild([string] $testProject, [string] $targetFramework, [string]$testadapterpath, [string] $backgroundJob = "", [string] $runSettings = "") {
+function TestUsingMSBuild([string] $testProject, [string] $targetFramework, [string]$testadapterpath, [string] $backgroundJob = "", [string] $settings = "") {
     $jobId = if ($backgroundJob) { "_$backgroundJob"} else {""}
     $dotnetPath = InitializeDotNetCli
     $dotnetExe = Join-Path $dotnetPath "dotnet.exe"
     $projectName = [System.IO.Path]::GetFileNameWithoutExtension($testProject)
     $testLogPath = "$ArtifactsDir\TestResults\$configuration\${projectName}_$targetFramework$jobId.xml"
     $testBinLogPath = "$LogDir\${projectName}_$targetFramework$jobId.binlog"
-    $arguments = "test $testProject -c $configuration -f $targetFramework -v minimal --test-adapter-path $testadapterpath --logger ""xunit;LogFilePath=$testLogPath"" /bl:$testBinLogPath"
+    $arguments = "test $testProject -c $configuration -f $targetFramework -v n --test-adapter-path $testadapterpath --logger ""xunit;LogFilePath=$testLogPath"" /bl:$testBinLogPath"
     $arguments += " --blame --blame-hang-timeout 5minutes --results-directory $ArtifactsDir\TestResults\$configuration -p:vstestusemsbuildoutput=true"
 
     if (-not $noVisualStudio -or $norestore) {
         $arguments += " --no-restore"
     }
 
-    $arguments += " $runSettings"
+    if (-not $noVisualStudio) {
+        $arguments += " --no-build"
+    }
+
+    $arguments += " $settings"
 
     if ($backgroundJob) {
         Write-Host
@@ -384,6 +388,7 @@ function TestUsingMSBuild([string] $testProject, [string] $targetFramework, [str
         Write-Host("------------------------------------")
         Start-Job -ScriptBlock {
             $argArray = $using:arguments -Split " "
+            $argArray += "--no-build"
             & $using:dotnetExe $argArray
             if ($LASTEXITCODE -ne 0) {
                 throw "Command failed to execute with exit code $($LASTEXITCODE): $using:dotnetExe $using:args"
@@ -395,7 +400,7 @@ function TestUsingMSBuild([string] $testProject, [string] $targetFramework, [str
     }
 }
 
-function TestSolutionUsingMSBuild([string] $testSolution, [string] $targetFramework, [string] $testadapterpath, [string] $runSettings = "") {
+function TestSolutionUsingMSBuild([string] $testSolution, [string] $targetFramework, [string] $testadapterpath, [string] $settings = "") {
     $dotnetPath = InitializeDotNetCli
     $dotnetExe = Join-Path $dotnetPath "dotnet.exe"
     $solutionName = [System.IO.Path]::GetFileNameWithoutExtension($testSolution)
@@ -404,7 +409,7 @@ function TestSolutionUsingMSBuild([string] $testSolution, [string] $targetFramew
 
     $arguments = "test"
 
-    $arguments += " $testSolution -c $configuration -f $targetFramework --test-adapter-path $testadapterpath -v minimal --logger ""xunit;LogFilePath=$testLogPath"" /bl:$testBinLogPath"
+    $arguments += " $testSolution -c $configuration -f $targetFramework --test-adapter-path $testadapterpath -v n --logger ""xunit;LogFilePath=$testLogPath"" /bl:$testBinLogPath"
     $arguments += " --blame-hang-timeout 5minutes --results-directory $ArtifactsDir\TestResults\$configuration /p:VsTestUseMSBuildOutput=true"
 
     if (-not $noVisualStudio -or $norestore) {
@@ -415,7 +420,7 @@ function TestSolutionUsingMSBuild([string] $testSolution, [string] $targetFramew
         $arguments += " --no-build"
     }
 
-    $arguments += " $runSettings"
+    $arguments += " $settings"
 
     Write-Host("$arguments")
     Exec-Console $dotnetExe $arguments
@@ -615,28 +620,23 @@ try {
     $script:BuildMessage = "Failure running tests"
 
     if ($testCoreClr) {
-        TestSolutionUsingMSBuild -testSolution "$RepoRoot\FSharp.sln" -targetFramework $script:coreclrTargetFramework -testadapterpath "$ArtifactsDir\bin\FSharp.Compiler.ComponentTests\" -runSettings "--filter Project!=FSharpSuite.Tests"
-        TestUsingMSBuild -testProject "$RepoRoot\tests\fsharp\FSharpSuite.Tests.fsproj" -targetFramework $script:coreclrTargetFramework -testadapterpath "$ArtifactsDir\bin\FSharpSuite.Tests\"
-
+        TestSolutionUsingMSBuild -testSolution "$RepoRoot\FSharp.sln" -targetFramework $script:coreclrTargetFramework -testadapterpath "$ArtifactsDir\bin\FSharp.Compiler.ComponentTests\" -settings "-m:2"
     }
 
     if ($testDesktop) { 
         function Receive($job) {
-            while($true) {
+            while($job.HasMoreData) {
                 Receive-Job $job | Write-Host
-                if (-not $job.HasMoreData) {
-                    break
-                }
                 Start-Sleep -Seconds 1
             }
             Receive-Job $job -Wait -ErrorAction Stop
         }
 
         # Split ComponentTests into two processes using filter.
-        $bgJob1 = TestUsingMSBuild -testProject "$RepoRoot\tests\FSharp.Compiler.ComponentTests\FSharp.Compiler.ComponentTests.fsproj" -targetFramework $script:desktopTargetFramework -testadapterpath "$ArtifactsDir\bin\FSharp.Compiler.ComponentTests\" -backgroundJob 1 -runSettings "--filter ""FullyQualifiedName!~Conformance&FullyQualifiedName!~Miscellaneous"" "
-        $bgJob2 = TestUsingMSBuild -testProject "$RepoRoot\tests\FSharp.Compiler.ComponentTests\FSharp.Compiler.ComponentTests.fsproj" -targetFramework $script:desktopTargetFramework -testadapterpath "$ArtifactsDir\bin\FSharp.Compiler.ComponentTests\" -backgroundJob 2 -runSettings "--filter ""FullyQualifiedName~Conformance|FullyQualifiedName~Miscellaneous"" "
-        TestSolutionUsingMSBuild -testSolution "$RepoRoot\FSharp.sln" -targetFramework $script:desktopTargetFramework -testadapterpath "$ArtifactsDir\bin\FSharp.Compiler.ComponentTests\" -runSettings "--filter Project!=FSharpSuite.Tests&Project!=FSharp.Compiler.ComponentTests -- xUnit.MaxParallelThreads=0.5x"
-        TestUsingMSBuild -testProject "$RepoRoot\tests\fsharp\FSharpSuite.Tests.fsproj" -targetFramework $script:desktopTargetFramework -testadapterpath "$ArtifactsDir\bin\FSharpSuite.Tests\" 
+        $bgJob1 = TestUsingMSBuild -testProject "$RepoRoot\tests\FSharp.Compiler.ComponentTests\FSharp.Compiler.ComponentTests.fsproj" -targetFramework $script:desktopTargetFramework -testadapterpath "$ArtifactsDir\bin\FSharp.Compiler.ComponentTests\" -backgroundJob 1 -settings "--filter ""FullyQualifiedName!~Conformance&FullyQualifiedName!~Miscellaneous"" "
+        $bgJob2 = TestUsingMSBuild -testProject "$RepoRoot\tests\FSharp.Compiler.ComponentTests\FSharp.Compiler.ComponentTests.fsproj" -targetFramework $script:desktopTargetFramework -testadapterpath "$ArtifactsDir\bin\FSharp.Compiler.ComponentTests\" -backgroundJob 2 -settings "--filter ""FullyQualifiedName~Conformance|FullyQualifiedName~Miscellaneous"" "
+        TestSolutionUsingMSBuild -testSolution "$RepoRoot\FSharp.sln" -targetFramework $script:desktopTargetFramework -testadapterpath "$ArtifactsDir\bin\FSharp.Compiler.ComponentTests\" -settings "--no-build --filter ""Project!=FSharpSuite.Tests&Project!=FSharp.Compiler.ComponentTests"" "
+        TestUsingMSBuild -testProject "$RepoRoot\tests\fsharp\FSharpSuite.Tests.fsproj" -targetFramework $script:desktopTargetFramework -testadapterpath "$ArtifactsDir\bin\FSharpSuite.Tests\" -settings "--no-build"
 
         # Collect output from  background jobs
         Receive -job $bgJob1
