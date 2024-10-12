@@ -379,21 +379,23 @@ type AsyncModule() =
     [<Fact>]
     member _.``AwaitWaitHandle.DisposedWaitHandle2``() = 
         let wh = new System.Threading.ManualResetEvent(false)
+        let started = new ManualResetEventSlim(false)
         let cts = new CancellationTokenSource()
         let test =
             Async.StartAsTask( async {
                 printfn "starting the test"
+                started.Set()
                 let! _ = Async.AwaitWaitHandle(wh)
                 printfn "should never get here"
             }, cancellationToken = cts.Token)
 
-        // await 3 secs then dispose waithandle - nothing should happen
-        let timeout = test.Wait 3000
-        Assert.False(timeout, "Test completed too early.")
+        // Wait for the test to start then dispose waithandle - nothing should happen.
+        started.Wait()
+        Assert.False(test.Wait 100, "Test completed too early.")
         printfn "disposing"
         dispose wh
-        printfn "cancelling in 3 seconds"
-        cts.CancelAfter 3000
+        printfn "cancelling in 1 second"
+        cts.CancelAfter 1000
         Assert.ThrowsAsync<TaskCanceledException>(fun () -> test)
 
     [<Fact>]
