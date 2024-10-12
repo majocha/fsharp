@@ -635,7 +635,7 @@ try {
         # Split ComponentTests into two processes using filter.
         $bgJob1 = TestUsingMSBuild -testProject "$RepoRoot\tests\FSharp.Compiler.ComponentTests\FSharp.Compiler.ComponentTests.fsproj" -targetFramework $script:desktopTargetFramework -testadapterpath "$ArtifactsDir\bin\FSharp.Compiler.ComponentTests\" -backgroundJob 1 -runSettings "--filter ""FullyQualifiedName!~Conformance&FullyQualifiedName!~Miscellaneous"" "
         $bgJob2 = TestUsingMSBuild -testProject "$RepoRoot\tests\FSharp.Compiler.ComponentTests\FSharp.Compiler.ComponentTests.fsproj" -targetFramework $script:desktopTargetFramework -testadapterpath "$ArtifactsDir\bin\FSharp.Compiler.ComponentTests\" -backgroundJob 2 -runSettings "--filter ""FullyQualifiedName~Conformance|FullyQualifiedName~Miscellaneous"" "
-        TestSolutionUsingMSBuild -testSolution "$RepoRoot\FSharp.sln" -targetFramework $script:desktopTargetFramework -testadapterpath "$ArtifactsDir\bin\FSharp.Compiler.ComponentTests\" -runSettings "--filter Project!=FSharpSuite.Tests&Project!=FSharp.Compiler.ComponentTests" -runSettings " -- xUnit.MaxParallelThreads=0.5x"
+        TestSolutionUsingMSBuild -testSolution "$RepoRoot\FSharp.sln" -targetFramework $script:desktopTargetFramework -testadapterpath "$ArtifactsDir\bin\FSharp.Compiler.ComponentTests\" -runSettings "--filter Project!=FSharpSuite.Tests&Project!=FSharp.Compiler.ComponentTests -- xUnit.MaxParallelThreads=0.5x"
         TestUsingMSBuild -testProject "$RepoRoot\tests\fsharp\FSharpSuite.Tests.fsproj" -targetFramework $script:desktopTargetFramework -testadapterpath "$ArtifactsDir\bin\FSharpSuite.Tests\" 
 
         # Collect output from  background jobs
