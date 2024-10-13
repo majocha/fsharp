@@ -646,12 +646,18 @@ try {
 
     if ($testDesktop -and $ci) { 
         # Run FSharpSuite in the background because it's very slow in the CI.
-        $bgJob = TestUsingMSBuild -testProject "$RepoRoot\tests\fsharp\FSharpSuite.Tests.fsproj" -targetFramework $script:desktopTargetFramework -testadapterpath "$ArtifactsDir\bin\FSharpSuite.Tests\" -backgroundJob 1 -settings "-- xUnit.MaxParallelThreads=4.0x"
+        $bgJob1 = TestUsingMSBuild -testProject "$RepoRoot\tests\fsharp\FSharpSuite.Tests.fsproj" -targetFramework $script:desktopTargetFramework -testadapterpath "$ArtifactsDir\bin\FSharpSuite.Tests\" -backgroundJob 1 -settings "-- xUnit.MaxParallelThreads=4.0x"
+        # Split ComponentTests run into two processes using filter.
+        $bgJob2 = TestUsingMSBuild -testProject "$RepoRoot\tests\FSharp.Compiler.ComponentTests\FSharp.Compiler.ComponentTests.fsproj" -targetFramework $script:desktopTargetFramework -testadapterpath "$ArtifactsDir\bin\FSharp.Compiler.ComponentTests\" -backgroundJob 2 -settings "--filter ""FullyQualifiedName!~Conformance&FullyQualifiedName!~Miscellaneous"" "
+        $bgJob3 = TestUsingMSBuild -testProject "$RepoRoot\tests\FSharp.Compiler.ComponentTests\FSharp.Compiler.ComponentTests.fsproj" -targetFramework $script:desktopTargetFramework -testadapterpath "$ArtifactsDir\bin\FSharp.Compiler.ComponentTests\" -backgroundJob 3 -settings "--filter ""FullyQualifiedName~Conformance|FullyQualifiedName~Miscellaneous"" "
+
         # Run in single node with -m:1. There is no need to rush, it will wait for FSharpSuite anyway.
-        TestSolutionUsingMSBuild -testSolution "$RepoRoot\FSharp.sln" -targetFramework $script:desktopTargetFramework -testadapterpath "$ArtifactsDir\bin\FSharp.Compiler.ComponentTests\" -settings "--no-build -m:1 --filter Project!=FSharpSuite.Tests "
+        TestSolutionUsingMSBuild -testSolution "$RepoRoot\FSharp.sln" -targetFramework $script:desktopTargetFramework -testadapterpath "$ArtifactsDir\bin\FSharp.Compiler.ComponentTests\" -settings "--no-build -m:1 --filter ""Project!=FSharpSuite.Tests&Project!=FSharp.Compiler.ComponentTests"" "
 
         # Collect output from background job
-        Receive -job $bgJob
+        Receive -job $bgJob1
+        Receive -job $bgJob2
+        Receive -job $bgJob3 
     }
 
     if ($testFSharpQA) {
