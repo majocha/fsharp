@@ -237,36 +237,38 @@ module internal Activity =
 
             sb.ToString()
 
-        let addCsvFileListener (pathToFile: string) =
-            let newFile = pathToFile |> File.Exists |> not
-            // FileShare.Read to avoid sporadic file locking during tests. 
-            let stream = new FileStream(pathToFile, FileMode.Append, FileAccess.Write, FileShare.Read)
-            let csvWriter = new StreamWriter(stream)
- 
-            if newFile then csvWriter.WriteLine(
-                "Name,StartTime,EndTime,Duration(s),Id,ParentId,RootId,"
-                + String.concat "," Tags.AllKnownTags)
+        let addCsvFileListener (pathToFile:string) =
+            if pathToFile |> File.Exists |> not then
+                File.WriteAllLines(
+                    pathToFile,
+                    [
+                        "Name,StartTime,EndTime,Duration(s),Id,ParentId,RootId,"
+                        + String.concat "," Tags.AllKnownTags
+                    ]
+                )
+
+            let sw = new StreamWriter(path = pathToFile, append = true)
 
             let msgQueue =
                 MailboxProcessor<string>.Start(fun inbox ->
                     async {
                         while true do
                             let! msg = inbox.Receive()
-                            do! csvWriter.WriteLineAsync(msg) |> Async.AwaitTask
+                            do! sw.WriteLineAsync(msg) |> Async.AwaitTask
                     })
 
-            let listener =
+            let l =
                 new ActivityListener(
                     ShouldListenTo = (fun a ->ActivityNames.AllRelevantNames |> Array.contains a.Name),
                     Sample = (fun _ -> ActivitySamplingResult.AllData),
                     ActivityStopped = (fun a -> msgQueue.Post(createCsvRow a))
                 )
 
-            ActivitySource.AddActivityListener(listener)
+            ActivitySource.AddActivityListener(l)
 
             { new IDisposable with
                 member this.Dispose() =
-                    listener.Dispose() // Unregister from listening new activities first
+                    l.Dispose() // Unregister from listening new activities first
                     (msgQueue :> IDisposable).Dispose() // Wait for the msg queue to be written out
-                    csvWriter.Dispose() // Only then flush the messages and close the file
+                    sw.Dispose() // Only then flush the messages and close the file
             }
