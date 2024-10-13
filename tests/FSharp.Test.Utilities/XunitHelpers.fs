@@ -88,7 +88,7 @@ type TestRun(sink) =
         TestConsole.initStreamsCapture()
 
     // Replace UniqueID to allow running all in parallel.
-    let withNewUniqueId (testCase : ITestCase) : ITestMethod =
+    let withNewUniqueId (testCase : IXunitTestCase) : ITestMethod =
         let oldTestMethod = testCase.TestMethod
         let oldTestClass = oldTestMethod.TestClass
         let oldTestCollection = oldTestMethod.TestClass.TestCollection
@@ -106,14 +106,14 @@ type TestRun(sink) =
         let newTestClass = new TestClass(newTestCollection, oldTestClass.Class)
         new TestMethod(newTestClass, oldTestMethod.Method)
 
-    let canFullyParallelize (testCase : ITestCase) =
+    let canFullyParallelize (testCase : IXunitTestCase) =
         isNull testCase.TestMethod.TestClass.TestCollection.CollectionDefinition
         && testCase.TestMethod.TestClass.Class.GetCustomAttributes(typeof<Xunit.CollectionAttribute>) |> Seq.isEmpty
         && testCase.TestMethod.Method.GetCustomAttributes(typeof<RunInSequenceAttribute>) |> Seq.isEmpty
         && testCase.TestMethod.TestClass.Class.GetCustomAttributes(typeof<RunInSequenceAttribute>) |> Seq.isEmpty
 
     /// Make the test case run with ConsoleCapturingTestRunner and potentially allow parallel execution within single test module / class / theory.
-    let rewrite (testCase : ITestCase) : ITestCase =
+    let rewrite (testCase : IXunitTestCase) : IXunitTestCase =
         let testMethod = if canFullyParallelize testCase then withNewUniqueId testCase else testCase.TestMethod
 
         match testCase with
@@ -146,22 +146,33 @@ type TestRun(sink) =
             let stableHashValue = BitConverter.ToInt32(bytes, 0)
             stableHashValue % numberOfBuckets + 1 |> string
 
-    let testCaseSink assemblyName = 
-        { new IMessageSink with
-            member _.OnMessage (message: IMessageSinkMessage): bool = 
-                match message with
-                | :? ITestCaseDiscoveryMessage as discoveryMessage ->
-                    let testCase = rewrite discoveryMessage.TestCase
-                    testCase.Traits.Add("Project", ResizeArray [ assemblyName ])
-                    // Assign test case to one of buckets to easily distribute execution among many agents in CI using `--filter ExecutionNode={node}`
-                    testCase.Traits.Add("ExecutionNode", ResizeArray [ assignNode 4 discoveryMessage.TestCase.DisplayName ] )
-                    sink.OnMessage(TestCaseDiscoveryMessage testCase)            
-                | _ -> sink.OnMessage(message) }
+    let interceptingBus (messageBus: IMessageBus) assemblyName =
+        {
+            new IMessageBus with
+                member _.QueueMessage (message: IMessageSinkMessage) =
+                    match message with
+                    | :? ITestCaseDiscoveryMessage as discoveryMessage ->
+                        let testCase = discoveryMessage.TestCase
+                        testCase.Traits.Add("Project", ResizeArray [ assemblyName ])
+                        // Assign test case to one of buckets to easily distribute execution among many agents in CI using `--filter ExecutionNode={node}`
+                        testCase.Traits.Add("ExecutionNode", ResizeArray [ assignNode 4 discoveryMessage.TestCase.DisplayName ] )
+                    | _ -> ()
+                    messageBus.QueueMessage(message)
+                member _.Dispose () = messageBus.Dispose()
+        }
 
-    override this.CreateDiscoverer (assemblyInfo: IAssemblyInfo): ITestFrameworkDiscoverer =
+    override this.CreateDiscoverer (assemblyInfo) =
         let assemblyName = assemblyInfo.Name.Split(',')[0]
-        new XunitTestFrameworkDiscoverer(assemblyInfo, this.SourceInformationProvider, testCaseSink assemblyName)
+        {
+            new XunitTestFrameworkDiscoverer(assemblyInfo, this.SourceInformationProvider, sink) with
+                override _.FindTestsForType (testClass, includeSourceInformation, messageBus, discoveryOptions) =
+                    base.FindTestsForType(testClass, includeSourceInformation, interceptingBus messageBus assemblyName , discoveryOptions)
+        }
 
     // Custom executor just to decorate test cases so that they run with our custom runner.
     override this.CreateExecutor assembly =
-        new XunitTestFrameworkExecutor(assembly, this.SourceInformationProvider, testCaseSink assembly.Name)
+        {
+            new XunitTestFrameworkExecutor(assembly, this.SourceInformationProvider, sink) with
+                override this.RunTestCases (testCases, sink, executionOptions) =
+                    base.RunTestCases(testCases |> Seq.map rewrite, sink, executionOptions)
+        }
