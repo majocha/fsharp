@@ -233,6 +233,8 @@ type internal TcGlobals =
     member mkDebuggableAttributeV2:
         jitTracking: bool * jitOptimizerDisabled: bool -> FSharp.Compiler.AbstractIL.IL.ILAttribute
 
+    member DebuggableAttributeForInteractive: FSharp.Compiler.AbstractIL.IL.ILAttribute
+
     member mkDebuggerDisplayAttribute: s: string -> FSharp.Compiler.AbstractIL.IL.ILAttribute
 
     member mk_ArrayCollector_ty: seqElemTy: FSharp.Compiler.TypedTree.TType -> FSharp.Compiler.TypedTree.TType

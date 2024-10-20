@@ -943,6 +943,14 @@ type TcGlobals(
 
   let debuggerBrowsableNeverAttribute = tref_DebuggerBrowsableAttribute 0
 
+  let debuggableAttributeForInteractive =
+    let debuggingMode = 1 ||| 256
+    let tref_DebuggableAttribute_DebuggingModes = mkILTyRefInTyRef (tref_DebuggableAttribute, tname_DebuggableAttribute_DebuggingModes)
+    mkILCustomAttribute
+      (tref_DebuggableAttribute, [mkILNonGenericValueTy tref_DebuggableAttribute_DebuggingModes],
+       (* See System.Diagnostics.DebuggableAttribute.DebuggingModes *)
+       [ILAttribElem.Int32( debuggingMode )], [])
+
   let addNeverAttrs (attrs: ILAttributes) = mkILCustomAttrsFromArray (Array.append (attrs.AsArray()) [| debuggerBrowsableNeverAttribute |])
 
   let addPropertyNeverAttrs (pdef:ILPropertyDef) = pdef.With(customAttrs = addNeverAttrs pdef.CustomAttrs)
@@ -1880,6 +1888,8 @@ type TcGlobals(
           (tref_DebuggableAttribute, [mkILNonGenericValueTy tref_DebuggableAttribute_DebuggingModes],
            (* See System.Diagnostics.DebuggableAttribute.DebuggingModes *)
            [ILAttribElem.Int32( debuggingMode )], [])
+
+  member _.DebuggableAttributeForInteractive = debuggableAttributeForInteractive
 
   member internal _.CompilerGlobalState = Some compilerGlobalState
 
