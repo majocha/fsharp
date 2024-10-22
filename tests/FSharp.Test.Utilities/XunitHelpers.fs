@@ -8,6 +8,7 @@ open System.Threading
 
 open Xunit.Sdk
 open Xunit.Abstractions
+open FSharp.Compiler.IO
 
 module internal TestConsole =
     /// Redirects reads performed on different async execution contexts to the relevant TextReader held by AsyncLocal.
@@ -183,6 +184,7 @@ type TestRun(sink: IMessageSink) =
     do
         // Init statics
         MessageSink.sinkWriter |> ignore
+        FileSystem <- TestFileSystem()
         TestConsole.initStreamsCapture()
 
     override this.CreateDiscoverer (assemblyInfo) =

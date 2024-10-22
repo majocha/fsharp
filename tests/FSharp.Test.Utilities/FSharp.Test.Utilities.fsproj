@@ -29,6 +29,7 @@
       <Link>scriptlib.fsx</Link>
     </Compile>
     <None Include="ScriptingShims.fsx" />
+    <Compile Include="FileSystem.fs" />
     <Compile Include="XunitHelpers.fs" />
     <Compile Include="TestFramework.fs" />
     <Compile Include="ILChecker.fs" />
