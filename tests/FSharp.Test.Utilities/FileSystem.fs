@@ -8,15 +8,17 @@ open System.IO
 open System.IO.MemoryMappedFiles
 open System.Reflection
 
-type TestFileSystem() =
+module TestFileSystem =   
+    let virtuals = AsyncLocal<_>()
+
+
+type TestFileSystem(?initial) =
     inherit DefaultFileSystem()
 
-    static let virtuals = AsyncLocal<_>()
-
-    do virtuals.Value <- ConcurrentDictionary<string, MemoryStream>()
+    do TestFileSystem.virtuals.Value <- defaultArg initial (ConcurrentDictionary<string, MemoryStream>())
 
     let tryGetVirtual(filePath: string) =
-        match virtuals.Value.TryGetValue(filePath) with
+        match TestFileSystem.virtuals.Value.TryGetValue(filePath) with
         | true, mms -> Some mms
         | _ -> None
 
@@ -29,33 +31,27 @@ type TestFileSystem() =
         ignore fileMode
         ignore fileAccess
         ignore fileShare
-        virtuals.Value.GetOrAdd(filePath, fun _ -> new MemoryStream())
+        TestFileSystem.virtuals.Value.AddOrUpdate(filePath, (fun _ -> new MemoryStream()), (fun _ ms -> new MemoryStream(ms.GetBuffer())))
 
     override _.FileExistsShim (fileName: string): bool =
-        match virtuals.Value.TryGetValue(fileName) with
-        | true, _ -> true
-        | _ -> base.FileExistsShim(fileName)
+        tryGetVirtual fileName |> Option.isSome || base.FileExistsShim(fileName)
 
     override _.FileDeleteShim (fileName: string): unit =
-        virtuals.Value.TryRemove(fileName) |> ignore
+        TestFileSystem.virtuals.Value.TryRemove(fileName) |> ignore
 
     override this.CopyShim (src: string, dest: string, overwrite: bool) =
         ignore overwrite
-        use srcStream: Stream =
-            match virtuals.Value.TryGetValue(src) with
-            | true, mms -> new MemoryStream(mms.GetBuffer(), 0, int mms.Length, writable = false)
-            | _ -> base.OpenFileForReadShim(src)
-        use destStream = this.OpenFileForWriteShim(dest)
-        destStream.Position <- 0
+        use srcStream = this.OpenFileForReadShim src
+        use destStream = this.OpenFileForWriteShim dest
         srcStream.CopyTo(destStream)
 
     member _.Materialize(filePath: string) =
         let tempPath = Path.GetTempPath()
-        match virtuals.Value.TryGetValue(filePath) with
-        | true, mms ->
-            let dest = File.OpenWrite(tempPath)
-            mms.Position <- 0
-            mms.CopyTo dest
+        match tryGetVirtual filePath with
+        | Some ms ->
+            let physical = File.OpenWrite(tempPath)
+            use ms =  new MemoryStream(ms.GetBuffer())
+            ms.CopyTo physical
             tempPath
         | _ -> raise (IOException($"TestFileSystem does not contain {filePath}"))
 
@@ -64,14 +60,14 @@ type TestFileSystem() =
     override fileSystem.AssemblyLoader =
         {
             new IAssemblyLoader with
-                member _.AssemblyLoad (assemblyName: AssemblyName): Assembly = 
-                    raise (NotImplementedException())
+                member _.AssemblyLoad (assemblyName: AssemblyName): Assembly =
+                    Assembly.Load assemblyName
 
                 member _.AssemblyLoadFrom (fileName: string): Assembly =
                     match fileSystem.TryGetVirtual(fileName) with
-                    | Some mms ->
+                    | Some ms ->
                         try
-                            Assembly.Load(mms.ToArray())
+                            Assembly.Load(ms.ToArray())
                         with
                         | _ ->
                             Assembly.LoadFrom(fileSystem.Materialize(fileName))

@@ -347,19 +347,26 @@ module CompilerAssertHelpers =
 #if NETCOREAPP
     let executeBuiltApp assemblyPath deps isFsx =
         let ctxt = AssemblyLoadContext("ContextName", true)
+
+        let load name =
+            let stream = FileSystem.OpenFileForReadShim name
+            try ctxt.LoadFromStream stream with _ -> ctxt.LoadFromAssemblyPath name
+
         try
             ctxt.add_Resolving(fun ctxt name ->
                 deps
                 |> List.tryFind (fun (x: string) -> Path.GetFileNameWithoutExtension x = name.Name)
-                |> Option.map ctxt.LoadFromAssemblyPath
+                |> Option.map load
                 |> Option.toObj)
 
-            executeAssemblyEntryPoint (ctxt.LoadFromAssemblyPath assemblyPath) isFsx
+            executeAssemblyEntryPoint (load assemblyPath) isFsx
         finally
             ctxt.Unload()
 #else
-    type Worker () =
+    type Worker() =
         inherit MarshalByRefObject()
+
+        do FileSystem <- TestFileSystem(AppDomain.CurrentDomain.GetData("FileSystem") :?> _)
 
         member x.ExecuteTestCase assemblyPath isFsx =
             // Set console streams for the AppDomain.
@@ -372,12 +379,15 @@ module CompilerAssertHelpers =
         let thisAssemblyDirectory = Path.GetDirectoryName(typeof<Worker>.Assembly.Location)
         let setup = AppDomainSetup(ApplicationBase = thisAssemblyDirectory)
         let testCaseDomain = AppDomain.CreateDomain($"built app {assembly}", null, setup)
+        testCaseDomain.SetData("FileSystem", TestFileSystem.virtuals.Value) 
 
         testCaseDomain.add_AssemblyResolve(fun _ args ->
+            let load name =
+                try FileSystem.AssemblyLoader.AssemblyLoadFrom name with _ -> Assembly.LoadFile name
             dependecies
             |> List.tryFind (fun path -> Path.GetFileNameWithoutExtension path = AssemblyName(args.Name).Name)
             |> Option.filter FileSystem.FileExistsShim
-            |> Option.map Assembly.LoadFile
+            |> Option.map load
             |> Option.toObj
         )
 
