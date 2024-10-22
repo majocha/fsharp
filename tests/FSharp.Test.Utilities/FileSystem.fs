@@ -15,12 +15,15 @@ type TestFileSystem() =
 
     do virtuals.Value <- ConcurrentDictionary<string, MemoryStream>()
 
-    override _.OpenFileForReadShim(filePath: string, ?useMemoryMappedFile, ?shouldShadowCopy) =
-        ignore useMemoryMappedFile
-        ignore shouldShadowCopy
+    let tryGetVirtual(filePath: string) =
         match virtuals.Value.TryGetValue(filePath) with
-        | true, mms -> new MemoryStream(mms.GetBuffer(), 0, int mms.Length, writable = false)
-        | _ -> base.OpenFileForReadShim(filePath, useMemoryMappedFile = true, shouldShadowCopy = true)
+        | true, mms -> Some mms
+        | _ -> None
+
+    override _.OpenFileForReadShim(filePath: string, ?useMemoryMappedFile, ?shouldShadowCopy) =
+        match tryGetVirtual filePath with 
+        | Some mms -> new MemoryStream(mms.GetBuffer())
+        | _ -> base.OpenFileForReadShim(filePath, ?useMemoryMappedFile = useMemoryMappedFile, ?shouldShadowCopy = shouldShadowCopy)
 
     override _.OpenFileForWriteShim(filePath: string, ?fileMode: FileMode, ?fileAccess: FileAccess, ?fileShare: FileShare) =
         ignore fileMode
@@ -56,10 +59,7 @@ type TestFileSystem() =
             tempPath
         | _ -> raise (IOException($"TestFileSystem does not contain {filePath}"))
 
-    member _.TryGetVirtual(filePath: string) =
-        match virtuals.Value.TryGetValue(filePath) with
-        | true, mms -> Some mms
-        | _ -> None
+    member _.TryGetVirtual(filePath: string) = tryGetVirtual filePath
 
     override fileSystem.AssemblyLoader =
         {
