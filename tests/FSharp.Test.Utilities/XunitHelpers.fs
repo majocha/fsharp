@@ -12,7 +12,8 @@ open System.Threading
 open Xunit.Sdk
 open Xunit.Abstractions
 
-module internal TestConsole =
+module internal TestConsole =       
+
     /// Redirects reads performed on different async execution contexts to the relevant TextReader held by AsyncLocal.
     type RedirectingTextReader() =
         inherit TextReader()
@@ -21,39 +22,64 @@ module internal TestConsole =
 
         override _.Peek() = holder.Value.Peek()
         override _.Read() = holder.Value.Read()
+        member _.Value = holder.Value
         member _.Set (reader: TextReader) = holder.Value <- reader
 
     /// Redirects writes performed on different async execution contexts to the relevant TextWriter held by AsyncLocal.
     type RedirectingTextWriter() =
         inherit TextWriter()
         let holder = AsyncLocal<TextWriter>()
-        let getValue() = holder.Value |> Option.ofObj |> Option.defaultWith (fun () -> holder.Value <- new StringWriter(); holder.Value)
+        do holder.Value <- TextWriter.Null
 
         override _.Encoding = Encoding.UTF8
-        override _.Write(value: char) = getValue().Write(value)
-        override _.Write(value: string) = getValue().Write(value)
-        override _.WriteLine(value: string) = getValue().WriteLine(value)
-        member _.Value = getValue()
+        override _.Write(value: char) = holder.Value.Write(value)
+        override _.Write(value: string) = holder.Value.Write(value)
+        override _.WriteLine(value: string) = holder.Value.WriteLine(value)
+        member _.Value = holder.Value
         member _.Set (writer: TextWriter) = holder.Value <- writer
+
+    type CapturingWriter(redirecting: RedirectingTextWriter) as this =
+        inherit StringWriter()
+        let wrapped = redirecting.Value
+        do redirecting.Set this
+        override _.Encoding = Encoding.UTF8
+        override _.Write(value: char) = wrapped.Write(value); base.Write(value)
+        override _.Write(value: string) = wrapped.Write(value); base.Write(value)
+        override _.WriteLine(value: string) = wrapped.WriteLine(value); base.Write(value)
+        override _.Dispose (disposing: bool) =
+            redirecting.Set wrapped
+            base.Dispose(disposing: bool)
 
     let localIn = new RedirectingTextReader()
     let localOut = new RedirectingTextWriter()
     let localError = new RedirectingTextWriter()
 
-    let initStreamsCapture () = 
+    type ExecutionCapture(output, error) =
+        do
+            Console.Out.Flush()
+            Console.Error.Flush()
+
+        new () = new ExecutionCapture(new CapturingWriter(localOut), new CapturingWriter(localError))
+
+        member _.Dispose() =
+            output.Dispose()
+            error.Dispose()
+
+        interface IDisposable with
+            member this.Dispose (): unit = this.Dispose()
+
+        member _.OutText =
+            Console.Out.Flush()
+            string output
+
+        member _.ErrorText =
+            Console.Error.Flush()
+            string error
+
+    let install () = 
         Console.SetIn localIn
         Console.SetOut localOut
         Console.SetError localError
-
-type TestConsole =
-    static member OutText =
-        Console.Out.Flush()
-        string TestConsole.localOut.Value
-
-    static member ErrorText =
-        Console.Error.Flush()
-        string TestConsole.localError.Value
-
 
 /// Disables custom internal parallelization.
 /// Execute test cases in a class or a module one by one instead of all at once. Allow other collections to run simultaneously.
@@ -74,15 +100,16 @@ type ConsoleCapturingTestRunner(test, messageBus, testClass, constructorArgument
     member _.BaseInvokeTestMethodAsync aggregator = base.InvokeTestMethodAsync aggregator
     override this.InvokeTestAsync (aggregator: ExceptionAggregator): Tasks.Task<decimal * string> =
         task {
+            use capture = new TestConsole.ExecutionCapture()
             let! executionTime = this.BaseInvokeTestMethodAsync aggregator
             let output =
                 seq {
-                    TestConsole.OutText
-                    if not (String.IsNullOrEmpty TestConsole.ErrorText) then
+                    capture.OutText
+                    if not (String.IsNullOrEmpty capture.ErrorText) then
                         ""
                         "=========== Standard Error ==========="
                         ""
-                        TestConsole.ErrorText
+                        capture.ErrorText
                 } |> String.concat Environment.NewLine
             return executionTime, output
         }
@@ -168,7 +195,7 @@ type TestRun(sink: IMessageSink) =
         // right at the start of the test run is here in the constructor.
         // This gets executed once per test assembly.
         MessageSink.sinkWriter |> ignore
-        TestConsole.initStreamsCapture() 
+        TestConsole.install() 
 
 #if XUNIT_CUSTOMIZATIONS
 
