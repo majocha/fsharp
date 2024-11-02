@@ -271,8 +271,8 @@ let ``File is not checked twice`` () =
 
     let published, trigger = JobEvents.pipe()
 
-    let firstOK = JobEvents.wait published "First" [Requested; Started; Finished; Requested; Requested; Requested; Requested; Weakened; Requested; Started; Finished]
-    let thirdOK = JobEvents.wait published "Third" [Requested; Started; Finished; Requested; Requested; Weakened; Requested; Started; Finished]
+    let firstOK = JobEvents.wait published "First" [Requested; Started; Finished; Requested; Requested; Requested; Requested; Requested; Weakened; Started; Finished]
+    let thirdOK = JobEvents.wait published "Third" [Requested; Started; Finished; Requested; Requested; Requested; Weakened; Started; Finished]
 
     testWorkflowWithChecker(fun checker -> checker.Caches.TcIntermediate.OnEvent trigger) {
         updateFile "First" updatePublicSurface
@@ -286,8 +286,7 @@ let ``File is not checked twice`` () =
 let ``If a file is checked as a dependency it's not re-checked later`` () =
     let published, trigger = JobEvents.pipe()
 
-    let intermediateTypeChecks = JobEvents.wait published "Third" [Requested; Started; Finished; Requested; Requested; Weakened; Requested;
-    Started; Finished; Requested]
+    let intermediateTypeChecks = JobEvents.wait published "Third" [Requested; Started; Finished; Requested; Requested; Requested; Weakened; Started; Finished; Requested]
 
     testWorkflowWithChecker (fun checker -> checker.Caches.TcIntermediate.OnEvent trigger) {      
         updateFile "First" updatePublicSurface
@@ -878,7 +877,7 @@ let ``LoadClosure for script is recomputed after changes`` () =
 
     let check =
         JobEvents.wait published "First"
-            [Requested; Started; Finished; Weakened; Requested; Started; Finished; Weakened; Requested; Started; Finished]
+            [Requested; Started; Finished; Requested; Weakened; Started; Finished; Requested; Weakened; Started; Finished]
   
     ProjectWorkflowBuilder(project,
         useTransparentCompiler = true,
