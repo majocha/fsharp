@@ -11,13 +11,32 @@ open FSharp.Compiler.Diagnostics
 
 open Xunit
 
-let ordered tag =
+type Ordered(tag) =
     let mutable current = 1
-    fun n msg ->
-        SpinWait.SpinUntil(fun () -> n <= current)
+
+    let reached n = fun () -> n <= current
+
+    let waitAsync n = async {
+        while reached n () |> not do
+            do! Async.Sleep 1
+    }
+        
+    let wait n = SpinWait.SpinUntil(reached n)
+
+    let step n msg = 
         printfn $"{tag}: step {n} {msg}"
         Interlocked.CompareExchange(&current, n + 1, n) |> ignore
 
+    member _.Step(n, msg) = wait n; step n msg
+
+    member _.StepAsync(n, msg) = async {
+        do! waitAsync n
+        step n msg
+    }
+
+let step(ordered: Ordered) n msg = ordered.Step(n, msg)
+let stepAsync (ordered: Ordered) n msg = ordered.StepAsync(n, msg)
+let steps tag = (Ordered tag) |> step
 
 let startToCancel computation =
     let cts = new CancellationTokenSource()
@@ -131,7 +150,7 @@ let ``We can cancel a job`` () =
 [<Fact>]
 let ``Job is completed if only one requestor cancels`` () =
     task {
-        let step = ordered ""
+        let step = steps ""
 
         let computation key = async {
             step 1 "job started"
@@ -173,15 +192,14 @@ let ``Job is completed if only one requestor cancels`` () =
     }
 
 [<Fact>]
-let ``Job is restarted for another request`` () =
+let ``Job is restarted for another request after the first request canceled`` () =
     task {
-        let step = ordered ""
-
-        let cancelFirst = new Semaphore(0, 1)
+        let ordered = Ordered ""
+        let step = step ordered
 
         let computation key = async {
             step 2 "job started"
-            do! Async.AwaitWaitHandle cancelFirst |> Async.Ignore
+            do! stepAsync ordered 5 "after first cancellation"
             return key * 2
         }
         
@@ -193,11 +211,10 @@ let ``Job is restarted for another request`` () =
         let cancel1 =  memoize.Get(wrapKey key, computation key) |> startToCancel
         do! waitUntil events (received Requested)
         step 1 "first Get"
-
-        step 3 "before cancel1"
+        step 3 "after job started"
         cancel1()
         do! waitUntil events (received Canceled)
-        cancelFirst.Release() |> ignore
+        step 4 "received Canceled"
 
         let task2 = memoize.Get(wrapKey key, computation key) |> Async.StartAsTask
 
