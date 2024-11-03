@@ -38,11 +38,13 @@ let step(ordered: Ordered) n msg = ordered.Step(n, msg)
 let stepAsync (ordered: Ordered) n msg = ordered.StepAsync(n, msg)
 let steps tag = (Ordered tag) |> step
 
-let startToCancel computation =
+let startWithCancel computation =
     let cts = new CancellationTokenSource()
-    Async.Start(computation |> Async.Catch |> Async.Ignore, cancellationToken = cts.Token)
+    Async.StartAsTask(computation |> Async.Catch |> Async.Ignore, TaskCreationOptions.AttachedToParent, cts.Token) |> ignore
     let cancel() = cts.Cancel()
     cancel
+
+let startTask computation = Async.StartAsTask(computation, TaskCreationOptions.AttachedToParent)
 
 let internal wrapKey key =
     { new ICacheKey<_, _> with
@@ -127,7 +129,7 @@ let ``We can cancel a job`` () =
 
         let key = 1
 
-        let cancel = memoize.Get(wrapKey 1, computation) |> startToCancel
+        let cancel = memoize.Get(wrapKey 1, computation) |> startWithCancel
 
         do! waitUntil events (received Started)
 
@@ -161,7 +163,7 @@ let ``Job is completed if only one requestor cancels`` () =
 
         let key = 1
 
-        let cancel1 = memoize.Get(wrapKey key, computation key) |> startToCancel
+        let cancel1 = memoize.Get(wrapKey key, computation key) |> startWithCancel
 
         step 2 "Get"
 
@@ -206,7 +208,7 @@ let ``Job is restarted for another request after the first request canceled`` ()
 
         let key = 1
 
-        let cancel1 =  memoize.Get(wrapKey key, computation key) |> startToCancel
+        let cancel1 =  memoize.Get(wrapKey key, computation key) |> startWithCancel
         do! waitUntil events (received Requested)
         step 1 "first Get"
         step 3 "after job started"
@@ -214,11 +216,9 @@ let ``Job is restarted for another request after the first request canceled`` ()
         do! waitUntil events (received Canceled)
         step 4 "received Canceled"
 
-        let task2 = memoize.Get(wrapKey key, computation key) |> Async.StartAsTask
+        let! result2 = memoize.Get(wrapKey key, computation key)
 
-        let! result = task2
-
-        Assert.Equal(2, result)
+        Assert.Equal(2, result2)
 
         do! waitUntil events (received Finished)
 
