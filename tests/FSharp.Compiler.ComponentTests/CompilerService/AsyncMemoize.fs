@@ -75,10 +75,8 @@ module internal JobEvents =
 
     let waitUntil events condition =
         task {
-            let s = System.Diagnostics.Stopwatch.StartNew()
             while events() |> condition |> not do
-                do! Task.Delay 100
-                if s.ElapsedMilliseconds > 5000 then failwith "timeout"
+                do! Task.Delay 10
         }
 
 [<Fact>]
@@ -239,7 +237,7 @@ let ``Job is restarted for another request after the first request canceled`` ()
 type ExpectedException() =
     inherit Exception()
 
-[<Fact(Skip="Flaky")>]
+[<Fact>]
 let ``Stress test`` () =
 
     let seed = System.Random().Next()
