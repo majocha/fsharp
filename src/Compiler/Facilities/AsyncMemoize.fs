@@ -16,7 +16,7 @@ open System.Runtime.CompilerServices
 
 type AsyncLazyState<'t> =
     | Initial of Async<'t>
-    | Requested of Lazy<Task<'t>>  * CancellationTokenSource
+    | Requested of Lazy<Task<'t>>  * CancellationTokenSource * int
     | Canceled
 
 type AsyncLazy<'t>(computation: Async<'t>, ?cancelUnobserved: bool, ?restartCanceled: bool) =
@@ -24,45 +24,52 @@ type AsyncLazy<'t>(computation: Async<'t>, ?cancelUnobserved: bool, ?restartCanc
     let restartCanceled = defaultArg restartCanceled true
     let cancelUnobserved = defaultArg cancelUnobserved true
 
-    let gate = obj()
+    let stateUpdateSync = obj()
     let mutable state = Initial computation
-    let mutable requests = 0
 
-    let request (work: Lazy<Task<'t>>) (cts: CancellationTokenSource) firstRequest =
+    let afterRequest () =
+        match state with
+        | Requested(work, cts, 1) when not work.Value.IsCompleted && cancelUnobserved ->
+            cts.Cancel()
+            state <- if restartCanceled then Initial computation else Canceled
+        | Requested(work, cts, count) ->
+            state <- Requested(work, cts, count - 1)
+        | _ -> ()
+
+    let request (work: Lazy<Task<'t>>) firstRequest =
         async {
-            try 
+            try
                 let! ct = Async.CancellationToken
                 let options = if firstRequest then TaskContinuationOptions.ExecuteSynchronously else TaskContinuationOptions.None
                 return!
                     work.Value.ContinueWith((fun (t: Task<_>) -> t.Result), ct, options, TaskScheduler.Current)
                     |> Async.AwaitTask
             finally
-                lock gate <| fun () ->
-                    if Interlocked.Decrement &requests = 0 && not work.Value.IsCompleted then
-                        if cancelUnobserved then
-                            cts.Cancel()
-                            state <- if restartCanceled then Initial computation else Canceled
+                lock stateUpdateSync afterRequest
         }
 
-    member _.TryRequest = lock gate <| fun () ->
-        
-        let firstRequest = Interlocked.Increment &requests = 1
-
+    let tryRequest () =
         match state with
         | Initial computation ->
             let cts = new CancellationTokenSource()
             let work = lazy Async.StartAsTask(computation, cancellationToken = cts.Token)
-            state <- Requested (work, cts)
-            Some (request work cts firstRequest)
-        | Requested (work, cts) ->
-            Some (request work cts firstRequest)
+            state <- Requested (work, cts, 1)
+            Some (request work true)
+        | Requested (work, cts, count) ->
+            state <- Requested (work, cts, count + 1)
+            Some (request work (count = 0))
         | Canceled ->
             None
 
+    member _.TryRequest =
+        lock stateUpdateSync tryRequest
+
     member _.Result =
         match state with
-        | Requested (work, _) when work.IsValueCreated && work.Value.Status = TaskStatus.RanToCompletion -> Some work.Value.Result
-        | _ -> None
+        | Requested (work, _, _) when work.IsValueCreated && work.Value.Status = TaskStatus.RanToCompletion ->
+            Some work.Value.Result
+        | _ ->
+            None
 
 [<AutoOpen>]
 module internal Utils =
@@ -124,7 +131,7 @@ type internal AsyncMemoize<'TKey, 'TVersion, 'TValue when 'TKey: equality and 'T
     (?keepStrongly, ?keepWeakly, ?name: string, ?cancelDuplicateRunningJobs: bool) =
 
     let name = defaultArg name "N/A"
-    let cancelDuplicateRunningJobs = defaultArg cancelDuplicateRunningJobs false
+    do ignore cancelDuplicateRunningJobs
 
     let event = Event<_>()
 
@@ -172,7 +179,7 @@ type internal AsyncMemoize<'TKey, 'TVersion, 'TValue when 'TKey: equality and 'T
             job.TryRequest |> Option.get
 
         let request = lock cache <| fun () ->
-            let cached, otherVersions = cache.GetAll(key.Key, key.Version)
+            let cached, _ = cache.GetAll(key.Key, key.Version)
             cached |> Option.bind _.TryRequest |> Option.defaultWith startNew
 
         async {
