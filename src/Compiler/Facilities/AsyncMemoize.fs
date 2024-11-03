@@ -1,22 +1,18 @@
 namespace Internal.Utilities.Collections
 
 open System
-open System.Collections.Generic
 open System.Diagnostics
 open System.IO
 open System.Threading
 open System.Threading.Tasks
 
-open FSharp.Compiler
-open FSharp.Compiler.BuildGraph
-open FSharp.Compiler.Diagnostics
 open FSharp.Compiler.DiagnosticsLogger
 open Internal.Utilities.Library
 open System.Runtime.CompilerServices
 
 type AsyncLazyState<'t> =
     | Initial of Async<'t>
-    | Requested of Lazy<Task<'t>>  * CancellationTokenSource * int
+    | Requested of Lazy<Task<'t>> * CancellationTokenSource * int
     | Canceled
 
 type AsyncLazy<'t>(computation: Async<'t>, ?cancelUnobserved: bool, ?restartCanceled: bool) =
@@ -61,15 +57,17 @@ type AsyncLazy<'t>(computation: Async<'t>, ?cancelUnobserved: bool, ?restartCanc
         | Canceled ->
             None
 
-    member _.TryRequest =
-        lock stateUpdateSync tryRequest
+    member _.TryRequest = lock stateUpdateSync tryRequest
 
-    member _.Result =
+    member this.Task =
         match state with
-        | Requested (work, _, _) when work.IsValueCreated && work.Value.Status = TaskStatus.RanToCompletion ->
-            Some work.Value.Result
-        | _ ->
-            None
+        | Requested(work, _, _) when work.IsValueCreated -> Some work.Value
+        | _ -> None
+
+    member this.Result = 
+        this.Task
+        |> Option.filter (fun t -> t.Status = TaskStatus.RanToCompletion)
+        |> Option.map _.Result
 
 [<AutoOpen>]
 module internal Utils =
@@ -98,6 +96,7 @@ type internal JobEvent =
     | Strengthened
     | Failed
     | Cleared
+    static member AllEvents = [Requested; Started; Restarted; Finished; Canceled; Evicted; Collected; Weakened; Strengthened; Failed; Cleared]
 
 type internal ICacheKey<'TKey, 'TVersion> =
     abstract member GetKey: unit -> 'TKey
@@ -122,6 +121,9 @@ type private KeyData<'TKey, 'TVersion> =
         Version: 'TVersion
     }
 
+type Job<'t> = AsyncLazy<Result<'t * CapturingDiagnosticsLogger, exn * CapturingDiagnosticsLogger>>
+
+[<DebuggerDisplay("{DebuggerDisplay}")>]
 type internal AsyncMemoize<'TKey, 'TVersion, 'TValue when 'TKey: equality and 'TVersion: equality
 #if !NO_CHECKNULLS
     and 'TKey:not null
@@ -135,20 +137,29 @@ type internal AsyncMemoize<'TKey, 'TVersion, 'TValue when 'TKey: equality and 'T
 
     let event = Event<_>()
 
-    let log (eventType, keyData: KeyData<_, _>) = lock event <| fun () ->
-        event.Trigger(eventType, (keyData.Label, keyData.Key, keyData.Version))
+    let eventCounts = [for j in JobEvent.AllEvents -> j, ref 0] |> dict
+    let mutable hits = 0   
+    let mutable duration = 0L
+
+    let keyTuple (keyData: KeyData<_, _>) = keyData.Label, keyData.Key, keyData.Version
+
+    let logK (eventType: JobEvent) key = lock event <| fun () ->
+        Interlocked.Increment(eventCounts[eventType]) |> ignore
+        event.Trigger(eventType, key)
+
+    let log eventType keyData = logK eventType (keyTuple keyData)
 
     let cache =
-        LruCache<'TKey, 'TVersion, AsyncLazy<Result<'TValue * _, exn * _>>>(
+        LruCache<'TKey, 'TVersion, Job<'TValue>>(
             keepStrongly = defaultArg keepStrongly 100,
             keepWeakly = defaultArg keepWeakly 200,
             event =
                 (function
-                | CacheEvent.Evicted -> (fun k -> event.Trigger(JobEvent.Evicted, k))
-                | CacheEvent.Collected -> (fun k -> event.Trigger(JobEvent.Collected, k))
-                | CacheEvent.Weakened -> (fun k -> event.Trigger(JobEvent.Weakened, k))
-                | CacheEvent.Strengthened -> (fun k -> event.Trigger(JobEvent.Strengthened, k))
-                | CacheEvent.Cleared -> (fun k -> event.Trigger(JobEvent.Cleared, k))))
+                | CacheEvent.Evicted -> logK JobEvent.Evicted
+                | CacheEvent.Collected -> logK JobEvent.Collected
+                | CacheEvent.Weakened -> logK JobEvent.Weakened
+                | CacheEvent.Strengthened -> logK JobEvent.Strengthened
+                | CacheEvent.Cleared -> logK JobEvent.Cleared))
 
     member _.Get(key: ICacheKey<_, _>, computation) =
         let key =
@@ -158,36 +169,50 @@ type internal AsyncMemoize<'TKey, 'TVersion, 'TValue when 'TKey: equality and 'T
                 Version = key.GetVersion()
             }
       
-        log (Requested, key)
+        log Requested key
 
         let startNew () =
-            let job =
-                AsyncLazy( async {
-                    use! _handler = Async.OnCancel <| fun () -> log (Canceled, key)
-                    log (Started, key)
+            let job = 
+                Job( async {
+                    let sw = Stopwatch.StartNew()
+                    use! _handler = Async.OnCancel <| fun () -> log Canceled key
+                    log Started key
                     let logger = CapturingDiagnosticsLogger "cache"
                     SetThreadDiagnosticsLoggerNoUnwind logger
+
                     match! Async.Catch computation with
+
                     | Choice.Choice1Of2 result ->
-                        log(Finished, key)
+                        log Finished key
+                        Interlocked.Add(&duration, sw.ElapsedMilliseconds) |> ignore
                         return Result.Ok(result, logger)
+
                     | Choice.Choice2Of2 ex ->
-                        log (Failed, key)
+                        log Failed key
                         return Result.Error(ex, logger)
                 })
+
             cache.Set(key.Key, key.Version, key.Label, job)
+
             job.TryRequest |> Option.get
 
         let request = lock cache <| fun () ->
             let cached, _ = cache.GetAll(key.Key, key.Version)
-            cached |> Option.bind _.TryRequest |> Option.defaultWith startNew
+            let countHit v = Interlocked.Increment &hits |> ignore; v
+            cached
+            |> Option.bind _.TryRequest
+            |> Option.map countHit
+            |> Option.defaultWith startNew
 
         async {
             use _ = new CompilationGlobalsScope()
+
             match! request with
+
             | Result.Ok(result, logger) ->
                 logger.CommitDelayedDiagnostics DiagnosticsThreadStatics.DiagnosticsLogger
                 return result
+
             | Result.Error(ex, logger) ->
                 logger.CommitDelayedDiagnostics DiagnosticsThreadStatics.DiagnosticsLogger
                 return raise ex
@@ -211,6 +236,47 @@ type internal AsyncMemoize<'TKey, 'TVersion, 'TValue when 'TKey: equality and 'T
     member this.OnEvent = this.Event.Add
 
     member this.Count = lock cache <| fun () -> cache.Count
+
+    member this.DebuggerDisplay =
+
+        let (|Running|_|) (job: Job<_>) = job.Task |> Option.filter (_.IsCompleted >> not)
+        let (|Faulted|_|) (job: Job<_>) = job.Task |> Option.filter _.IsFaulted
+
+        let status = function
+            | Running _ -> "Running"
+            | Faulted _ -> "Faulted"
+            | _ -> "other"
+
+        let cachedJobs = cache.GetValues() |> Seq.map (fun (_,_,job) -> job)
+
+        let valueStats = cachedJobs |> Seq.countBy status |> Map
+        let getStat key = valueStats.TryFind key |> Option.defaultValue 0
+
+        let running =
+            let count = getStat "Running"
+            if  count > 0 then $" Running {count}" else ""
+
+        let finished = eventCounts[Finished].Value
+        let avgDuration = if finished = 0 then "" else $"| Avg: %.0f{float duration / float finished} ms"
+
+        let requests = eventCounts[Requested].Value
+        let hitRatio = if requests = 0 then "" else $" (%.0f{float hits / (float (requests)) * 100.0} %%)"
+
+        let faulted = getStat "Faulted"
+        let failed = eventCounts[Failed].Value
+
+        let stats =
+            seq {
+                if faulted + failed > 0 then
+                    " (_!_) "
+                for j in eventCounts.Keys do
+                    let count = eventCounts[j].Value
+                    if count > 0 then $"| {j}: {count}" else ""
+                $"| hits: {hits}{hitRatio} "
+            }
+            |> String.concat ""
+
+        $"{running} {cache.DebuggerDisplay} {stats}{avgDuration}"
 
 /// A drop-in replacement for AsyncMemoize that disables caching and just runs the computation every time.
 [<DebuggerDisplay("{DebuggerDisplay}")>]
