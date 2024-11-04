@@ -38,8 +38,11 @@ type AsyncLazy<'t>(computation: Async<'t>, ?cancelUnobserved: bool, ?restartCanc
                 let! ct = Async.CancellationToken
                 let options = if firstRequest then TaskContinuationOptions.ExecuteSynchronously else TaskContinuationOptions.None
                 return!
-                    // Using ContinueWith allows to detach early from the running task in case this request is cancelled.
-                    // This way the computation and the requests that await it can be governed by independent CTSes and canceled separately.
+                    // Using ContinueWith with a CancellationToken allows detaching from the running 'work' task.
+                    // This ensures the lazy 'work' and its awaiting requests can be independently managed 
+                    // by separate CancellationTokenSources, enabling individual cancellation.
+                    // Essentially, if this async computation is canceled, it won't wait for the 'work' to complete
+                    // but will immediately proceed to the finally block.
                     work.Value.ContinueWith((fun (t: Task<_>) -> t.Result), ct, options, TaskScheduler.Current)
                     |> Async.AwaitTask
             finally
