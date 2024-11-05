@@ -12,28 +12,43 @@ open System.Runtime.CompilerServices
 
 type AsyncLazyState<'t> =
     | Initial of Async<'t>
-    | Requested of Lazy<Task<'t>> * CancellationTokenSource * int
-    | Canceled
+    | Created of Task<'t> * CancellationTokenSource * int
 
-type AsyncLazy<'t>(computation: Async<'t>, ?cancelUnobserved: bool, ?restartCanceled: bool) =
+type AsyncLazy<'t>(computation: Async<'t>, ?cancelUnobserved: bool) =
 
-    let restartCanceled = defaultArg restartCanceled true
     let cancelUnobserved = defaultArg cancelUnobserved true
 
     let stateUpdateSync = obj()
     let mutable state = Initial computation
 
-    let afterRequest () =
+    let cancelIfUnobserved () =
         match state with
-        | Requested(work, cts, 1) when not work.Value.IsCompleted && cancelUnobserved ->
+        | Created(work, cts, 0) when work.IsCompleted && cancelUnobserved ->
             cts.Cancel()
-            state <- if restartCanceled then Initial computation else Canceled
-        | Requested(work, cts, count) ->
-            state <- Requested(work, cts, count - 1)
+            state <- Initial computation
         | _ -> ()
 
-    let request (work: Lazy<Task<'t>>) firstRequest =
+    let afterRequest () =
+        match state with
+        | Created(work, cts, count) ->
+            state <- Created(work, cts, count - 1)
+            cancelIfUnobserved ()
+        | _ -> ()
+
+    let request () =
+        let work, firstRequest =
+            match state with
+            | Initial computation ->
+                let cts = new CancellationTokenSource()
+                let work = Async.StartAsTask(computation, cancellationToken = cts.Token)
+                state <- Created (work, cts, 1)
+                work, true
+            | Created (work, cts, count) ->
+                state <- Created (work, cts, count + 1)
+                work, (count = 0)
+
         async {
+
             try
                 let! ct = Async.CancellationToken
                 let options = if firstRequest then TaskContinuationOptions.ExecuteSynchronously else TaskContinuationOptions.None
@@ -43,32 +58,17 @@ type AsyncLazy<'t>(computation: Async<'t>, ?cancelUnobserved: bool, ?restartCanc
                     // by separate CancellationTokenSources, enabling individual cancellation.
                     // Essentially, if this async computation is canceled, it won't wait for the 'work' to complete
                     // but will immediately proceed to the finally block.
-                    work.Value.ContinueWith((fun (t: Task<_>) -> t.Result), ct, options, TaskScheduler.Current)
+                    work.ContinueWith((fun (t: Task<_>) -> t.Result), ct, options, TaskScheduler.Current)
                     |> Async.AwaitTask
             finally
                 lock stateUpdateSync afterRequest
         }
 
-    let tryRequest () =
-        match state with
-        | Initial computation ->
-            let cts = new CancellationTokenSource()
-            let work = lazy Async.StartAsTask(computation, cancellationToken = cts.Token)
-            state <- Requested (work, cts, 1)
-            Some (request work true)
-        | Requested (work, cts, count) ->
-            state <- Requested (work, cts, count + 1)
-            Some (request work (count = 0))
-        | Canceled ->
-            None
+    member _.Request = lock stateUpdateSync request
 
-    member _.TryRequest = lock stateUpdateSync tryRequest
+    member _.Cancel() = lock stateUpdateSync cancelIfUnobserved
 
-    member _.Task =
-        match state with
-        | Requested(work, _, _) when work.IsValueCreated -> Some work.Value
-        | _ -> None
-
+    member _.Task = match state with Created(t, _, _) -> Some t | _ -> None
     member this.Result = 
         this.Task
         |> Option.filter (fun t -> t.Status = TaskStatus.RanToCompletion)
@@ -138,7 +138,7 @@ type internal AsyncMemoize<'TKey, 'TVersion, 'TValue when 'TKey: equality and 'T
     (?keepStrongly, ?keepWeakly, ?name: string, ?cancelDuplicateRunningJobs: bool) =
 
     let name = defaultArg name "N/A"
-    do ignore cancelDuplicateRunningJobs
+    let cancelDuplicateRunningJobs = defaultArg cancelDuplicateRunningJobs false
 
     let event = Event<_>()
 
@@ -198,21 +198,24 @@ type internal AsyncMemoize<'TKey, 'TVersion, 'TValue when 'TKey: equality and 'T
                 })
 
             cache.Set(key.Key, key.Version, key.Label, job)
+            job
 
-            job.TryRequest |> Option.get
+        let otherVersions, job = lock cache <| fun () ->
+            let cached, otherVersions = cache.GetAll(key.Key, key.Version)
 
-        let request = lock cache <| fun () ->
-            let cached, _ = cache.GetAll(key.Key, key.Version)
+            otherVersions,
+
             let countHit v = Interlocked.Increment &hits |> ignore; v
             cached
-            |> Option.bind _.TryRequest
             |> Option.map countHit
             |> Option.defaultWith startNew
+
+        if cancelDuplicateRunningJobs then otherVersions |> Seq.map snd |> Seq.iter _.Cancel()
 
         async {
             use _ = new CompilationGlobalsScope()
 
-            match! request with
+            match! job.Request with
 
             | Result.Ok(result, logger) ->
                 logger.CommitDelayedDiagnostics DiagnosticsThreadStatics.DiagnosticsLogger
