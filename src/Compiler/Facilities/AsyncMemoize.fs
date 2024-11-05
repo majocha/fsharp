@@ -64,7 +64,7 @@ type AsyncLazy<'t>(computation: Async<'t>, ?cancelUnobserved: bool, ?restartCanc
 
     member _.TryRequest = lock stateUpdateSync tryRequest
 
-    member this.Task =
+    member _.Task =
         match state with
         | Requested(work, _, _) when work.IsValueCreated -> Some work.Value
         | _ -> None
@@ -187,12 +187,12 @@ type internal AsyncMemoize<'TKey, 'TVersion, 'TValue when 'TKey: equality and 'T
 
                     match! Async.Catch computation with
 
-                    | Choice.Choice1Of2 result ->
+                    | Choice1Of2 result ->
                         log Finished key
                         Interlocked.Add(&duration, sw.ElapsedMilliseconds) |> ignore
                         return Result.Ok(result, logger)
 
-                    | Choice.Choice2Of2 ex ->
+                    | Choice2Of2 ex ->
                         log Failed key
                         return Result.Error(ex, logger)
                 })
@@ -224,7 +224,8 @@ type internal AsyncMemoize<'TKey, 'TVersion, 'TValue when 'TKey: equality and 'T
         }
 
     member _.TryGet(key: 'TKey, predicate: 'TVersion -> bool) : 'TValue option =
-        let versionsAndJobs = cache.GetAll(key)
+        let versionsAndJobs =
+            lock cache <| fun () ->cache.GetAll(key)
 
         versionsAndJobs
         |> Seq.tryPick (fun (version, job) ->
