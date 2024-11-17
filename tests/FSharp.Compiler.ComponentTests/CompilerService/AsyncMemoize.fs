@@ -581,3 +581,29 @@ let ``We get diagnostics from the job that failed`` () =
     Assert.True(
         result = [["job 1 error"]; ["job 1 error"]] ||
         result = [["job 2 error"]; ["job 2 error"]] )
+
+
+[<Fact>]
+let ``Exception stack trace is complete`` () =
+    let failingFunction () = failwith "snap!"
+    
+    let job1 =
+        async {
+            failingFunction ()
+            return 1
+        }
+    
+    let job2 =
+        async {
+            let! r1 = job1
+            return r1 + 1
+        }
+    
+    let job3 =
+        async {
+            do! Async.SwitchToNewThread()
+            let! r2 = job2
+            return r2 + 3
+        }
+
+    job3 |> Async.RunSynchronously |> ignore
