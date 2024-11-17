@@ -767,3 +767,37 @@ type AsyncModule() =
         match result with
         | Choice2Of2 e -> Assert.AreEqual("OK", e.Message)
         | x -> failwithf "unexpected %A" x
+
+    [<Fact>]
+    member _.``Exception stack trace is complete`` () =
+        let failingFunction () = failwith "snap!"
+        
+        let job1 =
+            async {
+                failingFunction ()
+                return 1
+            }
+        
+        let job2 =
+            async {
+                try 
+                    let! r1 = job1
+                    return r1 + 1
+                with
+                | exn -> return raise exn
+            }
+        
+        let job3 =
+            async {
+                do! Async.SwitchToNewThread()
+                let! r2 = job2
+                return r2 + 3
+            }
+        
+        let stackTrace =
+            try job3 |> Async.RunSynchronously |> ignore; "" with exn -> exn.StackTrace
+
+        Assert.Contains(stackTrace, "failingFunction")
+        Assert.Contains(stackTrace, "job1")
+        Assert.Contains(stackTrace, "job2")
+        Assert.Contains(stackTrace, "job3")

@@ -45,22 +45,10 @@ module ExceptionDispatchInfoHelpers =
 
     type ExceptionDispatchInfo with
 
-        member edi.GetAssociatedSourceException() =
-            let exn = edi.SourceException
-            // Try to store the entry in the association table to allow us to recover it later.
-            try
-                associationTable.Add(exn, edi)
-            with _ ->
-                ()
-
-            exn
-
         // Capture, but prefer the saved information if available
         [<DebuggerHidden>]
         static member RestoreOrCapture exn =
-            match associationTable.TryGetValue exn with
-            | true, edi -> edi
-            | _ -> ExceptionDispatchInfo.Capture exn
+            associationTable.GetValue(exn, (fun exn -> ExceptionDispatchInfo.Capture exn))
 
         member inline edi.ThrowAny() =
             edi.Throw()
@@ -544,7 +532,7 @@ module AsyncPrimitives =
         let mutable ok = false
 
         try
-            resOpt <- filterFunction (edi.GetAssociatedSourceException())
+            resOpt <- filterFunction edi.SourceException
             ok <- true
         finally
             if not ok then
@@ -1504,7 +1492,7 @@ type Async =
             let newCtxt =
                 ctxt.WithContinuations(
                     cont = (Choice1Of2 >> ctxt.cont),
-                    econt = (fun edi -> ctxt.cont (Choice2Of2(edi.GetAssociatedSourceException())))
+                    econt = (fun edi -> ctxt.cont (Choice2Of2 edi.SourceException))
                 )
 
             computation.Invoke newCtxt)
@@ -1773,7 +1761,7 @@ type Async =
         Async.StartWithContinuationsUsingDispatchInfo(
             computation,
             continuation,
-            (fun edi -> exceptionContinuation (edi.GetAssociatedSourceException())),
+            (fun edi -> exceptionContinuation edi.SourceException),
             cancellationContinuation,
             ?cancellationToken = cancellationToken
         )
