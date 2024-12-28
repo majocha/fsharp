@@ -36,7 +36,7 @@ type AsyncLazy<'t> private (initial: AsyncLazyState<'t>, cancelUnawaited: bool) 
             state <- next
             result
 
-    let updateState f = withStateUpdate <| fun prev -> let next = f prev in next, next
+    let updateState f = withStateUpdate <| fun prev -> f prev, ()
 
     let cancelIfUnawaited cancelUnawaited = function
         | Running(computation, _, cts, 0) when cancelUnawaited ->
@@ -45,7 +45,7 @@ type AsyncLazy<'t> private (initial: AsyncLazyState<'t>, cancelUnawaited: bool) 
             Initial computation
         | state -> state
 
-    let afterRequest (_: Task<_>) = function
+    let afterRequest = function
         | Running(c, work, cts, count) -> Running(c, work, cts, count - 1) |> cancelIfUnawaited cancelUnawaited
         | state -> state // Nothing more to do if state already transitioned.
 
@@ -53,8 +53,6 @@ type AsyncLazy<'t> private (initial: AsyncLazyState<'t>, cancelUnawaited: bool) 
         work
             // Continuation with separate cancellation token allows the work to continue after the request was cancelled.
             .ContinueWith(ignore<Task<_>>, cancellationToken = ct)
-            // This continuation always runs, regardless of cancellation.
-            .ContinueWith(afterRequest >> updateState)
 
     let onWorkComplete (work: Task<'t>) = function
         | Running (c, _, _, _) -> try Completed work.Result with exn -> Exception.unwrap exn |> Faulted
@@ -65,13 +63,13 @@ type AsyncLazy<'t> private (initial: AsyncLazyState<'t>, cancelUnawaited: bool) 
             let cts = new CancellationTokenSource()
             let work =
                 Async.StartAsTask(computation, cancellationToken = cts.Token)
-                    .ContinueWith(onWorkComplete >> updateState >> ignore, TaskContinuationOptions.NotOnCanceled)
+                    .ContinueWith(onWorkComplete >> updateState, TaskContinuationOptions.NotOnCanceled)
             Running (computation, work, cts, 1),
             detachable work ct
         | Running (c, work, cts, count) ->
             Running (c, work, cts, count + 1),
             detachable work ct
-        | state -> state, Task.FromResult state // Fast path, can be further optimized.
+        | state -> state, Task.FromResult()
 
     // computation will deallocate after state transition to Completed ot Faulted.
     new (computation, ?cancelUnawaited: bool) =
@@ -80,15 +78,17 @@ type AsyncLazy<'t> private (initial: AsyncLazyState<'t>, cancelUnawaited: bool) 
     member _.Request() =
         async {
             let! ct = Async.CancellationToken
-            match! withStateUpdate (request ct) |> Async.AwaitTask with
-            | Completed result -> return result
-            | Faulted exn -> return raise exn
-            | state ->
-                do! async.Zero() // Cancel check. We should be here only if the request was cancelled. 
-                return failwith $"request completed but state is %A{state}"
-        }
+            try 
+                do! request ct |> withStateUpdate |> Async.AwaitTask
+                match state with
+                | Completed result -> return result
+                | Faulted exn -> return raise exn
+                | state -> return failwith $"work completed but state is %A{state}"
+            finally
+                updateState afterRequest                         
+        }  
 
-    member _.CancelIfUnawaited() = updateState (cancelIfUnawaited true) |> ignore
+    member _.CancelIfUnawaited() = updateState (cancelIfUnawaited true)
 
     member _.State = state
 
