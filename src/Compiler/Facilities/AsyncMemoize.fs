@@ -211,8 +211,7 @@ type internal AsyncMemoize<'TKey, 'TVersion, 'TValue when 'TKey: equality and 'T
             }
 
         let wrappedComputation =
-            async {
-                use! _handler = Async.OnCancel (fun () -> log Canceled key)
+            Async.TryCancelled( async {
                 let sw = Stopwatch.StartNew()
                 log Started key
                 let logger = CapturingDiagnosticsLogger "cache"
@@ -226,7 +225,7 @@ type internal AsyncMemoize<'TKey, 'TVersion, 'TValue when 'TKey: equality and 'T
                 | Choice2Of2 exn ->
                     log Failed key
                     return Result.Error exn, logger
-            }
+            }, fun _ -> log Canceled key)
 
         let getOrAdd () =
             let cached, otherVersions = cache.GetAll(key.Key, key.Version)
