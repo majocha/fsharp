@@ -151,12 +151,7 @@ type private KeyData<'TKey, 'TVersion> =
 type Job<'t> = AsyncLazy<Result<'t, exn> * CapturingDiagnosticsLogger>
 
 [<DebuggerDisplay("{DebuggerDisplay}")>]
-type internal AsyncMemoize<'TKey, 'TVersion, 'TValue when 'TKey: equality and 'TVersion: equality
-#if !NO_CHECKNULLS
-    and 'TKey:not null
-    and 'TVersion:not null
-#endif
-    >
+type internal AsyncMemoize<'TKey, 'TVersion, 'TValue when 'TKey: equality and 'TVersion: equality and 'TKey:not null and 'TVersion:not null>
     (?keepStrongly, ?keepWeakly, ?name: string, ?cancelUnawaitedJobs: bool, ?cancelDuplicateRunningJobs: bool) =
 
     let name = defaultArg name "N/A"
