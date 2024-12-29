@@ -1,6 +1,5 @@
 namespace Internal.Utilities.Collections
 
-open System
 open System.Diagnostics
 open System.IO
 open System.Threading
@@ -10,15 +9,9 @@ open System.Runtime.CompilerServices
 open FSharp.Compiler.DiagnosticsLogger
 open Internal.Utilities.Library
 
-module Exception =
-    let unwrap (x: exn) =
-        match x with
-        | :? AggregateException as exn  -> exn.GetBaseException()
-        | x -> x
-
 type AsyncLazyState<'t> =
     | Initial of computation: Async<'t>
-    | Running of initialComputation: Async<'t> * work: Task<unit> * CancellationTokenSource * requestCount: int
+    | Running of initialComputation: Async<'t> * work: Task<'t> * CancellationTokenSource * requestCount: int
     | Completed of result: 't
     | Faulted of exn
 
@@ -35,7 +28,6 @@ type AsyncLazy<'t> private (initial: AsyncLazyState<'t>, cancelUnawaited: bool) 
             let next, result = f state
             state <- next
             result
-
     let updateState f = withStateUpdate <| fun prev -> f prev, ()
 
     let cancelIfUnawaited cancelUnawaited = function
@@ -49,44 +41,50 @@ type AsyncLazy<'t> private (initial: AsyncLazyState<'t>, cancelUnawaited: bool) 
         | Running(c, work, cts, count) -> Running(c, work, cts, count - 1) |> cancelIfUnawaited cancelUnawaited
         | state -> state // Nothing more to do if state already transitioned.
 
-    let detachable (work: Task<unit>) ct =
-        work
-            // Continuation with separate cancellation token allows the work to continue after the request was cancelled.
-            .ContinueWith(ignore<Task<_>>, cancellationToken = ct)
+    let detachable (work: Task<'t>) =
+        async {
+            try
+                let! ct = Async.CancellationToken
+                // Using ContinueWith with a CancellationToken allows detaching from the running 'work' task.
+                // If the current async workflow is canceled, the 'work' task will continue running independently.
+                do!  work.ContinueWith(ignore<Task<'t>>, ct) |> Async.AwaitTask
+            with :? TaskCanceledException -> ()
+            // If we've reached this point, it means there was no cancellation and the 'work' task has completed.
+            return! work |> Async.AwaitTask
+        }
 
-    let onWorkComplete (work: Task<'t>) = function
-        | Running (c, _, _, _) -> try Completed work.Result with exn -> Exception.unwrap exn |> Faulted
-        | state -> failwith $"unexpected state on complete: %A{state}"      
+    let onComplete (t: Task<'t>) =
+        updateState <| fun _ ->
+            try Completed t.Result with exn -> Faulted exn
+        t.Result
 
-    let request ct = function
+    let request = function
         | Initial computation ->
             let cts = new CancellationTokenSource()
             let work =
                 Async.StartAsTask(computation, cancellationToken = cts.Token)
-                    .ContinueWith(onWorkComplete >> updateState, TaskContinuationOptions.NotOnCanceled)
+                    .ContinueWith(onComplete, TaskContinuationOptions.NotOnCanceled)
             Running (computation, work, cts, 1),
-            detachable work ct
+            detachable work
         | Running (c, work, cts, count) ->
             Running (c, work, cts, count + 1),
-            detachable work ct
-        | state -> state, Task.FromResult()
+            detachable work
+        | Completed result as state ->
+            state, async { return result }
+        | Faulted exn as state ->
+            state, async { return raise exn }
 
     // computation will deallocate after state transition to Completed ot Faulted.
-    new (computation, ?cancelUnawaited: bool) =
+    new (computation, ?cancelUnawaited: bool, ?cacheException) =
         AsyncLazy(Initial computation, defaultArg cancelUnawaited true)
 
     member _.Request() =
         async {
-            let! ct = Async.CancellationToken
             try 
-                do! request ct |> withStateUpdate |> Async.AwaitTask
-                match state with
-                | Completed result -> return result
-                | Faulted exn -> return raise exn
-                | state -> return failwith $"work completed but state is %A{state}"
+                return! withStateUpdate request
             finally
-                updateState afterRequest                         
-        }  
+                updateState afterRequest
+        }
 
     member _.CancelIfUnawaited() = updateState (cancelIfUnawaited true)
 
@@ -195,12 +193,12 @@ type internal AsyncMemoize<'TKey, 'TVersion, 'TValue when 'TKey: equality and 'T
             }
 
         let wrappedComputation =
-            Async.TryCancelled(
-            async {
+            Async.TryCancelled( async {
                 let sw = Stopwatch.StartNew()
                 log Started key
                 let logger = CapturingDiagnosticsLogger "cache"
                 SetThreadDiagnosticsLoggerNoUnwind logger
+
                 match! computation |> Async.Catch with
                 | Choice1Of2 result ->
                     log Finished key
@@ -232,7 +230,7 @@ type internal AsyncMemoize<'TKey, 'TVersion, 'TValue when 'TKey: equality and 'T
             log Requested key
 
             if cancelDuplicateRunningJobs && not cancelUnawaitedJobs then
-                for _, job in otherVersions do job.CancelIfUnawaited()
+                otherVersions |> Seq.map snd |> Seq.iter _.CancelIfUnawaited()
 
             use _ = new CompilationGlobalsScope()
 
