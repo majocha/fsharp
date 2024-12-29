@@ -53,7 +53,7 @@ type AsyncLazy<'t> private (initial: AsyncLazyState<'t>, cancelUnawaited: bool) 
             return! work |> Async.AwaitTask
         }
 
-    let onComplete cts (t: Task<'t>) =
+    let onComplete (t: Task<'t>) =
         updateState <| fun _ ->
             try Completed t.Result with exn -> Faulted exn
         t.Result
@@ -63,7 +63,7 @@ type AsyncLazy<'t> private (initial: AsyncLazyState<'t>, cancelUnawaited: bool) 
             let cts = new CancellationTokenSource()
             let work =
                 Async.StartAsTask(computation, cancellationToken = cts.Token)
-                    .ContinueWith(onComplete cts, TaskContinuationOptions.NotOnCanceled)
+                    .ContinueWith(onComplete, TaskContinuationOptions.NotOnCanceled)
             Running (computation, work, cts, 1),
             detachable work
         | Running (c, work, cts, count) ->
@@ -84,13 +84,13 @@ type AsyncLazy<'t> private (initial: AsyncLazyState<'t>, cancelUnawaited: bool) 
                 return! withStateUpdate request
             finally
                 updateState afterRequest
-        }     
+        }
 
     member _.CancelIfUnawaited() = updateState (cancelIfUnawaited true)
 
     member _.State = state
 
-    member this.TryResult =
+    member _.TryResult =
         match state with
         | Completed result -> Some result
         | _ -> None
