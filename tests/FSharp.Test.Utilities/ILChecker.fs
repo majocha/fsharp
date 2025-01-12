@@ -16,7 +16,6 @@ module ILChecker =
     let private exec exe args =
         let arguments = args |> String.concat " "
         let exitCode, _output, errors = Commands.executeProcess exe arguments ""
-        let errors = errors |> String.concat Environment.NewLine
         errors, exitCode
 
     /// Filters i.e ['The system type \'System.ReadOnlySpan`1\' was required but no referenced system DLL contained this type']

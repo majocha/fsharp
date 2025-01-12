@@ -216,15 +216,9 @@ let main argv = 0"""
                     File.WriteAllText(directoryBuildPropsFileName, directoryBuildProps)
                     File.WriteAllText(directoryBuildTargetsFileName, directoryBuildTargets)
 
-                    let exitCode, dotnetoutput, dotneterrors = Commands.executeProcess config.DotNetExe "build" projectDirectory
+                    let exitCode, _dotnetoutput, _dotneterrors = Commands.executeProcess config.DotNetExe "build" projectDirectory
                     
                     if exitCode <> 0 || errors.Length > 0 then
-                        errors <- dotneterrors
-                        output <- dotnetoutput
-                        printfn "Output:\n=======\n"
-                        output |> Seq.iter(fun line -> printfn "STDOUT:%s\n" line)
-                        printfn "Errors:\n=======\n"
-                        errors  |> Seq.iter(fun line -> printfn "STDERR:%s\n" line)
                         Assert.True(false, "Errors produced generating References")
 
                     File.ReadLines(frameworkReferencesFileName) |> Seq.toArray

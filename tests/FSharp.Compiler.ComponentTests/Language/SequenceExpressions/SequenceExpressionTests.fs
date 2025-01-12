@@ -7,13 +7,9 @@ open Xunit
 open FSharp.Test.Compiler
 open FSharp.Test.ScriptHelpers
 
-// Run sequentially because of shared fsiSession.
-[<FSharp.Test.RunTestCasesInSequence>]
 module SequenceExpression =
 
-    let fsiSession = getSessionForEval [||] LangVersion.Preview
-
-    let runCode = evalInSharedSession fsiSession
+    let runCode = getSessionForEval [||] LangVersion.Preview |> evalInSharedSession
 
     [<Fact>]
     let ``Basic recursive case uses tail recursion``() =

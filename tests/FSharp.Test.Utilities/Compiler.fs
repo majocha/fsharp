@@ -1224,10 +1224,10 @@ Expected:
 {expected}
 Actual:
 {actual}"""
-    let updateBaseline () =
+    let updateBaseline =
         snd (Int32.TryParse(Environment.GetEnvironmentVariable("TEST_UPDATE_BSL"))) <> 0
     let updateBaseLineIfEnvironmentSaysSo baseline =
-        if updateBaseline () then
+        if updateBaseline then
             if FileSystem.FileExistsShim baseline.FilePath then
                 FileSystem.CopyShim(baseline.FilePath, baseline.BslSource, true)
 
@@ -1338,7 +1338,7 @@ Actual:
                 | Some il ->
                     failwith $"Build failure: {a} while expected il\n{il}"
                 | None ->
-                    if not (FileSystem.FileExistsShim baseline.ILBaseline.BslSource) && updateBaseline () then
+                    if updateBaseline && not (FileSystem.FileExistsShim baseline.ILBaseline.BslSource) then
                         File.WriteAllText(baseline.ILBaseline.BslSource, "")
                     else
                         failwith $"Build failure empty baseline at {baseline.ILBaseline.BslSource}: {a}"

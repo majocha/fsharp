@@ -4,6 +4,7 @@ module TestFramework
 
 open System
 open System.IO
+open System.Threading.Tasks
 open System.Diagnostics
 open System.Reflection
 open Scripting
@@ -65,17 +66,6 @@ module Commands =
     // returns exit code, stdio and stderr as string arrays
     let executeProcess pathToExe arguments workingDir =
         let commandLine = ResizeArray()
-        let errorsList = ResizeArray()
-        let outputList = ResizeArray()
-        let errorslock = obj()
-        let outputlock = obj()
-        let outputDataReceived (message: string) =
-            if not (isNull message) then
-                lock outputlock (fun () -> outputList.Add(message))
-
-        let errorDataReceived (message: string) =
-            if not (isNull message) then
-                lock errorslock (fun () -> errorsList.Add(message))
 
         commandLine.Add $"cd {workingDir}"
         commandLine.Add $"{pathToExe} {arguments} /bl"
@@ -96,30 +86,12 @@ module Commands =
         use p = new Process()
         p.StartInfo <- psi
 
-        p.OutputDataReceived.Add(fun a -> outputDataReceived a.Data)
-        p.ErrorDataReceived.Add(fun a ->  errorDataReceived a.Data)
+        p.Start() |> ignore
+        let streamsTask = Task.WhenAll(p.StandardOutput.ReadToEndAsync(), p.StandardError.ReadToEndAsync())
+        p.WaitForExit()
+        let streams = streamsTask.Result
 
-        if p.Start() then
-            p.BeginOutputReadLine()
-            p.BeginErrorReadLine()
-            p.WaitForExit()
-#if DEBUG
-        let workingDir' =
-            if workingDir = ""
-            then
-                // Assign working dir to prevent default to C:\Windows\System32
-                let executionLocation = Assembly.GetExecutingAssembly().Location
-                Path.GetDirectoryName executionLocation
-            else
-                workingDir
-
-        lock gate (fun () ->
-            File.WriteAllLines(Path.Combine(workingDir', "commandline.txt"), commandLine)
-            File.WriteAllLines(Path.Combine(workingDir', "StandardOutput.txt"), outputList)
-            File.WriteAllLines(Path.Combine(workingDir', "StandardError.txt"), errorsList)
-        )
-#endif
-        p.ExitCode, outputList.ToArray(), errorsList.ToArray()
+        p.ExitCode, streams[0], streams[1]
 
     let getfullpath workDir (path:string) =
         let rooted =
