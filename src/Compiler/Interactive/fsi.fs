@@ -1673,16 +1673,7 @@ let internal mkBoundValueTypedImpl tcGlobals m moduleName name ty =
     let qname = QualifiedNameOfFile.QualifiedNameOfFile(Ident(moduleName, m))
     entity, v, CheckedImplFile.CheckedImplFile(qname, [], mty, contents, false, false, StampMap.Empty, Map.empty)
 
-let mkUniqueCcuName =
-    let mutable ccuId = 0
-
-    fun () ->
-        let nextId = Interlocked.Increment &ccuId
-
-        if nextId = 1 then
-            "FSI-ASSEMBLY"
-        else
-            $"FSI-ASSEMBLY{nextId}"
+let dynamicCcuName = "FSI-ASSEMBLY"
 
 /// Encapsulates the coordination of the typechecking, optimization and code generation
 /// components of the F# compiler for interactively executed fragments of code.
@@ -1726,8 +1717,6 @@ type internal FsiDynamicCompiler
     let generateDebugInfo = tcConfigB.debuginfo
 
     let valuePrinter = FsiValuePrinter(fsi, outWriter)
-
-    let dynamicCcuName = mkUniqueCcuName ()
 
     let builders =
         if tcConfigB.fsiMultiAssemblyEmit then
@@ -2427,16 +2416,8 @@ type internal FsiDynamicCompiler
     member _.DynamicAssemblies = dynamicAssemblies.ToArray()
 
     member _.FindDynamicAssembly(assemblyName: AssemblyName) =
-        // All dynamic assemblies share the same simple name and differ only in version.
-        if assemblyName.Name <> dynamicCcuName then
-            None
-        elif isNull assemblyName.Version then
-            // If no specific version is requested, try to return the most recent assembly.
-            dynamicAssemblies |> Seq.tryLast
-        else
-            // Otherwise, try to find an exact match.
-            dynamicAssemblies
-            |> ResizeArray.tryFind (fun asm -> asm.FullName = assemblyName.FullName)
+        dynamicAssemblies
+        |> ResizeArray.tryFind (fun asm -> asm.FullName = assemblyName.FullName)
 
     member _.EvalParsedSourceFiles(ctok, diagnosticsLogger, istate, inputs, m) =
         let prefix = mkFragmentPath m nextFragmentId
@@ -3299,7 +3280,7 @@ type internal MagicAssemblyResolution() =
             then
                 null
             else
-                // Check dynamic assemblies
+                // Check dynamic assemblies by exact version
                 match fsiDynamicCompiler.FindDynamicAssembly(assemblyName) with
                 | Some asm -> asm
                 | None ->
