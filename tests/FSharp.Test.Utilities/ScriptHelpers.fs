@@ -64,7 +64,9 @@ type FSharpScript(?additionalArgs: string[], ?quiet: bool, ?langVersion: LangVer
         Thread.CurrentThread.CurrentCulture <- Option.defaultValue Globalization.CultureInfo.InvariantCulture desiredCulture
 
         let cancellationToken = defaultArg cancellationToken CancellationToken.None
-        let ch, errors = fsi.EvalInteractionNonThrowing(code, cancellationToken)
+        let ch, errors = 
+            lock fsi <| fun () ->
+                fsi.EvalInteractionNonThrowing(code, cancellationToken)
 
         Thread.CurrentThread.CurrentCulture <- originalCulture
 

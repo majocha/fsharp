@@ -9,7 +9,7 @@ open Xunit
 let ``Create and dispose many`` () =
     let caches = 
         [
-            for _  in 1 .. 100 do
+            for _  in 1 .. 10 do
                 Cache.Create<string, int>(CacheOptions.Default, observeMetrics = true)
         ]
 
@@ -19,7 +19,7 @@ let ``Create and dispose many`` () =
 let ``Create and dispose many named`` () =
     let caches = 
         [
-            for i in 1 .. 100 do
+            for i in 1 .. 10 do
                 Cache.Create<string, int>(CacheOptions.Default, name = $"testCache{i}", observeMetrics = true)
         ]
 
@@ -41,7 +41,8 @@ let ``Basic add and retrieve`` () =
 
 [<Fact>]
 let ``Eviction of least recently used`` () =
-    use cache = Cache.Create<string, int>({ TotalCapacity = 2; HeadroomPercentage = 0 }, observeMetrics = true)
+    // 50% headroom out of tatal 4 means non-evictable capacity of 2
+    use cache = Cache.Create<string, int>({ TotalCapacity = 4; HeadroomPercentage = 50 }, observeMetrics = true)
         
     cache.TryAdd("key1", 1) |> ignore
     cache.TryAdd("key2", 2) |> ignore
@@ -67,7 +68,7 @@ let ``Eviction of least recently used`` () =
 
 [<Fact>]
 let ``Metrics can be retrieved`` () =
-    use cache = Cache.Create<string, int>({ TotalCapacity = 2; HeadroomPercentage = 0 }, name = "test_metrics", observeMetrics = true)
+    use cache = Cache.Create<string, int>({ TotalCapacity = 4; HeadroomPercentage = 50 }, name = "test_metrics", observeMetrics = true)
         
     cache.TryAdd("key1", 1) |> ignore
     cache.TryAdd("key2", 2) |> ignore

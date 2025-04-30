@@ -20,8 +20,8 @@ type CacheOptions =
 
     static member Default =
         {
-            TotalCapacity = 128
-            HeadroomPercentage = 50
+            TotalCapacity = 256
+            HeadroomPercentage = 10
         }
 
 // It is important that this is not a struct, because LinkedListNode holds a reference to it,
@@ -172,10 +172,14 @@ module Cache =
     let OverrideCapacityForTesting () =
         Environment.SetEnvironmentVariable(overrideVariable, "true", EnvironmentVariableTarget.Process)
 
-    let applyOverride (capacity: int) =
+    let applyOverride (options: CacheOptions) =
         match Environment.GetEnvironmentVariable(overrideVariable) with
-        | NonNull _ when capacity > 4096 -> 4096
-        | _ -> capacity
+        | NonNull _ when options.TotalCapacity > 64 * 1024 ->
+            {
+                CacheOptions.TotalCapacity = 64 * 1024
+                CacheOptions.HeadroomPercentage = 80
+            }
+        | _ -> options
 
 [<Struct>]
 type EvictionQueueMessage<'Key, 'Value> =
@@ -298,19 +302,24 @@ type Cache<'Key, 'Value when 'Key: not null and 'Key: equality> internal (totalC
 
     member this.GetStats() = CacheMetrics.GetStats(this.Name)
 
-    static member Create<'Key, 'Value>(options: CacheOptions, ?name, ?observeMetrics) =
+    static member Create<'Key, 'Value>(?options: CacheOptions, ?name, ?observeMetrics) =
+        let options = defaultArg options CacheOptions.Default
+
         if options.TotalCapacity < 0 then
             invalidArg "Capacity" "Capacity must be positive"
 
         if options.HeadroomPercentage < 0 then
             invalidArg "HeadroomPercentage" "HeadroomPercentage must be positive"
 
-        let totalCapacity = Cache.applyOverride options.TotalCapacity
+        if options.HeadroomPercentage > 100 then
+            invalidArg "HeadroomPercentage" "HeadroomPercentage can not be greater than 100"
+
+        let options = Cache.applyOverride options
         // Determine evictable headroom as the percentage of total capcity, since we want to not resize the dictionary.
         let headroom =
             int (float options.TotalCapacity * float options.HeadroomPercentage / 100.0)
 
         let cache =
-            new Cache<_, _>(totalCapacity, headroom, ?name = name, ?observeMetrics = observeMetrics)
+            new Cache<_, _>(options.TotalCapacity, headroom, ?name = name, ?observeMetrics = observeMetrics)
 
         cache

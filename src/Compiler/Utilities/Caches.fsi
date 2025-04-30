@@ -34,7 +34,7 @@ type internal Cache<'Key, 'Value when 'Key: not null and 'Key: equality> =
     member Evicted: IEvent<unit>
 
     static member Create<'Key, 'Value> :
-        options: CacheOptions * ?name: string * ?observeMetrics: bool -> Cache<'Key, 'Value>
+        ?options: CacheOptions * ?name: string * ?observeMetrics: bool -> Cache<'Key, 'Value>
 
 [<Class>]
 type internal CacheMetrics =
