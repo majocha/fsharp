@@ -49,7 +49,9 @@ type internal RoamingProfileStorageLocation(keyName: string) =
 
 [<Composition.Shared>]
 [<ExportWorkspaceServiceFactory(typeof<IFSharpWorkspaceService>, ServiceLayer.Default)>]
-type internal FSharpWorkspaceServiceFactory [<Composition.ImportingConstructor>] (editorOptions: EditorOptions, metadataAsSourceService: FSharpMetadataAsSourceService) =
+type internal FSharpWorkspaceServiceFactory
+    [<Composition.ImportingConstructor>]
+    (editorOptions: EditorOptions, metadataAsSourceService: FSharpMetadataAsSourceService) =
 
     let tryGetMetadataSnapshot (workspace: VisualStudioWorkspace) (path, timeStamp) =
         try
@@ -142,8 +144,7 @@ type internal FSharpWorkspaceServiceFactory [<Composition.ImportingConstructor>]
                     nameof enablePartialTypeChecking, enablePartialTypeChecking
                     nameof keepAllBackgroundResolutions, keepAllBackgroundResolutions
                     nameof keepAllBackgroundSymbolUses, keepAllBackgroundSymbolUses
-                    nameof enableBackgroundItemKeyStoreAndSemanticClassification,
-                    enableBackgroundItemKeyStoreAndSemanticClassification
+                    nameof enableBackgroundItemKeyStoreAndSemanticClassification, enableBackgroundItemKeyStoreAndSemanticClassification
                     "captureIdentifiersWhenParsing", enableFastFindReferences
                     nameof useTransparentCompiler, useTransparentCompiler
                     nameof solutionCrawler, solutionCrawler
@@ -158,21 +159,20 @@ type internal FSharpWorkspaceServiceFactory [<Composition.ImportingConstructor>]
                 legacyReferenceResolver = LegacyMSBuildReferenceResolver.getResolver (),
                 tryGetMetadataSnapshot = tryGetMetadataSnapshot,
                 keepAllBackgroundSymbolUses = keepAllBackgroundSymbolUses,
-                enableBackgroundItemKeyStoreAndSemanticClassification =
-                    enableBackgroundItemKeyStoreAndSemanticClassification,
+                enableBackgroundItemKeyStoreAndSemanticClassification = enableBackgroundItemKeyStoreAndSemanticClassification,
                 enablePartialTypeChecking = enablePartialTypeChecking,
                 parallelReferenceResolution = enableParallelReferenceResolution,
                 captureIdentifiersWhenParsing = enableFastFindReferences,
                 documentSource =
                     (if enableLiveBuffers then
-                            (DocumentSource.Custom(fun filename ->
-                                async {
-                                    match! getSource filename with
-                                    | Some source -> return Some(source :> ISourceText)
-                                    | None -> return None
-                                }))
-                        else
-                            DocumentSource.FileSystem),
+                         (DocumentSource.Custom(fun filename ->
+                             async {
+                                 match! getSource filename with
+                                 | Some source -> return Some(source :> ISourceText)
+                                 | None -> return None
+                             }))
+                     else
+                         DocumentSource.FileSystem),
                 useTransparentCompiler = useTransparentCompiler
             )
 
@@ -183,8 +183,11 @@ type internal FSharpWorkspaceServiceFactory [<Composition.ImportingConstructor>]
         member _.CreateService(workspaceServices) =
             let workspace = workspaceServices.Workspace
             let getSource = getSource workspace
+
             let tryGetMetadataSnapshot =
-                match workspace with :? VisualStudioWorkspace as workspace -> tryGetMetadataSnapshot workspace | _ -> fun _ -> None
+                match workspace with
+                | :? VisualStudioWorkspace as workspace -> tryGetMetadataSnapshot workspace
+                | _ -> fun _ -> None
 
             let checker = create getSource tryGetMetadataSnapshot
 
@@ -194,8 +197,7 @@ type internal FSharpWorkspaceServiceFactory [<Composition.ImportingConstructor>]
                         cancellableTask {
                             let document = args.NewSolution.GetDocument(args.DocumentId)
 
-                            let! _, _, _, options =
-                                document.GetFSharpCompilationOptionsAsync(nameof (workspace.WorkspaceChanged))
+                            let! _, _, _, options = document.GetFSharpCompilationOptionsAsync(nameof (workspace.WorkspaceChanged))
 
                             do! checker.NotifyFileChanged(document.FilePath, options)
                         }
@@ -335,14 +337,11 @@ type internal FSharpPackage() as this =
         base.RegisterInitializationWork(packageRegistrationTasks: PackageRegistrationTasks)
 
         packageRegistrationTasks.AddTask(
-            true,
-            (fun progress _tasks cancellationToken ->
-                foregroundCancellableTask {
+            false,
+            (fun _progress _tasks cancellationToken ->
+                cancellableTask {
                     let! commandService = this.GetServiceAsync(typeof<IMenuCommandService>)
                     let commandService = commandService :?> OleMenuCommandService
-
-                    // Switch to UI thread
-                    do! this.JoinableTaskFactory.SwitchToMainThreadAsync()
 
                     // FSI-LINKAGE-POINT: sited init
                     FSharp.Interactive.Hooks.fsiConsoleWindowPackageInitializeSited (this :> Package) commandService
@@ -351,16 +350,15 @@ type internal FSharpPackage() as this =
                     let _fsiPropertyPage =
                         this.GetDialogPage(typeof<FSharp.Interactive.FsiPropertyPage>)
 
-                    let workspace = this.ComponentModel.GetService<VisualStudioWorkspace>()
+                    let workspace =
+                        this.ComponentModel.DefaultExportProvider.GetExportedValue<VisualStudioWorkspace>()
 
-                    let _ =
-                        this.ComponentModel.DefaultExportProvider.GetExport<HackCpsCommandLineChanges>()
+                    let fsharpWorkspaceService =
+                        workspace.Services.GetService<IFSharpWorkspaceService>()
 
-                    let optionsManager =
-                        workspace.Services.GetService<IFSharpWorkspaceService>().FSharpProjectOptionsManager
+                    let optionsManager = fsharpWorkspaceService.FSharpProjectOptionsManager
 
-                    let metadataAsSource =
-                        this.ComponentModel.DefaultExportProvider.GetExport<FSharpMetadataAsSourceService>().Value
+                    let metadataAsSource = fsharpWorkspaceService.MetadataAsSource
 
                     let! solution = this.GetServiceAsync(typeof<SVsSolution>)
                     let solution = solution :?> IVsSolution
