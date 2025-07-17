@@ -146,6 +146,7 @@
     <Compile Include="Utilities\QueueList.fs" />
     <Compile Include="Utilities\lib.fsi" />
     <Compile Include="Utilities\lib.fs" />
+    <Compile Include="utilities\StackGuard.fs" />
     <Compile Include="Utilities\DependencyGraph.fs" />
     <Compile Include="Utilities\Caches.fsi" />
     <Compile Include="Utilities\Caches.fs" />

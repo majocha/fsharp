@@ -868,61 +868,6 @@ let internal languageFeatureNotSupportedInLibraryError (langFeature: LanguageFea
     let suggestedVersionStr = LanguageVersion.GetFeatureVersionString langFeature
     error (Error(FSComp.SR.chkFeatureNotSupportedInLibrary (featureStr, suggestedVersionStr), m))
 
-/// Guard against depth of expression nesting, by moving to new stack when a maximum depth is reached
-type StackGuard(maxDepth: int, name: string) =
-
-    let mutable depth = 1
-
-    [<DebuggerHidden; DebuggerStepThrough>]
-    member _.Guard
-        (
-            f,
-            [<CallerMemberName; Optional; DefaultParameterValue("")>] memberName: string,
-            [<CallerFilePath; Optional; DefaultParameterValue("")>] path: string,
-            [<CallerLineNumber; Optional; DefaultParameterValue(0)>] line: int
-        ) =
-
-        Activity.addEventWithTags
-            "DiagnosticsLogger.StackGuard.Guard"
-            (seq {
-                Activity.Tags.stackGuardName, box name
-                Activity.Tags.stackGuardCurrentDepth, depth
-                Activity.Tags.stackGuardMaxDepth, maxDepth
-                Activity.Tags.callerMemberName, memberName
-                Activity.Tags.callerFilePath, path
-                Activity.Tags.callerLineNumber, line
-            })
-
-        depth <- depth + 1
-
-        try
-            if depth % maxDepth = 0 then
-
-                async {
-                    do! Async.SwitchToNewThread()
-                    Thread.CurrentThread.Name <- $"F# Extra Compilation Thread for {name} (depth {depth})"
-                    return f ()
-                }
-                |> Async.RunImmediate
-            else
-                f ()
-        finally
-            depth <- depth - 1
-
-    [<DebuggerHidden; DebuggerStepThrough>]
-    member x.GuardCancellable(original: Cancellable<'T>) =
-        Cancellable(fun ct -> x.Guard(fun () -> Cancellable.run ct original))
-
-    static member val DefaultDepth =
-#if DEBUG
-        GetEnvInteger "FSHARP_DefaultStackGuardDepth" 50
-#else
-        GetEnvInteger "FSHARP_DefaultStackGuardDepth" 100
-#endif
-
-    static member GetDepthOption(name: string) =
-        GetEnvInteger ("FSHARP_" + name + "StackGuardDepth") StackGuard.DefaultDepth
-
 // UseMultipleDiagnosticLoggers in ParseAndCheckProject.fs provides similar functionality.
 // We should probably adapt and reuse that code.
 module MultipleDiagnosticsLoggers =
