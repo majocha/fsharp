@@ -45,7 +45,7 @@ let accTypeInst cenv env mFallback tyargs =
 
 /// Walk expressions, collecting type variables
 let rec accExpr (cenv: cenv) (env: env) expr =
-    cenv.stackGuard.Guard <| fun () ->
+    cenv.stackGuard.GuardSync <| fun () ->
 
     let expr = stripExpr expr
     match expr with

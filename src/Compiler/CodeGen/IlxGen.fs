@@ -2919,7 +2919,7 @@ let ComputeDebugPointForBinding g bind =
 //-------------------------------------------------------------------------
 
 let rec GenExpr cenv cgbuf eenv (expr: Expr) sequel =
-    cenv.stackGuard.Guard
+    cenv.stackGuard.GuardSync
     <| fun () ->
 
         GenExprAux cenv cgbuf eenv expr sequel

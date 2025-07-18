@@ -27,73 +27,41 @@ type internal StackGuard(maxDepth: int, name: string) =
 
     do ignore name 
 
-    let mutable taken = false
+    let mutable isRunning = false
 
     let mutable depth = 0
+    let mutable syncDepth = 0
 
-    let unwrapResult = function  Ok v -> v | Error exn -> raise exn
+    let pending = System.Collections.Generic.Stack<_>()
 
-    let castResult = function  Ok (v: objnull) -> Ok (downcast v) | Error (exn: exn) -> Error exn
-    
-    [<DefaultValue(false)>]
-    val mutable lastResult: Result<objnull, exn>
+    let run () =
+        isRunning <- true
+        try 
+            while pending.Count > 0 do pending.Pop() ()
+        finally isRunning <- false
 
-    member val Stack = System.Collections.Generic.Stack<IResumableBox>()
+    member _.GuardSync(f: unit -> unit): unit =
 
-    member this.Delayed (f: unit -> 'T) =
-        __stateMachine<_, _>
-            (MoveNextMethodImpl<Result<'T, exn>>(fun sm ->
-                __resumeAt sm.ResumptionPoint
-                match __resumableEntry() with
-                | Some contId ->
-                    sm.ResumptionPoint <- contId
-                | _ ->
-                    let currentStack = this.Stack.Count
-                    this.lastResult <- try Ok <| (f() :> objnull) with exn -> Error exn
-                    let top = this.Stack.Count = currentStack
-                    if top then
-                        sm.Data <- castResult <| this.lastResult
-                        sm.ResumptionPoint <- -1
-                    else
-                    match __resumableEntry() with
-                    | Some contId ->
-                        // suspend to let the inner stuff complete
-                        sm.ResumptionPoint <- contId
-                    | _ ->
-                        sm.Data <- this.lastResult |> Result.map (fun x -> downcast x)
-                        sm.ResumptionPoint <- -1
-            ))
+        syncDepth <- syncDepth + 1
 
-            (SetStateMachineMethodImpl<_>(fun _ _ -> ()))
+        try
+            if syncDepth % maxDepth = 0 then
 
-            (AfterCode<_, _>(fun sm ->
-                let mutable sm = sm
-                { new IResumableBox<'T> with 
-                    member _.Result = GetData(&sm)
-                    member _.IsCompleted = IsCompleted(&sm)
-                    member _.MoveNext () = MoveNext(&sm)
-                    member _.ReplayExceptionIfStored () = GetData(&sm) |> unwrapResult |> ignore
-                }
-            ))
+                pending.Push (f)
+                if not isRunning then run () else Unchecked.defaultof<_>
 
-    member this.Guard(f: unit -> 'T): 'T =
+            else
+                f()
+        finally
+            syncDepth <- syncDepth - 1
+
+    member _.Guard(f: unit -> 'T): 'T =
 
         depth <- depth + 1
 
         try
             if depth % maxDepth = 0 then
-
-                let box = this.Delayed f
-                this.Stack.Push box
-                if taken then               
-                    Unchecked.defaultof<_>
-                else
-                    taken <- true
-                    while not box.IsCompleted do
-                        let top = this.Stack.Peek()
-                        if top.IsCompleted then this.Stack.Pop() |> ignore else top.MoveNext()
-                    taken <- false
-                    unwrapResult box.Result
+                System.Threading.Tasks.Task.Run(f).Result
             else
                 f()
         finally
