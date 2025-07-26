@@ -298,6 +298,7 @@ type internal FSharpCompletionProvider
             let documentId = workspace.GetDocumentIdInCurrentContext(sourceText.Container)
             let document = workspace.CurrentSolution.GetDocument(documentId)
 
+            ThreadHelper.ThrowIfOnUIThread()
             let defines, langVersion, strictIndentation = document.GetCompilationDefinesAndLangVersion() |> Async.RunImmediateExceptOnUI
 
             (documentId, document.FilePath, defines, Some langVersion, strictIndentation)

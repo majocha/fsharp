@@ -13,6 +13,7 @@ open Microsoft.CodeAnalysis.Completion
 open Microsoft.CodeAnalysis.Text
 open Microsoft.CodeAnalysis.Classification
 open Microsoft.CodeAnalysis.ExternalAccess.FSharp.Completion
+open Microsoft.VisualStudio.Shell
 
 type internal HashCompletion =
     {
@@ -64,6 +65,7 @@ type internal HashDirectiveCompletionProvider
         let documentId = workspace.GetDocumentIdInCurrentContext(text.Container)
         let document = workspace.CurrentSolution.GetDocument(documentId)
 
+        ThreadHelper.ThrowIfOnUIThread()
         let defines, langVersion, strictIndentation =
             projectInfoManager.GetCompilationDefinesAndLangVersionForEditingDocument(document) |> Async.RunImmediateExceptOnUI
 

@@ -43,6 +43,7 @@ type internal FSharpCompletionService
         let documentId = workspace.GetDocumentIdInCurrentContext(sourceText.Container)
         let document = workspace.CurrentSolution.GetDocument(documentId)
 
+        ThreadHelper.ThrowIfOnUIThread()
         let defines, langVersion, strictIndentation =
             projectInfoManager.GetCompilationDefinesAndLangVersionForEditingDocument(document) |> Async.RunImmediateExceptOnUI
 

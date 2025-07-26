@@ -19,6 +19,7 @@ open CancellableTasks
 open Microsoft.VisualStudio.FSharp.Editor.Extensions
 open System.Windows
 open Microsoft.VisualStudio
+open Microsoft.VisualStudio.Shell
 open FSharp.Compiler.Text
 open Microsoft.VisualStudio.TextManager.Interop
 
@@ -304,9 +305,9 @@ type internal FSharpProjectOptionsManager(checker: FSharpChecker, workspace: Wor
         async {
             match projectOptionsCache.TryGetValue(project.Id) with
             | true, compute -> return! compute.Request()
-            | _ -> return failwith "not waiting for this"
-                //do! Async.Sleep 100
-                //return! waitForOptions project
+            | _ -> // return failwith "not waiting for this"
+                do! Async.Sleep 100
+                return! waitForOptions project
         }
 
     let getProjectSite (project: Project) sourcePaths options =
@@ -391,217 +392,13 @@ type internal FSharpProjectOptionsManager(checker: FSharpChecker, workspace: Wor
 
             return parsingOptions, projectOptions
         }
-
-    //let rec tryComputeOptions (project: Project) =
-    //    cancellableTask {
-    //        let projectId = project.Id
-    //        let! ct = CancellableTask.getCancellationToken ()
-
-    //        match cache.TryGetValue(projectId) with
-    //        | false, _ ->
-
-    //            // Because this code can be kicked off before the hack, HandleCommandLineChanges, occurs,
-    //            //     the command line options will not be available and we should bail if one of the project references does not give us anything.
-    //            let mutable canBail = false
-
-    //            let referencedProjects = ResizeArray()
-
-    //            if project.AreFSharpInMemoryCrossProjectReferencesEnabled then
-    //                for projectReference in project.ProjectReferences do
-    //                    let referencedProject = project.Solution.GetProject(projectReference.ProjectId)
-
-    //                    if referencedProject.Language = FSharpConstants.FSharpLanguageName then
-    //                        match! tryComputeOptions referencedProject with
-    //                        | ValueNone -> canBail <- true
-    //                        | ValueSome(_, projectOptions) ->
-    //                            referencedProjects.Add(
-    //                                FSharpReferencedProject.FSharpReference(referencedProject.OutputFilePath, projectOptions)
-    //                            )
-    //                    elif referencedProject.SupportsCompilation then
-    //                        let! comp = referencedProject.GetCompilationAsync(ct)
-    //                        let peRef = createPEReference referencedProject comp
-    //                        referencedProjects.Add(peRef)
-
-    //            if canBail then
-    //                return ValueNone
-    //            else
-    //                match tryGetProjectSite project with
-    //                | ValueNone -> return ValueNone
-    //                | ValueSome projectSite ->
-
-    //                    let otherOptions =
-    //                        [|
-    //                            // Clear any references from CompilationOptions.
-    //                            // We get the references from Project.ProjectReferences/Project.MetadataReferences.
-    //                            for x in projectSite.CompilationOptions do
-    //                                if not (x.Contains("-r:")) then
-    //                                    x
-
-    //                            for x in project.MetadataReferences.OfType<PortableExecutableReference>() do
-    //                                "-r:" + x.FilePath
-
-    //                            for x in project.ProjectReferences do
-    //                                "-r:" + project.Solution.GetProject(x.ProjectId).OutputFilePath
-
-    //                            // In the IDE we always ignore all #line directives for all purposes.  This means
-    //                            // IDE features work correctly within generated source files, but diagnostics are
-    //                            // reported in the IDE with respect to the generated source, and will not unify with
-    //                            // diagnostics from the build.
-    //                            "--ignorelinedirectives"
-    //                        |]
-
-    //                    let! ver = project.GetDependentVersionAsync(ct)
-
-    //                    let projectOptions =
-    //                        {
-    //                            ProjectFileName = projectSite.ProjectFileName
-    //                            ProjectId = Some(projectId.ToFSharpProjectIdString())
-    //                            SourceFiles = projectSite.CompilationSourceFiles
-    //                            OtherOptions = otherOptions
-    //                            ReferencedProjects = referencedProjects.ToArray()
-    //                            IsIncompleteTypeCheckEnvironment = projectSite.IsIncompleteTypeCheckEnvironment
-    //                            UseScriptResolutionRules = CompilerEnvironment.MustBeSingleFileProject(Path.GetFileName(project.FilePath))
-    //                            LoadTime = projectSite.LoadTime
-    //                            UnresolvedReferences = None
-    //                            OriginalLoadReferences = []
-    //                            Stamp = Some(int64 (ver.GetHashCode()))
-    //                        }
-
-    //                    // This can happen if we didn't receive the callback from HandleCommandLineChanges yet.
-    //                    if Array.isEmpty projectOptions.SourceFiles then
-    //                        return ValueNone
-    //                    else
-    //                        // Clear any caches that need clearing and invalidate the project.
-    //                        let currentSolution = project.Solution.Workspace.CurrentSolution
-
-    //                        let projectsToClearCache =
-    //                            cache |> Seq.filter (fun pair -> not (currentSolution.ContainsProject pair.Key))
-
-    //                        if not (Seq.isEmpty projectsToClearCache) then
-    //                            projectsToClearCache
-    //                            |> Seq.iter (fun pair -> cache.TryRemove pair.Key |> ignore)
-
-    //                            let options =
-    //                                projectsToClearCache
-    //                                |> Seq.map (fun pair ->
-    //                                    let _, _, projectOptions = pair.Value
-    //                                    projectOptions)
-
-    //                            checker.ClearCache(options, userOpName = "tryComputeOptions")
-
-    //                        lastSuccessfulCompilations.ToArray()
-    //                        |> Array.iter (fun pair ->
-    //                            if not (currentSolution.ContainsProject(pair.Key)) then
-    //                                lastSuccessfulCompilations.TryRemove(pair.Key) |> ignore)
-
-    //                        checker.InvalidateConfiguration(projectOptions, userOpName = "tryComputeOptions")
-
-    //                        let parsingOptions, _ = checker.GetParsingOptionsFromProjectOptions(projectOptions)
-
-    //                        cache.[projectId] <- (project, parsingOptions, projectOptions)
-
-    //                        return ValueSome(parsingOptions, projectOptions)
-
-    //        | true, (oldProject, parsingOptions, projectOptions) ->
-    //            if isProjectInvalidated oldProject project ct then
-    //                cache.TryRemove(projectId) |> ignore
-    //                return! tryComputeOptions project ct
-    //            else
-    //                return ValueSome(parsingOptions, projectOptions)
-    //    }
-
-    //let loop (agent: MailboxProcessor<FSharpProjectOptionsMessage>) =
-    //    async {
-    //        while true do
-    //            match! agent.Receive() with
-    //            | FSharpProjectOptionsMessage.TryGetOptionsByDocument(document, reply, ct, userOpName) ->
-    //                if ct.IsCancellationRequested then
-    //                    reply.Reply ValueNone
-    //                else
-    //                    try
-    //                        // For now, disallow miscellaneous workspace since we are using the hacky F# miscellaneous files project.
-    //                        if document.Project.Solution.Workspace.Kind = WorkspaceKind.MiscellaneousFiles then
-    //                            reply.Reply ValueNone
-    //                        elif document.Project.IsFSharpMiscellaneousOrMetadata then
-    //                            let! options =
-    //                                tryComputeOptionsBySingleScriptOrFile document userOpName
-    //                                |> CancellableTask.start ct
-    //                                |> Async.AwaitTask
-
-    //                            if ct.IsCancellationRequested then
-    //                                reply.Reply ValueNone
-    //                            else
-    //                                reply.Reply options
-    //                        else
-    //                            // We only care about the latest project in the workspace's solution.
-    //                            // We do this to prevent any possible cache thrashing in FCS.
-    //                            let project =
-    //                                document.Project.Solution.Workspace.CurrentSolution.GetProject(document.Project.Id)
-
-    //                            if not (isNull project) then
-    //                                let! options = tryComputeOptions project |> CancellableTask.start ct |> Async.AwaitTask
-
-    //                                if ct.IsCancellationRequested then
-    //                                    reply.Reply ValueNone
-    //                                else
-    //                                    reply.Reply options
-    //                            else
-    //                                reply.Reply ValueNone
-    //                    with _ ->
-    //                        reply.Reply ValueNone
-
-    //            | FSharpProjectOptionsMessage.TryGetOptionsByProject(project, reply, ct) ->
-    //                if ct.IsCancellationRequested then
-    //                    reply.Reply ValueNone
-    //                else
-    //                    try
-    //                        if
-    //                            project.Solution.Workspace.Kind = WorkspaceKind.MiscellaneousFiles
-    //                            || project.IsFSharpMiscellaneousOrMetadata
-    //                        then
-    //                            reply.Reply ValueNone
-    //                        else
-    //                            // We only care about the latest project in the workspace's solution.
-    //                            // We do this to prevent any possible cache thrashing in FCS.
-    //                            let project = project.Solution.Workspace.CurrentSolution.GetProject(project.Id)
-
-    //                            if not (isNull project) then
-    //                                let! options = tryComputeOptions project |> CancellableTask.start ct |> Async.AwaitTask
-
-    //                                if ct.IsCancellationRequested then
-    //                                    reply.Reply ValueNone
-    //                                else
-    //                                    reply.Reply options
-    //                            else
-    //                                reply.Reply ValueNone
-    //                    with _ ->
-    //                        reply.Reply ValueNone
-
-    //            | FSharpProjectOptionsMessage.ClearOptions(projectId) ->
-    //                match cache.TryRemove(projectId) with
-    //                | true, (_, _, projectOptions) ->
-    //                    lastSuccessfulCompilations.TryRemove(projectId) |> ignore
-    //                    checker.ClearCache([ projectOptions ])
-    //                | _ -> ()
-
-    //                legacyProjectSites.TryRemove(projectId) |> ignore
-    //            | FSharpProjectOptionsMessage.ClearSingleFileOptionsCache(documentId) ->
-    //                match singleFileCache.TryRemove(documentId) with
-    //                | true, (_, _, _, projectOptions, subscription) ->
-    //                    lastSuccessfulCompilations.TryRemove(documentId.ProjectId) |> ignore
-    //                    checker.ClearCache([ projectOptions ])
-    //                    subscription |> Option.iter (fun handler -> handler.Dispose())
-    //                | _ -> ()
-    //    }
-
-    //let agent =
-    //    MailboxProcessor.Start((fun agent -> loop agent), cancellationToken = cancellationTokenSource.Token)
-
+  
     member _.GetOptionsByProject(project) = waitForOptions project
 
     member this.GetOptionsByDocument(document: Document) = waitForOptions document.Project
     member this.GetOptionsByDocumentId(documentId: DocumentId) =
         let document = workspace.CurrentSolution.GetDocument(documentId)
+        ThreadHelper.ThrowIfOnUIThread()
         waitForOptions document.Project |> Async.RunImmediateExceptOnUI
 
     member _.SetCommandLineOptions(project: Project, sourcePaths, options) =
