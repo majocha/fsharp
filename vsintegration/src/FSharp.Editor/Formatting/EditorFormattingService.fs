@@ -192,7 +192,7 @@ type internal FSharpEditorFormattingService [<ImportingConstructor>] (settings: 
             let indentStyle =
                 options.GetOption(FormattingOptions.SmartIndent, FSharpConstants.FSharpLanguageName)
 
-            let parsingOptions = document.GetFSharpQuickParsingOptions()
+            let! parsingOptions = document.GetFSharpParsingOptions()
 
             let! textChange =
                 FSharpEditorFormattingService.GetFormattingChanges(
@@ -217,7 +217,7 @@ type internal FSharpEditorFormattingService [<ImportingConstructor>] (settings: 
             let tabSize =
                 options.GetOption<int>(FormattingOptions.TabSize, FSharpConstants.FSharpLanguageName)
 
-            let parsingOptions = document.GetFSharpQuickParsingOptions()
+            let! parsingOptions = document.GetFSharpParsingOptions()
 
             let! textChanges =
                 FSharpEditorFormattingService.GetPasteChanges(

@@ -44,7 +44,7 @@ type internal FSharpCompletionService
         let document = workspace.CurrentSolution.GetDocument(documentId)
 
         let defines, langVersion, strictIndentation =
-            projectInfoManager.GetCompilationDefinesAndLangVersionForEditingDocument(document)
+            projectInfoManager.GetCompilationDefinesAndLangVersionForEditingDocument(document) |> Async.RunImmediateExceptOnUI
 
         CompletionUtils.getDefaultCompletionListSpan (
             sourceText,

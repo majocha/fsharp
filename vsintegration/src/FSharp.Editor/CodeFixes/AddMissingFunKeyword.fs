@@ -53,7 +53,7 @@ type internal AddMissingFunKeywordCodeFixProvider [<ImportingConstructor>] () =
                     let document = context.Document
 
                     let! defines, langVersion, strictIndentation =
-                        document.GetFsharpParsingOptionsAsync(nameof AddMissingFunKeywordCodeFixProvider)
+                        document.GetCompilationDefinesAndLangVersion()
 
                     let! sourceText = context.GetSourceTextAsync()
                     let adjustedPosition = adjustPosition sourceText context.Span

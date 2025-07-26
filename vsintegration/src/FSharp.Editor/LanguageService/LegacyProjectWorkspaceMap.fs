@@ -161,7 +161,7 @@ type internal LegacyProjectWorkspaceMap
             site.AdviseProjectSiteClosed(
                 FSharpConstants.FSharpLanguageServiceCallbackName,
                 AdviseProjectSiteChanges(fun () ->
-                    projectInfoManager.ClearInfoForProject(projectContext.Id)
+                    //projectInfoManager.ClearInfoForProject(projectContext.Id)
                     optionsAssociation.Remove(projectContext) |> ignore
                     projectContext.Dispose())
             )

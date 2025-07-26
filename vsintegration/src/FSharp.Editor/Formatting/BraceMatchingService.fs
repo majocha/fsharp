@@ -44,7 +44,8 @@ type internal FSharpBraceMatchingService [<ImportingConstructor>] () =
     interface IFSharpBraceMatcher with
         member this.FindBracesAsync(document, position, cancellationToken) =
             asyncMaybe {
-                let! checker, _, parsingOptions, _ =
+                let checker = document.GetFSharpChecker()
+                let! parsingOptions, _ =
                     document.GetFSharpCompilationOptionsAsync(nameof (FSharpBraceMatchingService))
                     |> CancellableTask.start cancellationToken
                     |> Async.AwaitTask

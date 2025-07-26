@@ -145,7 +145,7 @@ type internal AddOpenCodeFixProvider [<ImportingConstructor>] (assemblyContentPr
                 let line = sourceText.Lines.GetLineFromPosition(context.Span.End)
                 let linePos = sourceText.Lines.GetLinePosition(context.Span.End)
 
-                let! defines, langVersion, strictIndentation = document.GetFsharpParsingOptionsAsync(nameof AddOpenCodeFixProvider)
+                let! defines, langVersion, strictIndentation = document.GetCompilationDefinesAndLangVersion()
 
                 return
                     Tokenizer.getSymbolAtPosition (

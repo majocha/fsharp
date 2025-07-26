@@ -80,3 +80,13 @@ type internal AsyncMemoizeDisabled<'TKey, 'TVersion, 'TValue when 'TKey: equalit
             AsyncMemoizeDisabled<'TKey, 'TVersion, 'TValue>
 
     member Get: _key: ICacheKey<'a, 'b> * computation: 'c -> 'c
+
+/// Represents a computation that will execute only once but can be requested by multiple clients.
+/// It keeps track of the number of requests. When all clients cancel their requests, the underlying computation will also cancel and can be restarted.
+/// If cancelUnawaited is set to false, the computation will run to completion even when all requests are canceled.
+/// When cacheException is false, subsequent requests will restart the computation after an exceptional result.
+type internal AsyncLazy<'t> =
+    /// Internal constructor for AsyncLazy
+    new: computation: Async<'t> * ?cancelUnawaited: bool * ?cacheException: bool -> AsyncLazy<'t>
+    /// Internal request method
+    member Request: unit -> Async<'t>

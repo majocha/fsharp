@@ -888,8 +888,9 @@ type FSharpCrossLanguageSymbolNavigationService() =
 
     let workspace = componentModel.GetService<VisualStudioWorkspace>()
 
-    let metadataAsSource =
-        componentModel.DefaultExportProvider.GetExport<FSharpMetadataAsSourceService>().Value
+    let fsharpServices = workspace.Services.GetService<IFSharpWorkspaceService>()
+    let checker = fsharpServices.Checker
+    let metadataAsSource = fsharpServices.MetadataAsSource
 
     let tryFindFieldByName (name: string) (e: FSharpEntity) =
         let fields =
@@ -1061,6 +1062,7 @@ type FSharpCrossLanguageSymbolNavigationService() =
                 FSharpCrossLanguageSymbolNavigationService.DocCommentIdToPath documentationCommentId
 
             cancellableTask {
+
                 let projects =
                     workspace.CurrentSolution.Projects
                     |> Seq.filter (fun p -> p.IsFSharp && p.AssemblyName = assemblyName)
@@ -1068,7 +1070,7 @@ type FSharpCrossLanguageSymbolNavigationService() =
                 let mutable locations = Seq.empty
 
                 for project in projects do
-                    let! checker, _, _, options = project.GetFSharpCompilationOptionsAsync()
+                    let! _, options = project.GetFSharpCompilationOptionsAsync()
                     let! result = checker.ParseAndCheckProject(options)
 
                     match path with

@@ -124,8 +124,8 @@ type internal FSharpIndentationService [<ImportingConstructor>] () =
             let workspaceService =
                 services.WorkspaceServices.GetRequiredService<IFSharpWorkspaceService>()
 
-            let parsingOptions =
-                workspaceService.FSharpProjectOptionsManager.TryGetQuickParsingOptionsForEditingDocumentOrProject(documentId, path)
+            let parsingOptions, _ =
+                workspaceService.FSharpProjectOptionsManager.GetOptionsByDocumentId (documentId)
 
             let indent =
                 FSharpIndentationService.GetDesiredIndentation(

@@ -44,7 +44,7 @@ type internal FSharpMiscellaneousFileService
         let projIds = document.Project.Solution.GetDependentProjectIds(document.Project.Id)
 
         if projIds.Count = 0 then
-            optionsManager.ClearSingleFileOptionsCache(document.Id)
+            //optionsManager.ClearSingleFileOptionsCache(document.Id)
 
             match files.TryRemove(document.FilePath) with
             | true, projectContext -> (projectContext.Value :> IDisposable).Dispose()
@@ -170,8 +170,8 @@ type internal FSharpMiscellaneousFileService
 
                 match documentOpt with
                 | ValueNone -> ()
-                | ValueSome(document) ->
-                    optionsManager.ClearSingleFileOptionsCache(document.Id)
+                | ValueSome(_document) ->
+                    //optionsManager.ClearSingleFileOptionsCache(document.Id)
                     projectContext.Value.Dispose()
 
                     let newProjectContext = lazy createProjectContextForDocument (newFilePath)

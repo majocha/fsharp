@@ -183,7 +183,7 @@ type internal ImplementInterfaceCodeFixProvider [<ImportingConstructor>] () =
 
                 let textLine = sourceText.Lines.GetLineFromPosition context.Span.Start
 
-                let! _, _, parsingOptions, _ = context.Document.GetFSharpCompilationOptionsAsync(nameof ImplementInterfaceCodeFixProvider)
+                let! parsingOptions, _ = context.Document.GetFSharpCompilationOptionsAsync(nameof ImplementInterfaceCodeFixProvider)
 
                 let defines = CompilerEnvironment.GetConditionalDefinesForEditing parsingOptions
                 let langVersionOpt = Some parsingOptions.LangVersionText

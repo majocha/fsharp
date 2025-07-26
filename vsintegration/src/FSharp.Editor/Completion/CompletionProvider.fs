@@ -298,7 +298,7 @@ type internal FSharpCompletionProvider
             let documentId = workspace.GetDocumentIdInCurrentContext(sourceText.Container)
             let document = workspace.CurrentSolution.GetDocument(documentId)
 
-            let defines, langVersion, strictIndentation = document.GetFsharpParsingOptions()
+            let defines, langVersion, strictIndentation = document.GetCompilationDefinesAndLangVersion() |> Async.RunImmediateExceptOnUI
 
             (documentId, document.FilePath, defines, Some langVersion, strictIndentation)
 
@@ -331,7 +331,7 @@ type internal FSharpCompletionProvider
 
             let! sourceText = context.Document.GetTextAsync(ct)
 
-            let defines, langVersion, strictIndentation = document.GetFsharpParsingOptions()
+            let! defines, langVersion, strictIndentation = document.GetCompilationDefinesAndLangVersion()
 
             let shouldProvideCompletion =
                 CompletionUtils.shouldProvideCompletion (

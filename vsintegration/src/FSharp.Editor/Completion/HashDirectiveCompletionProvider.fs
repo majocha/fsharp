@@ -65,7 +65,7 @@ type internal HashDirectiveCompletionProvider
         let document = workspace.CurrentSolution.GetDocument(documentId)
 
         let defines, langVersion, strictIndentation =
-            projectInfoManager.GetCompilationDefinesAndLangVersionForEditingDocument(document)
+            projectInfoManager.GetCompilationDefinesAndLangVersionForEditingDocument(document) |> Async.RunImmediateExceptOnUI
 
         let textLines = text.Lines
         let triggerLine = textLines.GetLineFromPosition(position)

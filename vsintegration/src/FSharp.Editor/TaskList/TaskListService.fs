@@ -22,7 +22,7 @@ type internal FSharpTaskListService [<ImportingConstructor>] () as this =
         asyncMaybe {
             let! ct = Async.CancellationToken |> liftAsync
 
-            let! _, _, parsingOptions, _ =
+            let! parsingOptions, _ =
                 doc.GetFSharpCompilationOptionsAsync(nameof (FSharpTaskListService))
                 |> CancellableTask.start ct
                 |> Async.AwaitTask
