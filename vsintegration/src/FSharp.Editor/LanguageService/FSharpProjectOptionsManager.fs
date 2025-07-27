@@ -622,16 +622,12 @@ type internal FSharpProjectOptionsManager(checker: FSharpChecker, workspace: Wor
 
         CompilerEnvironment.GetConditionalDefinesForEditing parsingOptions, parsingOptions.LangVersionText, parsingOptions.StrictIndentation
 
-    member _.TryGetOptionsByProject(project) =
-        reactor.TryGetOptionsByProjectAsync(project)
+    member _.TryGetOptionsByProjectAsync(project, ct) =
+        reactor.TryGetOptionsByProjectAsync(project, ct)
 
     /// Get the exact options for a document or project
-    member _.TryGetOptionsForDocumentOrProject(document: Document, cancellationToken, userOpName) =
+    member _.TryGetOptionsForDocumentOrProjectAsync(document: Document, cancellationToken, userOpName) =
         reactor.TryGetOptionsByDocumentAsync(document, cancellationToken, userOpName)
-
-    /// Get the exact options for a document or project relevant for syntax processing.
-    member this.TryGetOptionsForEditingDocumentOrProject(document: Document, cancellationToken, userOpName) =
-        this.TryGetOptionsForDocumentOrProject(document, cancellationToken, userOpName)
 
     /// Get the options for a document or project relevant for syntax processing.
     /// Quicker it doesn't need to recompute the exact project options for a script.

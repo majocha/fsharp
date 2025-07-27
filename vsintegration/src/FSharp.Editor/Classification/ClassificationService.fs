@@ -164,7 +164,7 @@ type internal FSharpClassificationService [<ImportingConstructor>] () =
 
                     let! cancellationToken = CancellableTask.getCancellationToken ()
 
-                    let defines, langVersion, strictIndentation = document.GetFsharpParsingOptions()
+                    let defines, langVersion, strictIndentation = document.GetCompilationDefinesAndLangVersion()
 
                     let! sourceText = document.GetTextAsync(cancellationToken)
 

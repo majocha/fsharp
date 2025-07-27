@@ -184,7 +184,7 @@ module private CheckerExtensions =
                     let service = this.Solution.GetFSharpWorkspaceService()
                     let projectOptionsManager = service.FSharpProjectOptionsManager
 
-                    match! projectOptionsManager.TryGetOptionsByProject(this, ct) with
+                    match! projectOptionsManager.TryGetOptionsByProjectAsync(this, ct) with
                     | ValueNone -> return raise (OperationCanceledException("FSharp project options not found."))
                     | ValueSome(parsingOptions, projectOptions) ->
                         let result =
@@ -525,7 +525,7 @@ type Document with
                     let projectOptionsManager = service.FSharpProjectOptionsManager
                     let! ct = CancellableTask.getCancellationToken ()
 
-                    match! projectOptionsManager.TryGetOptionsForDocumentOrProject(this, ct, userOpName) with
+                    match! projectOptionsManager.TryGetOptionsForDocumentOrProjectAsync(this, ct, userOpName) with
                     | ValueNone -> return raise (OperationCanceledException("FSharp project options not found."))
                     | ValueSome(parsingOptions, projectOptions) ->
                         let result =
@@ -563,14 +563,14 @@ type Document with
 
     /// A non-async call that quickly gets the defines and F# language version of the given F# document.
     /// This tries to get the data by looking at an internal cache; if it doesn't exist in the cache it will create an inaccurate but usable form of the defines and the language version.
-    member this.GetFsharpParsingOptions() =
+    member this.GetCompilationDefinesAndLangVersion() =
         let workspaceService = this.Project.Solution.GetFSharpWorkspaceService()
         workspaceService.FSharpProjectOptionsManager.GetCompilationDefinesAndLangVersionForEditingDocument(this)
 
     /// A non-async call that quickly gets the defines of the given F# document.
     /// This tries to get the defines by looking at an internal cache; if it doesn't exist in the cache it will create an inaccurate but usable form of the defines.
     member this.GetFSharpQuickDefines() =
-        match this.GetFsharpParsingOptions() with
+        match this.GetCompilationDefinesAndLangVersion() with
         | defines, _, _ -> defines
 
     /// Parses the given F# document.
