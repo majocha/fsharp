@@ -103,6 +103,10 @@ module private FSharpProjectOptionsHelpers =
 
 [<RequireQualifiedAccess>]
 type private FSharpProjectOptionsMessage =
+    | ClearAllCaches
+    | SetLegacyProjectSite of ProjectId * IProjectSite
+    | UpdateCommandLineOptions of
+        ProjectId * sourcePaths: string[] * options: string[]
     | TryGetOptionsByDocument of
         Document *
         AsyncReplyChannel<(FSharpParsingOptions * FSharpProjectOptions) voption> *
@@ -443,6 +447,16 @@ type private FSharpProjectOptionsReactor(checker: FSharpChecker) =
         async {
             while true do
                 match! agent.Receive() with
+                | FSharpProjectOptionsMessage.ClearAllCaches ->
+                    commandLineOptions.Clear()
+                    legacyProjectSites.Clear()
+                    cache.Clear()
+                    singleFileCache.Clear()
+                    lastSuccessfulCompilations.Clear()
+                | FSharpProjectOptionsMessage.SetLegacyProjectSite(projectId, projectSite) ->
+                    legacyProjectSites.[projectId] <- projectSite
+                | FSharpProjectOptionsMessage.UpdateCommandLineOptions(projectId, sourcePaths, options) ->
+                    commandLineOptions.[projectId] <- (sourcePaths, options)
                 | FSharpProjectOptionsMessage.TryGetOptionsByDocument(document, reply, ct, userOpName) ->
                     if ct.IsCancellationRequested then
                         reply.Reply ValueNone
@@ -539,10 +553,12 @@ type private FSharpProjectOptionsReactor(checker: FSharpChecker) =
         agent.Post(FSharpProjectOptionsMessage.ClearSingleFileOptionsCache(documentId))
 
     member _.SetCommandLineOptions(projectId, sourcePaths, options) =
-        commandLineOptions.[projectId] <- (sourcePaths, options)
+        agent.Post(
+            FSharpProjectOptionsMessage.UpdateCommandLineOptions(projectId, sourcePaths, options)
+        )
 
     member _.SetLegacyProjectSite(projectId, projectSite) =
-        legacyProjectSites.[projectId] <- projectSite
+        agent.Post(FSharpProjectOptionsMessage.SetLegacyProjectSite(projectId, projectSite))
 
     member _.TryGetCachedOptionsByProjectId(projectId) =
         match cache.TryGetValue(projectId) with
@@ -550,11 +566,7 @@ type private FSharpProjectOptionsReactor(checker: FSharpChecker) =
         | _ -> None
 
     member _.ClearAllCaches() =
-        commandLineOptions.Clear()
-        legacyProjectSites.Clear()
-        cache.Clear()
-        singleFileCache.Clear()
-        lastSuccessfulCompilations.Clear()
+        agent.Post(FSharpProjectOptionsMessage.ClearAllCaches)
 
     member _.ScriptUpdated = scriptUpdatedEvent.Publish
 
