@@ -53,7 +53,8 @@ type internal FSharpLanguageDebugInfoService [<ImportingConstructor>] () =
             (document: Document, position: int, cancellationToken: CancellationToken)
             : Task<FSharpDebugDataTipInfo> =
             cancellableTask {
-                let defines, langVersion, strictIndentation = document.GetCompilationDefinesAndLangVersion()
+                let defines, langVersion, strictIndentation =
+                    document.GetCompilationDefinesAndLangVersion()
 
                 let! cancellationToken = CancellableTask.getCancellationToken ()
                 let! sourceText = document.GetTextAsync(cancellationToken)

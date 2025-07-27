@@ -105,8 +105,7 @@ module private FSharpProjectOptionsHelpers =
 type private FSharpProjectOptionsMessage =
     | ClearAllCaches
     | SetLegacyProjectSite of ProjectId * IProjectSite
-    | UpdateCommandLineOptions of
-        ProjectId * sourcePaths: string[] * options: string[]
+    | UpdateCommandLineOptions of ProjectId * sourcePaths: string[] * options: string[]
     | TryGetOptionsByDocument of
         Document *
         AsyncReplyChannel<(FSharpParsingOptions * FSharpProjectOptions) voption> *
@@ -453,8 +452,7 @@ type private FSharpProjectOptionsReactor(checker: FSharpChecker) =
                     cache.Clear()
                     singleFileCache.Clear()
                     lastSuccessfulCompilations.Clear()
-                | FSharpProjectOptionsMessage.SetLegacyProjectSite(projectId, projectSite) ->
-                    legacyProjectSites.[projectId] <- projectSite
+                | FSharpProjectOptionsMessage.SetLegacyProjectSite(projectId, projectSite) -> legacyProjectSites.[projectId] <- projectSite
                 | FSharpProjectOptionsMessage.UpdateCommandLineOptions(projectId, sourcePaths, options) ->
                     commandLineOptions.[projectId] <- (sourcePaths, options)
                 | FSharpProjectOptionsMessage.TryGetOptionsByDocument(document, reply, ct, userOpName) ->
@@ -553,9 +551,7 @@ type private FSharpProjectOptionsReactor(checker: FSharpChecker) =
         agent.Post(FSharpProjectOptionsMessage.ClearSingleFileOptionsCache(documentId))
 
     member _.SetCommandLineOptions(projectId, sourcePaths, options) =
-        agent.Post(
-            FSharpProjectOptionsMessage.UpdateCommandLineOptions(projectId, sourcePaths, options)
-        )
+        agent.Post(FSharpProjectOptionsMessage.UpdateCommandLineOptions(projectId, sourcePaths, options))
 
     member _.SetLegacyProjectSite(projectId, projectSite) =
         agent.Post(FSharpProjectOptionsMessage.SetLegacyProjectSite(projectId, projectSite))
