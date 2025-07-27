@@ -3,7 +3,6 @@
 namespace Microsoft.VisualStudio.FSharp.Editor
 
 open System
-open System.Collections.Generic
 open System.Collections.Concurrent
 open System.Collections.Immutable
 open System.IO
@@ -16,20 +15,52 @@ open System.Threading
 open Microsoft.VisualStudio.FSharp.Interactive.Session
 open System.Runtime.CompilerServices
 open CancellableTasks
-open Microsoft.VisualStudio.FSharp.Editor.Extensions
-open System.Windows
 open Microsoft.VisualStudio
 open FSharp.Compiler.Text
 open Microsoft.VisualStudio.TextManager.Interop
 
 #nowarn "57"
 
-[<AutoOpen>]
-module private FSharpProjectOptionsHelpers =
+type private CommandLineOptions = string[] * string[]
 
-    let mapCpsProjectToSite (project: Project, cpsCommandLineOptions: IDictionary<ProjectId, string[] * string[]>) =
+[<RequireQualifiedAccess>]
+type private FSharpProjectOptionsMessage =
+    | ClearAllCaches
+    | SetLegacyProjectSite of ProjectId * IProjectSite
+    | UpdateCommandLineOptions of ProjectId * sourcePaths: string[] * options: string[]
+    | TryGetOptionsByDocument of
+        Document *
+        AsyncReplyChannel<(FSharpParsingOptions * FSharpProjectOptions) voption> *
+        CancellationToken *
+        userOpName: string
+    | TryGetOptionsByProject of Project * AsyncReplyChannel<(FSharpParsingOptions * FSharpProjectOptions) voption> * CancellationToken
+    | ClearOptions of ProjectId
+    | ClearSingleFileOptionsCache of DocumentId
+
+[<Sealed>]
+type private FSharpProjectOptionsReactor(checker: FSharpChecker) =
+    let cancellationTokenSource = new CancellationTokenSource()
+
+    // Store command line options
+    let commandLineOptions = ConcurrentDictionary<ProjectId, string[] * string[]>()
+
+    let legacyProjectSites = ConcurrentDictionary<ProjectId, IProjectSite>()
+
+    let singleFileCache =
+        ConcurrentDictionary<DocumentId, FSharpParsingOptions * FSharpProjectOptions * ConnectionPointSubscription>()
+
+    // This is used to not constantly emit the same compilation.
+    let weakPEReferences = ConditionalWeakTable<Compilation, FSharpReferencedProject>()
+    let lastSuccessfulCompilations = ConcurrentDictionary<ProjectId, Compilation>()
+
+    let scriptUpdatedEvent = Event<FSharpProjectOptions>()
+
+    let cache =
+        ConcurrentDictionary<ProjectId, VersionStamp * FSharpParsingOptions * FSharpProjectOptions>()
+
+    let mapCpsProjectToSite (project: Project) =
         let sourcePaths, referencePaths, options =
-            match cpsCommandLineOptions.TryGetValue(project.Id) with
+            match commandLineOptions.TryGetValue(project.Id) with
             | true, (sourcePaths, options) -> sourcePaths, [||], options
             | false, _ -> [||], [||], [||]
 
@@ -62,79 +93,6 @@ module private FSharpProjectOptionsHelpers =
                 with get () = errorReporter
                 and set (v) = errorReporter <- v
         }
-
-    let inline hasProjectVersionChanged (oldProject: Project) (newProject: Project) =
-        oldProject.Version <> newProject.Version
-
-    let hasDependentVersionChanged (oldProject: Project) (newProject: Project) (ct: CancellationToken) =
-        let oldProjectMetadataRefs = oldProject.MetadataReferences
-        let newProjectMetadataRefs = newProject.MetadataReferences
-
-        if oldProjectMetadataRefs.Count <> newProjectMetadataRefs.Count then
-            true
-        else
-
-            let oldProjectRefs = oldProject.ProjectReferences
-            let newProjectRefs = newProject.ProjectReferences
-
-            oldProjectRefs.Count() <> newProjectRefs.Count()
-            || (oldProjectRefs, newProjectRefs)
-               ||> Seq.exists2 (fun p1 p2 ->
-                   ct.ThrowIfCancellationRequested()
-                   let doesProjectIdDiffer = p1.ProjectId <> p2.ProjectId
-                   let p1 = oldProject.Solution.GetProject(p1.ProjectId)
-                   let p2 = newProject.Solution.GetProject(p2.ProjectId)
-
-                   doesProjectIdDiffer
-                   || (if p1.IsFSharp then
-                           p1.Version <> p2.Version
-                       else
-                           let v1 = p1.GetDependentVersionAsync(ct).Result
-                           let v2 = p2.GetDependentVersionAsync(ct).Result
-                           v1 <> v2))
-
-    let isProjectInvalidated (oldProject: Project) (newProject: Project) ct =
-        let hasProjectVersionChanged = hasProjectVersionChanged oldProject newProject
-
-        if newProject.AreFSharpInMemoryCrossProjectReferencesEnabled then
-            hasProjectVersionChanged || hasDependentVersionChanged oldProject newProject ct
-        else
-            hasProjectVersionChanged
-
-[<RequireQualifiedAccess>]
-type private FSharpProjectOptionsMessage =
-    | ClearAllCaches
-    | SetLegacyProjectSite of ProjectId * IProjectSite
-    | UpdateCommandLineOptions of ProjectId * sourcePaths: string[] * options: string[]
-    | TryGetOptionsByDocument of
-        Document *
-        AsyncReplyChannel<(FSharpParsingOptions * FSharpProjectOptions) voption> *
-        CancellationToken *
-        userOpName: string
-    | TryGetOptionsByProject of Project * AsyncReplyChannel<(FSharpParsingOptions * FSharpProjectOptions) voption> * CancellationToken
-    | ClearOptions of ProjectId
-    | ClearSingleFileOptionsCache of DocumentId
-
-[<Sealed>]
-type private FSharpProjectOptionsReactor(checker: FSharpChecker) =
-    let cancellationTokenSource = new CancellationTokenSource()
-
-    // Store command line options
-    let commandLineOptions = ConcurrentDictionary<ProjectId, string[] * string[]>()
-
-    let legacyProjectSites = ConcurrentDictionary<ProjectId, IProjectSite>()
-
-    let cache =
-        ConcurrentDictionary<ProjectId, Project * FSharpParsingOptions * FSharpProjectOptions>()
-
-    let singleFileCache =
-        ConcurrentDictionary<DocumentId, Project * VersionStamp * FSharpParsingOptions * FSharpProjectOptions * ConnectionPointSubscription>()
-
-    // This is used to not constantly emit the same compilation.
-    let weakPEReferences = ConditionalWeakTable<Compilation, FSharpReferencedProject>()
-    let lastSuccessfulCompilations = ConcurrentDictionary<ProjectId, Compilation>()
-
-    let scriptUpdatedEvent = Event<FSharpProjectOptions>()
 
     let createPEReference (referencedProject: Project) (comp: Compilation) =
         let projectId = referencedProject.Id
@@ -202,7 +160,6 @@ type private FSharpProjectOptionsReactor(checker: FSharpChecker) =
     let rec tryComputeOptionsBySingleScriptOrFile (document: Document) userOpName =
         cancellableTask {
             let! ct = CancellableTask.getCancellationToken ()
-            let! fileStamp = document.GetTextVersionAsync(ct)
             let textViewAndCaret () : (IVsTextView * Position) option = document.TryGetTextViewAndCaretPos()
 
             match singleFileCache.TryGetValue(document.Id) with
@@ -264,7 +221,7 @@ type private FSharpProjectOptionsReactor(checker: FSharpChecker) =
                             LoadTime = DateTime.Now
                             UnresolvedReferences = None
                             OriginalLoadReferences = []
-                            Stamp = Some(int64 (fileStamp.GetHashCode()))
+                            Stamp = None
                         }
 
                 let parsingOptions, _ = checker.GetParsingOptionsFromProjectOptions(projectOptions)
@@ -284,52 +241,64 @@ type private FSharpProjectOptionsReactor(checker: FSharpChecker) =
 
                 let addToCacheAndSubscribe value =
                     match value with
-                    | projectId, fileStamp, parsingOptions, projectOptions, _ ->
+                    | parsingOptions, projectOptions, _ ->
                         let subscription =
                             match textViewAndCaret () with
                             | Some(textView, _) ->
                                 subscribeToTextViewEvents (textView, (Some onChangeCaretHandler), (Some onKillFocus), (Some onSetFocus))
                             | None -> None
 
-                        (projectId, fileStamp, parsingOptions, projectOptions, subscription)
+                        (parsingOptions, projectOptions, subscription)
 
                 singleFileCache.AddOrUpdate(
                     document.Id, // The key to the cache
                     (fun _ value -> addToCacheAndSubscribe value), // Function to add the cached value if the key does not exist
                     (fun _ _ value -> value), // Function to update the value if the key exists
-                    (document.Project, fileStamp, parsingOptions, projectOptions, None) // The value to add or update
+                    (parsingOptions, projectOptions, None) // The value to add or update
                 )
                 |> ignore
 
                 return ValueSome(parsingOptions, projectOptions)
 
-            | true, (oldProject, oldFileStamp, parsingOptions, projectOptions, _) ->
-                if fileStamp <> oldFileStamp || isProjectInvalidated document.Project oldProject ct then
-                    match singleFileCache.TryRemove(document.Id) with
-                    | true, (_, _, _, _, Some subscription) -> subscription.Dispose()
-                    | _ -> ()
-
-                    return! tryComputeOptionsBySingleScriptOrFile document userOpName
-                else
-                    return ValueSome(parsingOptions, projectOptions)
+            | true, (parsingOptions, projectOptions, _) -> return ValueSome(parsingOptions, projectOptions)
         }
+
+    let getDependeentVersionExcludingEdits (project: Project) =
+        cancellableTask {
+            let! ct = CancellableTask.getCancellationToken ()
+            let projectVersion = project.Version
+            let mutable maxVersion = projectVersion
+            for projectReference in project.ProjectReferences do
+                let! depVersion = project.Solution.GetProject(projectReference.ProjectId).GetDependentVersionAsync(ct)
+                maxVersion <- depVersion.GetNewerVersion(maxVersion)
+
+            return maxVersion
+        }
+
+    let isProjectInvalidated (project: Project) (previousVersion: VersionStamp) =
+        project.Version <> previousVersion
 
     let tryGetProjectSite (project: Project) =
         // Cps
         if commandLineOptions.ContainsKey project.Id then
-            ValueSome(mapCpsProjectToSite (project, commandLineOptions))
+            ValueSome(mapCpsProjectToSite project)
         else
             // Legacy
             match legacyProjectSites.TryGetValue project.Id with
             | true, site -> ValueSome site
             | _ -> ValueNone
 
+    let invalidateAllProjectsDependingOn (project: Project) =
+        let projectIdsTosInvalidate =  project.Solution.GetDependentProjectIds(project.Id)
+
+        for projectId in projectIdsTosInvalidate do
+            cache.TryRemove(projectId) |> ignore
+
     let rec tryComputeOptions (project: Project) =
         cancellableTask {
-            let projectId = project.Id
             let! ct = CancellableTask.getCancellationToken ()
 
-            match cache.TryGetValue(projectId) with
+            match cache.TryGetValue(project.Id) with
             | false, _ ->
 
                 // Because this code can be kicked off before the hack, HandleCommandLineChanges, occurs,
@@ -382,12 +351,12 @@ type private FSharpProjectOptionsReactor(checker: FSharpChecker) =
                                 "--ignorelinedirectives"
                             |]
 
-                        let! ver = project.GetDependentVersionAsync(ct)
+                        let! version = getDependeentVersionExcludingEdits project
 
                         let projectOptions =
                             {
                                 ProjectFileName = projectSite.ProjectFileName
-                                ProjectId = Some(projectId.ToFSharpProjectIdString())
+                                ProjectId = Some(project.Id.ToFSharpProjectIdString())
                                 SourceFiles = projectSite.CompilationSourceFiles
                                 OtherOptions = otherOptions
                                 ReferencedProjects = referencedProjects.ToArray()
@@ -396,7 +365,7 @@ type private FSharpProjectOptionsReactor(checker: FSharpChecker) =
                                 LoadTime = projectSite.LoadTime
                                 UnresolvedReferences = None
                                 OriginalLoadReferences = []
-                                Stamp = Some(int64 (ver.GetHashCode()))
+                                Stamp = Some(int64 (version.GetHashCode()))
                             }
 
                         // This can happen if we didn't receive the callback from HandleCommandLineChanges yet.
@@ -430,14 +399,17 @@ type private FSharpProjectOptionsReactor(checker: FSharpChecker) =
 
                             let parsingOptions, _ = checker.GetParsingOptionsFromProjectOptions(projectOptions)
 
-                            cache.[projectId] <- (project, parsingOptions, projectOptions)
+                            cache.[project.Id] <- (version, parsingOptions, projectOptions)
+
+                            if project.AreFSharpInMemoryCrossProjectReferencesEnabled then
+                                invalidateAllProjectsDependingOn project
 
                             return ValueSome(parsingOptions, projectOptions)
 
-            | true, (oldProject, parsingOptions, projectOptions) ->
-                if isProjectInvalidated oldProject project ct then
-                    cache.TryRemove(projectId) |> ignore
-                    return! tryComputeOptions project ct
+            | true, (previousVersion, parsingOptions, projectOptions) ->
+                if isProjectInvalidated project previousVersion then
+                    cache.TryRemove(project.Id) |> ignore
+                    return! tryComputeOptions project
                 else
                     return ValueSome(parsingOptions, projectOptions)
         }
@@ -446,15 +418,21 @@ type private FSharpProjectOptionsReactor(checker: FSharpChecker) =
         async {
             while true do
                 match! agent.Receive() with
+
                 | FSharpProjectOptionsMessage.ClearAllCaches ->
                     commandLineOptions.Clear()
                     legacyProjectSites.Clear()
                     cache.Clear()
                     singleFileCache.Clear()
                     lastSuccessfulCompilations.Clear()
-                | FSharpProjectOptionsMessage.SetLegacyProjectSite(projectId, projectSite) -> legacyProjectSites.[projectId] <- projectSite
+
+                | FSharpProjectOptionsMessage.SetLegacyProjectSite(projectId, projectSite) ->
+                    legacyProjectSites.[projectId] <- projectSite
+
                 | FSharpProjectOptionsMessage.UpdateCommandLineOptions(projectId, sourcePaths, options) ->
+                    cache.TryRemove(projectId) |> ignore
                     commandLineOptions.[projectId] <- (sourcePaths, options)
+
                 | FSharpProjectOptionsMessage.TryGetOptionsByDocument(document, reply, ct, userOpName) ->
                     if ct.IsCancellationRequested then
                         reply.Reply ValueNone
@@ -526,9 +504,10 @@ type private FSharpProjectOptionsReactor(checker: FSharpChecker) =
                     | _ -> ()
 
                     legacyProjectSites.TryRemove(projectId) |> ignore
+
                 | FSharpProjectOptionsMessage.ClearSingleFileOptionsCache(documentId) ->
                     match singleFileCache.TryRemove(documentId) with
-                    | true, (_, _, _, projectOptions, subscription) ->
+                    | true, ( _, projectOptions, subscription) ->
                         lastSuccessfulCompilations.TryRemove(documentId.ProjectId) |> ignore
                         checker.ClearCache([ projectOptions ])
                         subscription |> Option.iter (fun handler -> handler.Dispose())
