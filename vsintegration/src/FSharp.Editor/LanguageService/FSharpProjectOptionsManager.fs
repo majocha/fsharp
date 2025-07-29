@@ -18,47 +18,15 @@ open CancellableTasks
 open Microsoft.VisualStudio
 open FSharp.Compiler.Text
 open Microsoft.VisualStudio.TextManager.Interop
+open Microsoft.VisualStudio.Shell
+open Microsoft.VisualStudio.Shell.Interop
 
 #nowarn "57"
 
-type private CommandLineOptions = string[] * string[]
+[<AutoOpen>]
+module private FSharpProjectOptionsHelpers =
 
-[<RequireQualifiedAccess>]
-type private FSharpProjectOptionsMessage =
-    | ClearAllCaches
-    | SetLegacyProjectSite of ProjectId * IProjectSite
-    | UpdateCommandLineOptions of ProjectId * sourcePaths: string[] * options: string[]
-    | TryGetOptionsByDocument of
-        Document *
-        AsyncReplyChannel<(FSharpParsingOptions * FSharpProjectOptions) voption> *
-        CancellationToken *
-        userOpName: string
-    | TryGetOptionsByProject of Project * AsyncReplyChannel<(FSharpParsingOptions * FSharpProjectOptions) voption> * CancellationToken
-    | ClearOptions of ProjectId
-    | ClearSingleFileOptionsCache of DocumentId
-
-[<Sealed>]
-type private FSharpProjectOptionsReactor(checker: FSharpChecker) =
-    let cancellationTokenSource = new CancellationTokenSource()
-
-    // Store command line options
-    let commandLineOptions = ConcurrentDictionary<ProjectId, string[] * string[]>()
-
-    let legacyProjectSites = ConcurrentDictionary<ProjectId, IProjectSite>()
-
-    let singleFileCache =
-        ConcurrentDictionary<DocumentId, FSharpParsingOptions * FSharpProjectOptions * ConnectionPointSubscription>()
-
-    // This is used to not constantly emit the same compilation.
-    let weakPEReferences = ConditionalWeakTable<Compilation, FSharpReferencedProject>()
-    let lastSuccessfulCompilations = ConcurrentDictionary<ProjectId, Compilation>()
-
-    let scriptUpdatedEvent = Event<FSharpProjectOptions>()
-
-    let cache =
-        ConcurrentDictionary<ProjectId, VersionStamp * FSharpParsingOptions * FSharpProjectOptions>()
-
-    let mapCpsProjectToSite (project: Project) =
+    let mapCpsProjectToSite (project: Project, cpsCommandLineOptions: IDictionary<ProjectId, string[] * string[]>) =
         let sourcePaths, referencePaths, options =
             match commandLineOptions.TryGetValue(project.Id) with
             | true, (sourcePaths, options) -> sourcePaths, [||], options
@@ -260,19 +228,15 @@ type private FSharpProjectOptionsReactor(checker: FSharpChecker) =
 
                 return ValueSome(parsingOptions, projectOptions)
 
-            | true, (parsingOptions, projectOptions, _) -> return ValueSome(parsingOptions, projectOptions)
-        }
+            | true, (oldProject, oldFileStamp, parsingOptions, projectOptions, _) ->
+                if fileStamp <> oldFileStamp || isProjectInvalidated document.Project oldProject ct then
+                    match singleFileCache.TryRemove(document.Id) with
+                    | true, (_, _, _, _, Some subscription) -> subscription.Dispose()
+                    | _ -> ()
 
-    let getDependeentVersionExcludingEdits (project: Project) =
-        cancellableTask {
-            let! ct = CancellableTask.getCancellationToken ()
-            let projectVersion = project.Version
-            let mutable maxVersion = projectVersion
-            for projectReference in project.ProjectReferences do
-                let! depVersion = project.Solution.GetProject(projectReference.ProjectId).GetDependentVersionAsync(ct)
-                maxVersion <- depVersion.GetNewerVersion(maxVersion)
-
-            return maxVersion
+                    return! tryComputeOptionsBySingleScriptOrFile document userOpName
+                else
+                    return ValueSome(parsingOptions, projectOptions)
         }
 
     let isProjectInvalidated (project: Project) (previousVersion: VersionStamp) =
@@ -414,6 +378,47 @@ type private FSharpProjectOptionsReactor(checker: FSharpChecker) =
                     return ValueSome(parsingOptions, projectOptions)
         }
 
+    let showError (message: string) =
+        cancellableTask {
+            do! ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync()
+            // show message box in the IDE
+            let shell = Package.GetGlobalService(typeof<SVsUIShell>) :?> IVsUIShell
+            let mutable clsid = Guid.Empty
+            let result = ref 0
+            ErrorHandler.ThrowOnFailure(
+                shell.ShowMessageBox(
+                    0u,
+                    &clsid,
+                    "F# Language Service", // title
+                    message,
+                    String.Empty,
+                    0u,
+                    OLEMSGBUTTON.OLEMSGBUTTON_OK,
+                    OLEMSGDEFBUTTON.OLEMSGDEFBUTTON_FIRST,
+                    OLEMSGICON.OLEMSGICON_INFO,
+                    0,
+                    result
+                )
+            ) |> ignore
+        }
+
+    let updateCommandLineOptions (CommandLineOptionsEventArgs(binPath, sources, _, options)) =
+        let project = workspace.CurrentSolution.Projects |> Seq.tryFind (fun p -> p.OutputFilePath = binPath)
+        match project with
+        | _ when sources.IsEmpty || options.IsEmpty -> failwith $"empty command line options for {binPath}"
+        | None -> failwith $"no project found for {binPath}"
+        | Some project ->
+            let projectId = project.Id
+            cache.TryRemove(projectId) |> ignore
+            let projectRoot = Path.GetDirectoryName project.FilePath
+
+            let getFullPath p = 
+                if Path.IsPathRooted(p) then p else Path.Combine(projectRoot, p)
+
+            commandLineOptions[projectId] <-
+                sources |> Seq.map _.Path |> Seq.map getFullPath |> Seq.toArray,
+                options |> Seq.toArray
+
     let loop (agent: MailboxProcessor<FSharpProjectOptionsMessage>) =
         async {
             while true do
@@ -425,14 +430,9 @@ type private FSharpProjectOptionsReactor(checker: FSharpChecker) =
                     cache.Clear()
                     singleFileCache.Clear()
                     lastSuccessfulCompilations.Clear()
-
-                | FSharpProjectOptionsMessage.SetLegacyProjectSite(projectId, projectSite) ->
-                    legacyProjectSites.[projectId] <- projectSite
-
+                | FSharpProjectOptionsMessage.SetLegacyProjectSite(projectId, projectSite) -> legacyProjectSites.[projectId] <- projectSite
                 | FSharpProjectOptionsMessage.UpdateCommandLineOptions(projectId, sourcePaths, options) ->
-                    cache.TryRemove(projectId) |> ignore
                     commandLineOptions.[projectId] <- (sourcePaths, options)
-
                 | FSharpProjectOptionsMessage.TryGetOptionsByDocument(document, reply, ct, userOpName) ->
                     if ct.IsCancellationRequested then
                         reply.Reply ValueNone
@@ -529,8 +529,8 @@ type private FSharpProjectOptionsReactor(checker: FSharpChecker) =
     member _.ClearSingleFileOptionsCache(documentId) =
         agent.Post(FSharpProjectOptionsMessage.ClearSingleFileOptionsCache(documentId))
 
-    member _.SetCommandLineOptions(projectId, sourcePaths, options) =
-        agent.Post(FSharpProjectOptionsMessage.UpdateCommandLineOptions(projectId, sourcePaths, options))
+    member _.SetCommandLineOptions(args) =
+        agent.Post(FSharpProjectOptionsMessage.UpdateCommandLineOptions args)
 
     member _.SetLegacyProjectSite(projectId, projectSite) =
         agent.Post(FSharpProjectOptionsMessage.SetLegacyProjectSite(projectId, projectSite))
@@ -554,7 +554,7 @@ type private FSharpProjectOptionsReactor(checker: FSharpChecker) =
 /// Manages mappings of Roslyn workspace Projects/Documents to FCS.
 type internal FSharpProjectOptionsManager(checker: FSharpChecker, workspace: Workspace) =
 
-    let reactor = new FSharpProjectOptionsReactor(checker)
+    let reactor = new FSharpProjectOptionsReactor(checker, workspace)
 
     do
         // We need to listen to this event for lifecycle purposes.
@@ -614,9 +614,9 @@ type internal FSharpProjectOptionsManager(checker: FSharpChecker, workspace: Wor
                 IsInteractive = CompilerEnvironment.IsScriptFile path
             }
 
-    member _.SetCommandLineOptions(projectId, sourcePaths, options: ImmutableArray<string>) =
-        reactor.SetCommandLineOptions(projectId, sourcePaths, options.ToArray())
+    member _.SetCommandLineOptions(args: CommandLineOptionsEventArgs) = reactor.SetCommandLineOptions(args)
 
     member _.ClearAllCaches() = reactor.ClearAllCaches()
 
     member _.Checker = checker
+
