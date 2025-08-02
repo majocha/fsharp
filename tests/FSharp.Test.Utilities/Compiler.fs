@@ -185,6 +185,8 @@ module rec Compiler =
     type RunOutput =
         | EvalOutput of EvalOutput
         | ExecutionOutput of ExecutionOutput
+        member this.StdOut = match this with | EvalOutput eo -> eo.StdOut | ExecutionOutput eo -> eo.StdOut
+        member this.StdErr = match this with | EvalOutput eo -> eo.StdErr | ExecutionOutput eo -> eo.StdErr
 
     type SourceCodeFileName = string
 
@@ -1135,7 +1137,6 @@ module rec Compiler =
         else
             CompilationResult.Success result
 
-
     let private evalFSharp (fs: FSharpCompilationSource) (script:FSharpScript) : CompilationResult =
         let source = fs.Source.GetSourceText |> Option.defaultWith fs.Source.LoadSourceText
         use capture = new TestConsole.ExecutionCapture()
@@ -1174,7 +1175,7 @@ module rec Compiler =
         match sessionCache.TryGetValue(key) with
         | true, script -> script
         | _ -> 
-            let script = new FSharpScript(additionalArgs=args,quiet=true,langVersion=version)
+            let script = new FSharpScript(additionalArgs=args, langVersion=version)
             sessionCache.TryAdd(key, script) |> ignore
             script
 
@@ -1188,12 +1189,10 @@ module rec Compiler =
         | FS fs -> evalScriptFromDisk fs script
         | _ -> failwith "Script evaluation is only supported for F#."
 
-    let runFsi (cUnit: CompilationUnit) : CompilationResult =
+    let private runFsiAux quiet isolated (cUnit: CompilationUnit) : CompilationResult =
         match cUnit with
         | FS fs ->
-            let source = fs.Source.GetSourceText |> Option.defaultWith fs.Source.LoadSourceText
             let name = fs.Name |> Option.defaultValue "unnamed"
-            let options = fs.Options |> Array.ofList
             let outputDirectory =
                 match fs.OutputDirectory with
                 | Some di -> di
@@ -1201,10 +1200,12 @@ module rec Compiler =
             outputDirectory.Create()
 
             let references = processReferences fs.References outputDirectory
-            let cmpl = Compilation.Create(fs.Source, fs.OutputType, options, fs.TargetFramework, references, name, outputDirectory)
+            let cmpl = Compilation.Create(fs.Source, fs.OutputType, fs.Options |> Array.ofList, fs.TargetFramework, references, name, outputDirectory)
             let _compilationRefs, _deps = evaluateReferences outputDirectory fs.IgnoreWarnings cmpl
-            let options =
-                let opts = new ResizeArray<string>(fs.Options)
+            let options = [|
+                yield! fs.Options
+                if quiet then "--quiet";
+                "--noninteractive"
 
                 // For every built reference add a -I path so that fsi can find it easily
                 for reference in references do
@@ -1213,32 +1214,28 @@ module rec Compiler =
                         match cmpl with
                         | Compilation(_sources, _outputType, _options, _targetFramework, _references, _name, outputDirectory) ->
                             if outputDirectory.IsSome then
-                                opts.Add($"-I:\"{(outputDirectory.Value.FullName)}\"")
+                                $"-I:\"{(outputDirectory.Value.FullName)}\""
                     | _ -> ()
-                opts.ToArray()
-            let errors, stdOut, stdErr = CompilerAssert.RunScriptWithOptionsAndReturnResult options source
+            |]
 
-            let mkResult output =
-              { OutputPath   = None
-                Dependencies = []
-                Adjust       = 0
-                Diagnostics  = []
-                PerFileErrors= []
-                Output       = Some output
-                Compilation  = cUnit }
+            if isolated then
+                use session = new FSharpScript(additionalArgs=options)
+                evalFSharp fs session
 
-            if errors.Count = 0 then
-                let output =
-                    ExecutionOutput { Outcome = NoExitCode; StdOut = stdOut; StdErr = stdErr }
-                CompilationResult.Success (mkResult output)
             else
-                let err = (errors |> String.concat "\n").Replace("\r\n","\n")
-                let output =
-                    ExecutionOutput {Outcome = NoExitCode; StdOut = String.Empty; StdErr = err }
-                CompilationResult.Failure (mkResult output)
+                getSessionForEval options LangVersion.Preview
+                |> evalFSharp fs
 
         | _ -> failwith "FSI running only supports F#."
 
+    /// Execute in shared session with --quiet option.
+    let runFsi = runFsiAux true false
+
+    /// Execute in isolated session with --quiet option.
+    let runFsiIsolated = runFsiAux true true
+
+    /// Execute in shared session without --quiet option. All of the fsi feedback is captured.
+    let runFsiWithFeedback = runFsiAux false false
 
     let convenienceBaselineInstructions baseline expected actual =
         $"""to update baseline:
@@ -1948,81 +1945,85 @@ Actual:
                 else 
                     -1
             | MatchStyle.Standard ->
-                input.IndexOf(pattern) 
+                input.IndexOf(pattern)
+                
+        type private OutputStream = | STDOUT | STDERR | STDERR_STDOUT
 
-        let private checkOutputInOrderCore matchStyle (category: string) (substrings: string list) (selector: ExecutionOutput -> string) (result: CompilationResult) : CompilationResult =
+        let private outputStreamSelector (o: RunOutput) = function
+            | STDERR_STDOUT -> o.StdOut + "\n" + o.StdErr
+            | STDOUT -> o.StdOut
+            | STDERR -> o.StdErr
+
+        let private checkOutputInOrderCore matchStyle category (substrings: string list) (result: CompilationResult) : CompilationResult =
             match result.RunOutput with
             | None ->
                 printfn "Execution output is missing cannot check \"%A\"" category
                 failwith "Execution output is missing."
             | Some o ->
-                match o with
-                | ExecutionOutput e ->
-                    let input = selector e
-                    let mutable searchPos = 0
-                    for substring in substrings do
-                        match getMatch (input.Substring(searchPos)) substring matchStyle with
-                        | -1 -> failwith (sprintf "\nThe following substring:\n    %A\nwas not found in the %A\nOutput:\n    %A" substring category input)
-                        | pos -> searchPos <- pos + substring.Length
-                | _ -> failwith "Cannot check output on this run result."
+                let input = outputStreamSelector o category
+                let mutable searchPos = 0
+                for substring in substrings do
+                    match getMatch (input.Substring(searchPos)) substring matchStyle with
+                    | -1 -> failwith (sprintf "\nThe following substring:\n    %A\nwas not found in the %A\nOutput:\n    %A" substring category input)
+                    | pos -> searchPos <- pos + substring.Length
             result
 
-        let private checkMatchedOutputInOrder matchStyle category substrings selector result =
-            checkOutputInOrderCore matchStyle category substrings selector result
+        let private checkMatchedOutputInOrder matchStyle category substrings result =
+            checkOutputInOrderCore matchStyle category substrings result
 
-        let private checkOutputInOrder category substrings selector result =
-            checkMatchedOutputInOrder MatchStyle.Standard category substrings selector result
+        let private checkOutputInOrder category substrings result =
+            checkMatchedOutputInOrder MatchStyle.Standard category substrings result
 
         let withOutputContainsAllInOrder (substrings: string list) (result: CompilationResult) : CompilationResult =
-            checkOutputInOrder "STDERR/STDOUT" substrings (fun o -> o.StdOut + "\n" + o.StdErr) result
+            checkOutputInOrder STDERR_STDOUT substrings result
 
         let withStdOutContains (substring: string) (result: CompilationResult) : CompilationResult =
-            checkOutputInOrder "STDOUT" [substring] (fun o -> o.StdOut)  result
+            checkOutputInOrder STDOUT [substring]  result
 
         let withStdOutContainsAllInOrder (substrings: string list) (result: CompilationResult) : CompilationResult =
-            checkOutputInOrder "STDOUT" substrings (fun o -> o.StdOut) result
+            checkOutputInOrder STDOUT substrings result
 
         let withStdErrContainsAllInOrder (substrings: string list) (result: CompilationResult) : CompilationResult =
-            checkOutputInOrder "STDERR" substrings (fun o -> o.StdErr) result
+            checkOutputInOrder STDERR substrings result
 
         let withStdErrContains (substring: string) (result: CompilationResult) : CompilationResult =
-            checkOutputInOrder "STDERR" [substring] (fun o -> o.StdErr) result
+            checkOutputInOrder STDERR [substring] result
 
-        let private checkOutputInOrderWithWildcards category substrings selector result =
-            checkOutputInOrderCore MatchStyle.Wildcards category substrings selector result
+        let private checkOutputInOrderWithWildcards category substrings result =
+            checkOutputInOrderCore MatchStyle.Wildcards category substrings result
 
-        let private checkOutputInOrderWithRegexPatterns category substrings selector result =
-            checkOutputInOrderCore MatchStyle.RegexPatterns category substrings selector result
+        let private checkOutputInOrderWithRegexPatterns category substrings result =
+            checkOutputInOrderCore MatchStyle.RegexPatterns category substrings result
 
         let withOutputContainsAllInOrderWithWildcards (substrings: string list) (result: CompilationResult) : CompilationResult =
-            checkOutputInOrderWithWildcards "STDERR/STDOUT" substrings (fun o -> o.StdOut + "\n" + o.StdErr) result
+            checkOutputInOrderWithWildcards STDERR_STDOUT substrings result
 
         let withStdOutContainsWithWildcards (substring: string) (result: CompilationResult) : CompilationResult =
-            checkOutputInOrderWithWildcards "STDOUT" [substring] (fun o -> o.StdOut)  result
+            checkOutputInOrderWithWildcards STDOUT [substring]  result
 
         let withStdOutContainsAllInOrderWithWildcards (substrings: string list) (result: CompilationResult) : CompilationResult =
-            checkOutputInOrderWithWildcards "STDOUT" substrings (fun o -> o.StdOut) result
+            checkOutputInOrderWithWildcards STDOUT substrings result
 
         let withStdErrContainsAllInOrderWithWildcards (substrings: string list) (result: CompilationResult) : CompilationResult =
-            checkOutputInOrderWithWildcards "STDERR" substrings (fun o -> o.StdErr) result
+            checkOutputInOrderWithWildcards STDERR substrings result
 
         let withStdErrContainsWithWildcards (substring: string) (result: CompilationResult) : CompilationResult =
-            checkOutputInOrderWithWildcards "STDERR" [substring] (fun o -> o.StdErr) result
+            checkOutputInOrderWithWildcards STDERR [substring] result
 
         let withOutputContainsAllInOrderWithRegexPatterns (substrings: string list) (result: CompilationResult) : CompilationResult =
-            checkOutputInOrderWithRegexPatterns "STDERR/STDOUT" substrings (fun o -> o.StdOut + "\n" + o.StdErr) result
+            checkOutputInOrderWithRegexPatterns STDERR_STDOUT substrings result
 
         let withStdOutContainsWithRegexPatterns (substring: string) (result: CompilationResult) : CompilationResult =
-            checkOutputInOrderWithRegexPatterns "STDOUT" [substring] (fun o -> o.StdOut)  result
+            checkOutputInOrderWithRegexPatterns STDOUT [substring]  result
 
         let withStdOutContainsAllInOrderWithRegexPatterns (substrings: string list) (result: CompilationResult) : CompilationResult =
-            checkOutputInOrderWithRegexPatterns "STDOUT" substrings (fun o -> o.StdOut) result
+            checkOutputInOrderWithRegexPatterns STDOUT substrings result
 
         let withStdErrContainsAllInOrderWithRegexPatterns (substrings: string list) (result: CompilationResult) : CompilationResult =
-            checkOutputInOrderWithRegexPatterns "STDERR" substrings (fun o -> o.StdErr) result
+            checkOutputInOrderWithRegexPatterns STDERR substrings result
 
         let withStdErrContainsWithRegexPatterns (substring: string) (result: CompilationResult) : CompilationResult =
-            checkOutputInOrderWithRegexPatterns "STDERR" [substring] (fun o -> o.StdErr) result
+            checkOutputInOrderWithRegexPatterns STDERR [substring] result
 
         let private assertEvalOutput (selector: FsiValue -> 'T) (value: 'T) (result: CompilationResult) : CompilationResult =
             match result.RunOutput with

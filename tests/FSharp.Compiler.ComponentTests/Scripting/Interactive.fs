@@ -24,7 +24,7 @@ module ``Interactive tests`` =
     [<Fact>]
     let ``Pretty print void pointer``() =
         Fsx "System.IntPtr.Zero.ToPointer()"
-        |> runFsi
+        |> runFsiWithFeedback
         |> shouldSucceed
         |> withStdOutContains "val it: voidptr = 0n"
 

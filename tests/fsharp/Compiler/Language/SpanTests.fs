@@ -6,6 +6,7 @@ open System
 open FSharp.Compiler.Diagnostics
 open Xunit
 open FSharp.Test
+open FSharp.Test.Compiler
 
 #if NETCOREAPP
 
@@ -13,8 +14,7 @@ module SpanTests =
 
     [<Fact>]
     let Script_SpanForInDo() =
-        let script = 
-            """
+        Fsx """
 open System
 
 let test () : unit =
@@ -27,13 +27,13 @@ let test () : unit =
         failwith "SpanForInDo didn't work properly"
 
 test ()
-            """
-        
-        CompilerAssert.RunScript script []
+        """
+        |> runFsi
+        |> shouldSucceed
+
     [<Fact>]
     let Script_SpanForInBoundsDo() =
-        let script = 
-            """
+        Fsx """
 open System
 
 let test () : unit =
@@ -46,14 +46,13 @@ let test () : unit =
         failwith "SpanForInBoundsDo didn't work properly"
 
 test ()
-            """
-        
-        CompilerAssert.RunScript script []
+        """
+        |> runFsi
+        |> shouldSucceed
 
     [<Fact>]
     let Script_EmptySpanForInBoundsDo() =
-        let script = 
-            """
+        Fsx """
 open System
 
 let test () : unit =
@@ -66,14 +65,13 @@ let test () : unit =
         failwith "EmptySpanForInBoundsDo didn't work properly"
 
 test ()
-            """
-        
-        CompilerAssert.RunScript script []
+        """
+        |> runFsi
+        |> shouldSucceed
 
     [<Fact>]
     let Script_ReadOnlySpanForInDo() =
-        let script = 
-            """
+        Fsx """
 open System
 
 let test () : unit =
@@ -86,14 +84,13 @@ let test () : unit =
         failwith "ReadOnlySpanForInDo didn't work properly"
 
 test ()
-            """
-    
-        CompilerAssert.RunScript script []
+        """
+        |> runFsi
+        |> shouldSucceed
 
     [<Fact>]
     let Script_ReadOnlySpanForInBoundsDo() =
-        let script = 
-            """
+        Fsx """
 open System
 
 let test () : unit =
@@ -106,9 +103,9 @@ let test () : unit =
         failwith "Script_ReadOnlySpanForInBoundsDo didn't work properly"
 
 test ()
-            """
-    
-        CompilerAssert.RunScript script []
+        """
+        |> runFsi
+        |> shouldSucceed
 
 
     [<Fact>]

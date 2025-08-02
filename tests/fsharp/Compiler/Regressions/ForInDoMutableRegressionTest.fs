@@ -5,14 +5,14 @@ namespace FSharp.Compiler.UnitTests
 open System
 open Xunit
 open FSharp.Test
+open FSharp.Test.Compiler
 
 module ForInDoMutableRegressionTest =
 
     /// This test is to ensure we initialize locals inside loops.
     [<Fact>]
     let Script_ForInDoMutableRegressionTest() =
-        let script = 
-            """
+        Fsx """
 open System.Collections.Generic
 
 let bug() = 
@@ -68,6 +68,8 @@ bug ()
 not_a_bug ()
 test_rec [1;2;3;4]
 test_for_loop ()
-            """
-        CompilerAssert.RunScriptWithOptions [| "--langversion:5.0" |] script []
+        """
+        |> withLangVersion50
+        |> runFsi
+        |> shouldSucceed
 

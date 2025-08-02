@@ -60,14 +60,12 @@ module ``Numeric Literals`` =
 
     [<Fact>]
     let ``1N is invalid numeric literal in FSI``() =
-            CompilerAssert.RunScriptWithOptions [| "--langversion:5.0"; "--test:ErrorRanges" |]
-                """
-let x = 1N
-                """
-                [
-                    "This numeric literal requires that a module 'NumericLiteralN' defining functions FromZero, FromOne, FromInt32, FromInt64 and FromString be in scope";
-                    "Operation could not be completed due to earlier error"
-                ]
+        Fsx "let x = 1N"
+        |> withLangVersion50
+        |> runFsi
+        |> shouldFail
+        |> withSingleDiagnostic 
+            (Error 784, Line 1, Col 9, Line 1, Col 11, "This numeric literal requires that a module 'NumericLiteralN' defining functions FromZero, FromOne, FromInt32, FromInt64 and FromString be in scope")
 
     // Regression test for FSharp1.0: 2543 - Decimal literals do not support exponents
     [<Theory>]

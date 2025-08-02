@@ -23,13 +23,24 @@ type LangVersion =
     | Preview
     | Latest
     | SupportsMl
+    member this.ToOption =
+        match this with
+        | V47 -> "4.7"
+        | V50 | SupportsMl -> "5.0"
+        | V60 -> "6.0"
+        | V70 -> "7.0"
+        | V80 -> "8.0"
+        | V90 -> "9.0"
+        | Preview -> "preview"
+        | Latest -> "latest"
 
-type FSharpScript(?additionalArgs: string[], ?quiet: bool, ?langVersion: LangVersion) =
+type FSharpScript(?additionalArgs: string[], ?langVersion: LangVersion) =
 
     let additionalArgs = defaultArg additionalArgs [||]
-    let quiet = defaultArg quiet true
     let langVersion = defaultArg langVersion LangVersion.Preview
     let config = FsiEvaluationSession.GetDefaultConfiguration()
+    let langVersionSpecifiedInOptions =
+        additionalArgs |> Array.exists (fun arg -> arg.StartsWith("--langversion:"))
 
     let computedProfile =
         // If we are being executed on the desktop framework (we can tell because the assembly containing int is mscorlib) then profile must be mscorlib otherwise use netcore
@@ -37,18 +48,9 @@ type FSharpScript(?additionalArgs: string[], ?quiet: bool, ?langVersion: LangVer
         else "netcore"
 
     let baseArgs = [|
-        typeof<FSharpScript>.Assembly.Location;
+        //typeof<FSharpScript>.Assembly.Location;
         "--targetprofile:" + computedProfile
-        if quiet then "--quiet"
-        match langVersion with
-        | LangVersion.V47 -> "--langversion:4.7"
-        | LangVersion.V50 | LangVersion.SupportsMl -> "--langversion:5.0"
-        | LangVersion.Preview -> "--langversion:preview"
-        | LangVersion.Latest -> "--langversion:latest"
-        | LangVersion.V60 -> "--langversion:6.0"
-        | LangVersion.V70 -> "--langversion:7.0"
-        | LangVersion.V80 -> "--langversion:8.0"
-        | LangVersion.V90 -> "--langversion:9.0"
+        if not langVersionSpecifiedInOptions then "--langversion:" + langVersion.ToOption
         |]
 
     let argv = Array.append baseArgs additionalArgs
@@ -59,17 +61,12 @@ type FSharpScript(?additionalArgs: string[], ?quiet: bool, ?langVersion: LangVer
 
     member _.Fsi = fsi
 
-    member this.Eval(code: string, ?cancellationToken: CancellationToken, ?desiredCulture: Globalization.CultureInfo) =
-        let originalCulture = Thread.CurrentThread.CurrentCulture
-        Thread.CurrentThread.CurrentCulture <- Option.defaultValue Globalization.CultureInfo.InvariantCulture desiredCulture
-
+    member this.Eval(code: string, ?cancellationToken: CancellationToken) =
         let cancellationToken = defaultArg cancellationToken CancellationToken.None
         let ch, errors =
             // lock, because For memory conservation in CI FSharpScripts may be reused between tests
             lock fsi <| fun () ->
                 fsi.EvalInteractionNonThrowing(code, cancellationToken)
-
-        Thread.CurrentThread.CurrentCulture <- originalCulture
 
         match ch with
         | Choice1Of2 v -> Ok(v), errors

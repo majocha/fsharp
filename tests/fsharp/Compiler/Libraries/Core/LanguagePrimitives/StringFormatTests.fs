@@ -4,6 +4,7 @@ namespace FSharp.Compiler.UnitTests
 
 open Xunit
 open FSharp.Test
+open FSharp.Test.Compiler
 
 
 module ``String Format Tests`` =
@@ -143,8 +144,7 @@ module ``String Format Tests`` =
     let ``string constructor in FSI``() =
         // Regression test for FSHARP1.0:5894
 
-        CompilerAssert.RunScriptWithOptions [| "--langversion:5.0" |]
-            """
+        Fsx """
 let assertEqual a b =
     if a <> b then failwithf "Expected '%s', but got '%s'" a b
     ()
@@ -203,5 +203,7 @@ assertEqual (string  -infinityf) "-Infinity"
 assertEqual (string  infinityf) "Infinity"
 assertEqual (string  nanf) "NaN"
 assertEqual (string (new System.Guid("210f4d6b-cb42-4b09-baa1-f1aa8e59d4b0"))) "210f4d6b-cb42-4b09-baa1-f1aa8e59d4b0"
-            """
-            []
+        """
+        |> withLangVersion50
+        |> runFsi
+        |> shouldSucceed

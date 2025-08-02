@@ -4,6 +4,7 @@ namespace FSharp.Compiler.UnitTests
 
 open Xunit
 open FSharp.Test
+open FSharp.Test.Compiler
 
 
 module ``Comparison Tests`` =
@@ -24,8 +25,7 @@ module ``Comparison Tests`` =
         // Regression test for FSHARP1.0:5640
         // This is a sanity test: more coverage in FSHARP suite...
 
-        CompilerAssert.RunScriptWithOptions [| "--langversion:5.0" |]
-            """
+        Fsx """
 type 'a www = W of 'a
 
 let assertTrue a =
@@ -39,5 +39,7 @@ let z = compare (W System.Double.NaN) (W System.Double.NaN)
 assertTrue (not p)
 assertTrue q
 assertTrue (z = 0)
-            """
-            []
+        """
+        |> withLangVersion50
+        |> runFsi
+        |> shouldSucceed

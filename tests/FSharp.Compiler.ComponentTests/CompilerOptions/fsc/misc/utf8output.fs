@@ -41,7 +41,7 @@ module utf8output =
 
         Fsx """printfn "Hello world" """
         |> withOptionsString "--utf8output"
-        |> runFsi
+        |> runFsiIsolated
         |> shouldSucceed
         |> ignore
 

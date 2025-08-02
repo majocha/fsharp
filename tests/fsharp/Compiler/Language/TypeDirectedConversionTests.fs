@@ -4,6 +4,7 @@ namespace FSharp.Compiler.UnitTests
 
 open Xunit
 open FSharp.Test
+open FSharp.Test.Compiler
 open FSharp.Compiler.Diagnostics
 
 module TypeDirectedConversionTests =
@@ -264,8 +265,7 @@ let test() =
     
     [<Fact>]
     let ``Overloading on System.Nullable<int>, System.Nullable<'T> and int all work without error``() =
-        CompilerAssert.RunScript
-            """
+        Fsx """
 let assertTrue x =
     (x || failwith "Unexpected overload") |> ignore
 
@@ -280,7 +280,9 @@ let test() =
     M.A(3) = 3 |> assertTrue
     
 test()
-        """ []
+        """
+        |> runFsi
+        |> shouldSucceed
 
     [<Fact>]
     let ``Picking overload for typar does not favor any form of System.Nullable nor produce ambiguity warnings``() =
@@ -424,8 +426,7 @@ let test() =
 
     [<Fact>]
     let ``Test retrieving an argument provided in a nested method call property setter works``() =
-        CompilerAssert.RunScript
-            """
+        Fsx """
 type Input<'T>(v: 'T) =
     member _.Value = v
     static member op_Implicit(value: 'T): Input<'T> = Input<'T>(value)
@@ -439,12 +440,13 @@ let test() =
     SomeArgs(OtherArgs = OtherArgs(Name = "test"))
     
 if not (test().OtherArgs.Value.Name = "test") then failwith "Unexpected value was returned after setting Name"
-        """ []
+        """
+        |> runFsi
+        |> shouldSucceed
 
     [<Fact>]
     let ``Prefer nullable conversion only candidate when multiple candidates require conversions``() =
-        CompilerAssert.RunScript
-            """
+        Fsx """
 type M() =
     static member A(size: System.DateTime, dtype: System.Nullable<int>) = 1
     static member A(size: System.DateTimeOffset, dtype: System.Nullable<int>) = 2
@@ -452,12 +454,13 @@ type M() =
 let test() = M.A(System.DateTime.UtcNow, 1)
 
 if test() <> 1 then failwith "Incorrect overload picked" 
-        """ []
+        """
+        |> runFsi
+        |> shouldSucceed
 
     [<Fact>]
     let ``Prefer nullable conversion over numeric conversion``() =
-        CompilerAssert.RunScript
-            """
+        Fsx """
 type M() =
     static member A(n: int64) = 1
     static member A(n: System.Nullable<int>) = 2
@@ -465,13 +468,13 @@ type M() =
 let test() = M.A(0)
 
 if test() <> 2 then failwith "Incorrect overload picked"
-        """ []
+        """
+        |> runFsi
+        |> shouldSucceed
 
     [<Fact>]
     let ``Prefer nullable conversion over op_Implicit conversion``() =
-        
-        CompilerAssert.RunScript
-            """
+        Fsx """
 type M() =
     static member A(n: System.DateTimeOffset) = 1
     static member A(n: System.Nullable<System.DateTime>) = 2
@@ -479,7 +482,9 @@ type M() =
 let test() = M.A(System.DateTime.UtcNow)
 
 if test() <> 2 then failwith "Incorrect overload picked"
-        """ []
+        """
+        |> runFsi
+        |> shouldSucceed
 
 
     [<Fact>]

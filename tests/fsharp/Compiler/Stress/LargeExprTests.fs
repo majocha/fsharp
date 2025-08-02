@@ -4,6 +4,7 @@ namespace FSharp.Compiler.UnitTests
 
 open Xunit
 open FSharp.Test
+open Compiler
 
 #if !DEBUG // requires release version of compiler to avoid very deep stacks
 
@@ -5515,5 +5516,5 @@ let test () : unit =
 
 test ()
 """
-        CompilerAssert.RunScript source []
+        Fsx source |> runFsi |> shouldSucceed
 #endif
