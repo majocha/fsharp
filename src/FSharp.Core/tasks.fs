@@ -40,25 +40,28 @@ and TaskResumptionFunc<'TOverall> = ResumptionFunc<TaskStateMachineData<'TOveral
 and TaskResumptionDynamicInfo<'TOverall> = ResumptionDynamicInfo<TaskStateMachineData<'TOverall>>
 and TaskCode<'TOverall, 'T> = ResumableCode<TaskStateMachineData<'TOverall>, 'T>
 
-module TaskExtensions =
-
-    type Holder<'a>() =
-        [<DefaultValue(false)>]
-        val mutable Value: 'a voption
-
-    type Maps<'a> =
-        static member val Runners = ConditionalWeakTable<Task<'a>, Holder<Task<'a>>>()
-        static member val Targets = ConditionalWeakTable<Task<'a>, Holder<Task<'a>>>()
-    
-    type Task<'a> with
-        member this.TailCallTarget
-            with get() = Maps.Targets.GetOrCreateValue(this).Value
-            and set v = Maps.Targets.GetOrCreateValue(this).Value <- v
-        member this.TailCallRunner
-            with get() = Maps.Runners.GetOrCreateValue(this).Value
-            and set v = Maps.Runners.GetOrCreateValue(this).Value <- v
-
-open TaskExtensions
+[<NoComparison; NoEquality>]
+type TaskContext<'a> =
+    {
+        previous: TaskContext<'a> voption
+        builder: AsyncTaskMethodBuilder<'a>
+        mutable target: Task<'a> voption
+    }
+    static member Current = AsyncLocal<TaskContext<'a> voption>()
+    static member OnStart(builder: AsyncTaskMethodBuilder<'a>) =
+        match TaskContext.Current.Value with
+        | ValueNone ->
+            TaskContext.Current.Value <- ValueSome { previous = ValueNone; builder = builder; target = ValueNone }
+        | ValueSome ctx ->
+            TaskContext.Current.Value <-
+            match ctx.previous with
+            | ValueSome prev2 when prev2.target = ValueSome ctx.builder.Task ->
+                ValueSome { previous = prev2; builder = builder; target = ValueNone }
+            TaskContext.Current.Value <-
+                ValueSome { previous = ValueSome ctx; builder = builder; target = ValueNone }
+    static member SetTarget(task: Task<'a>) =
+        TaskContext.Current.Value.Value.target <- ValueSome task
+    static member Value = TaskContext<'a>.Current.Value.Value
 
 type TaskBuilderBase() =
 
@@ -218,58 +221,31 @@ type TaskBuilder() =
                     __resumeAt sm.ResumptionPoint
 
                     let mutable __stack_exn: Exception = null
+                    let builder =
+                        match TaskContext<_>.Value.previous with
+                        | ValueSome previous when previous.target = ValueSome sm.Data.MethodBuilder.Task ->
+                            previous.builder
+                        | _ -> sm.Data.MethodBuilder
 
                     try
-                        match sm.Data.MethodBuilder.Task.TailCallTarget with
-                        | ValueSome task ->
-                            // cut short
-                            let mutable target = task
-                            while target.IsCompleted && target.TailCallTarget.IsSome do
-                                target <- target.TailCallTarget.Value
-
-                            let mutable __stack_awaiter = target.GetAwaiter()
-
-                            // cut the tail call chain
-                            match sm.Data.MethodBuilder.Task.TailCallRunner with
-                            | ValueSome runner ->
-                                let mutable runner = runner
-                                while runner.TailCallRunner.IsSome do
-                                    runner <- runner.TailCallRunner.Value
-
-                                runner.TailCallTarget <- ValueSome target
-                                target.TailCallRunner <- ValueSome runner
-                                // We're done here, noone will look at this result.
-                                if __stack_awaiter.IsCompleted then 
-                                    sm.Data.MethodBuilder.SetResult(__stack_awaiter.GetResult())
-                                else
-                                    sm.Data.MethodBuilder.SetResult(Unchecked.defaultof<_>)
-                            | ValueNone ->
-                                // We don't have a runner above, so we're running.
-                                if __stack_awaiter.IsCompleted then
-                                    sm.Data.MethodBuilder.SetResult(__stack_awaiter.GetResult())
-                                else
-                                // Schedule next step when current tail call target completes
-                                sm.Data.MethodBuilder.AwaitUnsafeOnCompleted(&__stack_awaiter, &sm)
-
-                        | ValueNone ->
-                            // Normal execution path
-                            let __stack_code_fin = code.Invoke(&sm)
-                            if __stack_code_fin then
-                                sm.Data.MethodBuilder.SetResult(sm.Data.Result)
+                        let __stack_code_fin = code.Invoke(&sm)
+                        if __stack_code_fin then
+                            builder.SetResult(sm.Data.Result)
                     with exn ->
                         __stack_exn <- exn
                     // Run SetException outside the stack unwind, see https://github.com/dotnet/roslyn/issues/26567
                     match __stack_exn with
                     | null -> ()
-                    | exn -> sm.Data.MethodBuilder.SetException exn
+                    | exn -> builder.SetException exn
                 //-- RESUMABLE CODE END
                 ))
                 (SetStateMachineMethodImpl<_>(fun sm state -> sm.Data.MethodBuilder.SetStateMachine(state)))
                 (AfterCode<_, _>(fun sm ->
                     sm.Data.MethodBuilder <- AsyncTaskMethodBuilder<'T>.Create()
-                    let mutable initialYield = YieldAwaitable.YieldAwaiter()
-                    sm.Data.MethodBuilder.AwaitUnsafeOnCompleted(&initialYield, &sm)
-                    //sm.Data.MethodBuilder.Start(&sm)
+                    TaskContext.OnStart sm.Data.MethodBuilder
+                    //let mutable initialYield = YieldAwaitable.YieldAwaiter()
+                    //sm.Data.MethodBuilder.AwaitUnsafeOnCompleted(&initialYield, &sm)
+                    sm.Data.MethodBuilder.Start(&sm)
                     sm.Data.MethodBuilder.Task))
         else
             TaskBuilder.RunDynamic(code)
@@ -479,8 +455,6 @@ module LowPriority =
 
 module HighPriority =
 
-    open TaskExtensions
-
     // High priority extensions
     type TaskBuilderBase with
 
@@ -534,17 +508,17 @@ module HighPriority =
         member inline this.ReturnFrom(task: Task<'T>) : TaskCode<'T, 'T> =
             this.Bind(task, this.Return)
 
-        member inline this.ReturnFromFinal(task: Task<'T>) : TaskCode<'T, 'T> =
+        member inline this.ReturnFromFinal(target: Task<'T>) : TaskCode<'T, 'T> =
             TaskCode<_, _>(fun sm ->
                 if __useResumableCode then
-
-                    task.TailCallRunner <- ValueSome sm.Data.MethodBuilder.Task
-                    sm.Data.MethodBuilder.Task.TailCallTarget <- ValueSome task
-                    let mutable __stack_yield = YieldAwaitable.YieldAwaiter()
-                    sm.Data.MethodBuilder.AwaitUnsafeOnCompleted(&__stack_yield, &sm)
+                    TaskContext.SetTarget target
+                    // Abandon this state machine, continue on tail call target
+                    // unless it already completed, then we're stuck.
+                    // if it completes before we set the target, we're stuck, too.
+                    // TODO.
                     false
                 else
-                    this.ReturnFrom(task).Invoke(&sm)
+                    this.ReturnFrom(target).Invoke(&sm)
             )
 
     type TaskBuilder with
