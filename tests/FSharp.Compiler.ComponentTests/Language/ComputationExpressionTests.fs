@@ -2051,12 +2051,14 @@ match test() with
     let ``ReturnFromFinal works in TaskBuilder`` () =
         Fsx """
 let rec t n = task {
-    if n % 1000 = 0 then printfn "in t %d" n
+    if n % 1000 = 0 then
+        printfn "in t %d" n
+        // do! System.Threading.Tasks.Task.Delay(1)
     if n > 0 then
         return! t (n - 1)   
 }
 
-t 10_000
+t 100_000
         """
 
          |> runFsi

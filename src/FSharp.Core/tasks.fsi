@@ -67,8 +67,8 @@ module TaskExtensions =
         static member Targets: System.Runtime.CompilerServices.ConditionalWeakTable<Task<'a>, Holder<Task<'a>>>
 
     type Task<'a> with
-        member TailCallTarget: voption<Task<'a>>
-        member TailCallRunner: voption<Task<'a>>
+        member TailCallTarget: voption<Task<'a>> with get, set
+        member TailCallRunner: voption<Task<'a>> with get, set
 
 /// <summary>
 /// Contains methods to build tasks using the F# computation expression syntax

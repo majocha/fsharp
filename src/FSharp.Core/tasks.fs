@@ -222,16 +222,37 @@ type TaskBuilder() =
                     try
                         match sm.Data.MethodBuilder.Task.TailCallTarget with
                         | ValueSome task ->
-                            // we're running a tail call loop
+                            // cut short
+                            let mutable target = task
+                            while target.IsCompleted && target.TailCallTarget.IsSome do
+                                target <- target.TailCallTarget.Value
 
-                            let mutable __stack_awaiter = task.GetAwaiter()
-                            if __stack_awaiter.IsCompleted then
-                                sm.Data.MethodBuilder.SetResult(__stack_awaiter.GetResult())
-                            else
-                            // Schedule next step when current tail call target completes
-                            sm.Data.MethodBuilder.AwaitUnsafeOnCompleted(&__stack_awaiter, &sm)
+                            let mutable __stack_awaiter = target.GetAwaiter()
+
+                            // cut the tail call chain
+                            match sm.Data.MethodBuilder.Task.TailCallRunner with
+                            | ValueSome runner ->
+                                let mutable runner = runner
+                                while runner.TailCallRunner.IsSome do
+                                    runner <- runner.TailCallRunner.Value
+
+                                runner.TailCallTarget <- ValueSome target
+                                target.TailCallRunner <- ValueSome runner
+                                // We're done here, noone will look at this result.
+                                if __stack_awaiter.IsCompleted then 
+                                    sm.Data.MethodBuilder.SetResult(__stack_awaiter.GetResult())
+                                else
+                                    sm.Data.MethodBuilder.SetResult(Unchecked.defaultof<_>)
+                            | ValueNone ->
+                                // We don't have a runner above, so we're running.
+                                if __stack_awaiter.IsCompleted then
+                                    sm.Data.MethodBuilder.SetResult(__stack_awaiter.GetResult())
+                                else
+                                // Schedule next step when current tail call target completes
+                                sm.Data.MethodBuilder.AwaitUnsafeOnCompleted(&__stack_awaiter, &sm)
 
                         | ValueNone ->
+                            // Normal execution path
                             let __stack_code_fin = code.Invoke(&sm)
                             if __stack_code_fin then
                                 sm.Data.MethodBuilder.SetResult(sm.Data.Result)
@@ -246,7 +267,9 @@ type TaskBuilder() =
                 (SetStateMachineMethodImpl<_>(fun sm state -> sm.Data.MethodBuilder.SetStateMachine(state)))
                 (AfterCode<_, _>(fun sm ->
                     sm.Data.MethodBuilder <- AsyncTaskMethodBuilder<'T>.Create()
-                    sm.Data.MethodBuilder.Start(&sm)
+                    let mutable initialYield = YieldAwaitable.YieldAwaiter()
+                    sm.Data.MethodBuilder.AwaitUnsafeOnCompleted(&initialYield, &sm)
+                    //sm.Data.MethodBuilder.Start(&sm)
                     sm.Data.MethodBuilder.Task))
         else
             TaskBuilder.RunDynamic(code)
@@ -515,25 +538,11 @@ module HighPriority =
             TaskCode<_, _>(fun sm ->
                 if __useResumableCode then
 
-                    let mutable __stack_awaiter = task.GetAwaiter()
-
-                    match sm.Data.MethodBuilder.Task.TailCallRunner with
-                    | ValueSome runner ->
-                        // This is another iteration in a tail call chain
-                        task.TailCallRunner <- ValueSome runner
-                        runner.TailCallTarget <- ValueSome task
-                        // We're done here, the runner will continue with the tail call after this task completes
-                        // We abandon the current state machine, nobody will look at this return value
-                        sm.Data <- Unchecked.defaultof<_>
-                        true
-
-                    | ValueNone ->
-                        // This is the first iteration in a tail call chain
-                        task.TailCallRunner <- ValueSome sm.Data.MethodBuilder.Task
-                        sm.Data.MethodBuilder.Task.TailCallTarget <- ValueSome task
-                        // On next step, the tail call target will be either completed or a next one in the chain
-                        sm.Data.MethodBuilder.AwaitUnsafeOnCompleted(&__stack_awaiter, &sm)
-                        false
+                    task.TailCallRunner <- ValueSome sm.Data.MethodBuilder.Task
+                    sm.Data.MethodBuilder.Task.TailCallTarget <- ValueSome task
+                    let mutable __stack_yield = YieldAwaitable.YieldAwaiter()
+                    sm.Data.MethodBuilder.AwaitUnsafeOnCompleted(&__stack_yield, &sm)
+                    false
                 else
                     this.ReturnFrom(task).Invoke(&sm)
             )
