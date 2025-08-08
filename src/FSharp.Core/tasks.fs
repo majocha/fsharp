@@ -24,6 +24,7 @@ open Microsoft.FSharp.Core.LanguagePrimitives.IntrinsicOperators
 open Microsoft.FSharp.Control
 open Microsoft.FSharp.Collections
 
+
 /// The extra data stored in ResumableStateMachine for tasks
 [<Struct; NoComparison; NoEquality>]
 type TaskStateMachineData<'T> =
@@ -38,6 +39,26 @@ and TaskStateMachine<'TOverall> = ResumableStateMachine<TaskStateMachineData<'TO
 and TaskResumptionFunc<'TOverall> = ResumptionFunc<TaskStateMachineData<'TOverall>>
 and TaskResumptionDynamicInfo<'TOverall> = ResumptionDynamicInfo<TaskStateMachineData<'TOverall>>
 and TaskCode<'TOverall, 'T> = ResumableCode<TaskStateMachineData<'TOverall>, 'T>
+
+module TaskExtensions =
+
+    type Holder<'a>() =
+        [<DefaultValue(false)>]
+        val mutable Value: 'a voption
+
+    type Maps<'a> =
+        static member val Runners = ConditionalWeakTable<Task<'a>, Holder<Task<'a>>>()
+        static member val Targets = ConditionalWeakTable<Task<'a>, Holder<Task<'a>>>()
+    
+    type Task<'a> with
+        member this.TailCallTarget
+            with get() = Maps.Targets.GetOrCreateValue(this).Value
+            and set v = Maps.Targets.GetOrCreateValue(this).Value <- v
+        member this.TailCallRunner
+            with get() = Maps.Runners.GetOrCreateValue(this).Value
+            and set v = Maps.Runners.GetOrCreateValue(this).Value <- v
+
+open TaskExtensions
 
 type TaskBuilderBase() =
 
@@ -195,13 +216,25 @@ type TaskBuilder() =
                 (MoveNextMethodImpl<_>(fun sm ->
                     //-- RESUMABLE CODE START
                     __resumeAt sm.ResumptionPoint
+
                     let mutable __stack_exn: Exception = null
 
                     try
-                        let __stack_code_fin = code.Invoke(&sm)
+                        match sm.Data.MethodBuilder.Task.TailCallTarget with
+                        | ValueSome task ->
+                            // we're running a tail call loop
 
-                        if __stack_code_fin then
-                            sm.Data.MethodBuilder.SetResult(sm.Data.Result)
+                            let mutable __stack_awaiter = task.GetAwaiter()
+                            if __stack_awaiter.IsCompleted then
+                                sm.Data.MethodBuilder.SetResult(__stack_awaiter.GetResult())
+                            else
+                            // Schedule next step when current tail call target completes
+                            sm.Data.MethodBuilder.AwaitUnsafeOnCompleted(&__stack_awaiter, &sm)
+
+                        | ValueNone ->
+                            let __stack_code_fin = code.Invoke(&sm)
+                            if __stack_code_fin then
+                                sm.Data.MethodBuilder.SetResult(sm.Data.Result)
                     with exn ->
                         __stack_exn <- exn
                     // Run SetException outside the stack unwind, see https://github.com/dotnet/roslyn/issues/26567
@@ -365,6 +398,17 @@ module LowPriority =
 
             this.Bind(task, this.Return)
 
+        [<NoEagerConstraintApplication>]
+        member inline this.ReturnFromFinal< ^TaskLike, ^Awaiter, 'T
+            when ^TaskLike: (member GetAwaiter: unit -> ^Awaiter)
+            and ^Awaiter :> ICriticalNotifyCompletion
+            and ^Awaiter: (member get_IsCompleted: unit -> bool)
+            and ^Awaiter: (member GetResult: unit -> 'T)>
+            (task: ^TaskLike)
+            : TaskCode<'T, 'T> =
+
+            this.Bind(task, this.Return)
+
         member inline _.Using<'Resource, 'TOverall, 'T when 'Resource :> IDisposable | null>
             (resource: 'Resource, body: 'Resource -> TaskCode<'TOverall, 'T>)
             =
@@ -411,6 +455,8 @@ module LowPriority =
             )
 
 module HighPriority =
+
+    open TaskExtensions
 
     // High priority extensions
     type TaskBuilderBase with
@@ -465,6 +511,33 @@ module HighPriority =
         member inline this.ReturnFrom(task: Task<'T>) : TaskCode<'T, 'T> =
             this.Bind(task, this.Return)
 
+        member inline this.ReturnFromFinal(task: Task<'T>) : TaskCode<'T, 'T> =
+            TaskCode<_, _>(fun sm ->
+                if __useResumableCode then
+
+                    let mutable __stack_awaiter = task.GetAwaiter()
+
+                    match sm.Data.MethodBuilder.Task.TailCallRunner with
+                    | ValueSome runner ->
+                        // This is another iteration in a tail call chain
+                        task.TailCallRunner <- ValueSome runner
+                        runner.TailCallTarget <- ValueSome task
+                        // We're done here, the runner will continue with the tail call after this task completes
+                        // We abandon the current state machine, nobody will look at this return value
+                        sm.Data <- Unchecked.defaultof<_>
+                        true
+
+                    | ValueNone ->
+                        // This is the first iteration in a tail call chain
+                        task.TailCallRunner <- ValueSome sm.Data.MethodBuilder.Task
+                        sm.Data.MethodBuilder.Task.TailCallTarget <- ValueSome task
+                        // On next step, the tail call target will be either completed or a next one in the chain
+                        sm.Data.MethodBuilder.AwaitUnsafeOnCompleted(&__stack_awaiter, &sm)
+                        false
+                else
+                    this.ReturnFrom(task).Invoke(&sm)
+            )
+
     type TaskBuilder with
 
         // This overload is required for type inference in tasks cases
@@ -507,6 +580,9 @@ module MediumPriority =
 
         member inline this.ReturnFrom(computation: Async<'T>) : TaskCode<'T, 'T> =
             this.ReturnFrom(Async.StartImmediateAsTask computation)
+
+        member inline this.ReturnFromFinal(computation: Async<'T>) : TaskCode<'T, 'T> =
+            this.ReturnFromFinal(Async.StartImmediateAsTask computation)
 
     type TaskBuilder with
 

@@ -2046,3 +2046,18 @@ match test() with
          |> asFsx
          |> runFsi
          |> shouldSucceed
+
+    [<Fact>]
+    let ``ReturnFromFinal works in TaskBuilder`` () =
+        Fsx """
+let rec t n = task {
+    if n % 1000 = 0 then printfn "in t %d" n
+    if n > 0 then
+        return! t (n - 1)   
+}
+
+t 10_000
+        """
+
+         |> runFsi
+         |> shouldSucceed
