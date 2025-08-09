@@ -2047,19 +2047,10 @@ match test() with
          |> runFsi
          |> shouldSucceed
 
-    [<Fact>]
-    let ``ReturnFromFinal works in TaskBuilder`` () =
-        Fsx """
-let rec t n = task {
-    if n % 1000 = 0 then
-        printfn "in t %d" n
-        // do! System.Threading.Tasks.Task.Delay(1)
-    if n > 0 then
-        return! t (n - 1)   
-}
-
-t 100_000
-        """
-
+    [<Theory; FileInlineData("ReturnFromFinal.fsx")>]
+    let ``ReturnFromFinal works in TaskBuilder`` compilation =
+         compilation
+         |> getCompilation 
+         |> asFsx
          |> runFsi
          |> shouldSucceed

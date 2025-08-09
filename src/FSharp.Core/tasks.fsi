@@ -26,6 +26,9 @@ type TaskStateMachineData<'T> =
     [<DefaultValue(false)>]
     val mutable Result: 'T
 
+    [<DefaultValue(false)>]
+    val mutable ShouldYield: bool
+
     /// <summary>
     /// Holds the MethodBuilder for the state machine
     /// </summary>
@@ -55,26 +58,17 @@ and [<CompilerMessage("This construct  is for use by compiled F# code and should
                       1204,
                       IsHidden = true)>] TaskCode<'TOverall, 'T> = ResumableCode<TaskStateMachineData<'TOverall>, 'T>
 
-module TaskExtensions =
-
-    type Holder<'a> =
-        new : unit -> Holder<'a>
-        val mutable Value: voption<'a>
-
-    [<Class>]
-    type Maps<'a> =
-        static member Runners: System.Runtime.CompilerServices.ConditionalWeakTable<Task<'a>, Holder<Task<'a>>>
-        static member Targets: System.Runtime.CompilerServices.ConditionalWeakTable<Task<'a>, Holder<Task<'a>>>
-
-    type Task<'a> with
-        member TailCallTarget: voption<Task<'a>> with get, set
-        member TailCallRunner: voption<Task<'a>> with get, set
-
 /// <summary>
 /// Contains methods to build tasks using the F# computation expression syntax
 /// </summary>
 [<Class>]
 type TaskBuilderBase =
+
+    static member BindDepth: System.Threading.AsyncLocal<int>
+
+    static member inline CheckBindDepth: unit -> bool
+
+    member inline YieldIfRequested: code: TaskCode<'T, 'T> -> TaskCode<'T, 'T>
 
     /// <summary>
     /// Specifies the sequential composition of two units of task code.

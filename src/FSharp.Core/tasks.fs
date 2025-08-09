@@ -33,6 +33,9 @@ type TaskStateMachineData<'T> =
     val mutable Result: 'T
 
     [<DefaultValue(false)>]
+    val mutable ShouldYield: bool
+
+    [<DefaultValue(false)>]
     val mutable MethodBuilder: AsyncTaskMethodBuilder<'T>
 
 and TaskStateMachine<'TOverall> = ResumableStateMachine<TaskStateMachineData<'TOverall>>
@@ -40,30 +43,28 @@ and TaskResumptionFunc<'TOverall> = ResumptionFunc<TaskStateMachineData<'TOveral
 and TaskResumptionDynamicInfo<'TOverall> = ResumptionDynamicInfo<TaskStateMachineData<'TOverall>>
 and TaskCode<'TOverall, 'T> = ResumableCode<TaskStateMachineData<'TOverall>, 'T>
 
-[<NoComparison; NoEquality>]
-type TaskContext<'a> =
-    {
-        previous: TaskContext<'a> voption
-        builder: AsyncTaskMethodBuilder<'a>
-        mutable target: Task<'a> voption
-    }
-    static member Current = AsyncLocal<TaskContext<'a> voption>()
-    static member OnStart(builder: AsyncTaskMethodBuilder<'a>) =
-        match TaskContext.Current.Value with
-        | ValueNone ->
-            TaskContext.Current.Value <- ValueSome { previous = ValueNone; builder = builder; target = ValueNone }
-        | ValueSome ctx ->
-            TaskContext.Current.Value <-
-            match ctx.previous with
-            | ValueSome prev2 when prev2.target = ValueSome ctx.builder.Task ->
-                ValueSome { previous = prev2; builder = builder; target = ValueNone }
-            TaskContext.Current.Value <-
-                ValueSome { previous = ValueSome ctx; builder = builder; target = ValueNone }
-    static member SetTarget(task: Task<'a>) =
-        TaskContext.Current.Value.Value.target <- ValueSome task
-    static member Value = TaskContext<'a>.Current.Value.Value
-
 type TaskBuilderBase() =
+
+    static member val BindDepth = AsyncLocal<int>()
+
+    static member inline CheckBindDepth() =
+        TaskBuilderBase.BindDepth.Value <- TaskBuilderBase.BindDepth.Value + 1
+        (TaskBuilderBase.BindDepth.Value + 1) % 100 = 0
+
+    member inline _.YieldIfRequested(code: TaskCode<'T, 'T> ): TaskCode<'T, 'T> =
+        TaskCode(fun sm ->
+            if sm.Data.ShouldYield then
+                sm.Data.ShouldYield <- false
+                let __stack_yield_fin = ResumableCode.Yield().Invoke(&sm)
+                if not __stack_yield_fin then
+                    let mutable __stack_yield_awaiter = YieldAwaitable.YieldAwaiter()
+                    sm.Data.MethodBuilder.AwaitUnsafeOnCompleted(&__stack_yield_awaiter, &sm)
+                    false
+                else
+                    code.Invoke(&sm)
+            else
+                code.Invoke(&sm)
+        )
 
     member inline _.Delay(generator: unit -> TaskCode<'TOverall, 'T>) : TaskCode<'TOverall, 'T> =
         TaskCode<'TOverall, 'T>(fun sm -> (generator ()).Invoke(&sm))
@@ -213,7 +214,7 @@ type TaskBuilder() =
         sm.Data.MethodBuilder.Start(&sm)
         sm.Data.MethodBuilder.Task
 
-    member inline _.Run(code: TaskCode<'T, 'T>) : Task<'T> =
+    member inline this.Run(code: TaskCode<'T, 'T>) : Task<'T> =
         if __useResumableCode then
             __stateMachine<TaskStateMachineData<'T>, Task<'T>>
                 (MoveNextMethodImpl<_>(fun sm ->
@@ -221,30 +222,23 @@ type TaskBuilder() =
                     __resumeAt sm.ResumptionPoint
 
                     let mutable __stack_exn: Exception = null
-                    let builder =
-                        match TaskContext<_>.Value.previous with
-                        | ValueSome previous when previous.target = ValueSome sm.Data.MethodBuilder.Task ->
-                            previous.builder
-                        | _ -> sm.Data.MethodBuilder
 
                     try
-                        let __stack_code_fin = code.Invoke(&sm)
-                        if __stack_code_fin then
-                            builder.SetResult(sm.Data.Result)
+                        let __stack_code_fin = this.YieldIfRequested(code).Invoke(&sm)
+                        if __stack_code_fin then sm.Data.MethodBuilder.SetResult(sm.Data.Result)
                     with exn ->
                         __stack_exn <- exn
+
                     // Run SetException outside the stack unwind, see https://github.com/dotnet/roslyn/issues/26567
                     match __stack_exn with
                     | null -> ()
-                    | exn -> builder.SetException exn
+                    | exn -> sm.Data.MethodBuilder.SetException exn
                 //-- RESUMABLE CODE END
                 ))
                 (SetStateMachineMethodImpl<_>(fun sm state -> sm.Data.MethodBuilder.SetStateMachine(state)))
                 (AfterCode<_, _>(fun sm ->
+                    sm.Data.ShouldYield <- TaskBuilderBase.CheckBindDepth()
                     sm.Data.MethodBuilder <- AsyncTaskMethodBuilder<'T>.Create()
-                    TaskContext.OnStart sm.Data.MethodBuilder
-                    //let mutable initialYield = YieldAwaitable.YieldAwaiter()
-                    //sm.Data.MethodBuilder.AwaitUnsafeOnCompleted(&initialYield, &sm)
                     sm.Data.MethodBuilder.Start(&sm)
                     sm.Data.MethodBuilder.Task))
         else
@@ -508,18 +502,18 @@ module HighPriority =
         member inline this.ReturnFrom(task: Task<'T>) : TaskCode<'T, 'T> =
             this.Bind(task, this.Return)
 
-        member inline this.ReturnFromFinal(target: Task<'T>) : TaskCode<'T, 'T> =
-            TaskCode<_, _>(fun sm ->
-                if __useResumableCode then
-                    TaskContext.SetTarget target
-                    // Abandon this state machine, continue on tail call target
-                    // unless it already completed, then we're stuck.
-                    // if it completes before we set the target, we're stuck, too.
-                    // TODO.
-                    false
-                else
-                    this.ReturnFrom(target).Invoke(&sm)
-            )
+        member inline this.ReturnFromFinal(task: Task<'T>) : TaskCode<'T, 'T> =
+            this.Bind(task, this.Return)
+            //TaskCode<_, _>(fun sm ->
+            //    let builder = sm.Data.MethodBuilder
+            //    task.ContinueWith( fun (task: Task<_>) ->
+            //        let awaiter = task.GetAwaiter()
+            //        try builder.SetResult(awaiter.GetResult()) with exn ->
+            //            Printf.printfn "TaskBuilder.ReturnFromFinal: %A" exn
+            //            builder.SetException exn
+            //    ) |> ignore
+            //    true
+            //)
 
     type TaskBuilder with
 
