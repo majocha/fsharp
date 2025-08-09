@@ -35,6 +35,15 @@ type TaskStateMachineData<'T> =
     [<DefaultValue(false)>]
     val mutable MethodBuilder: AsyncTaskMethodBuilder<'T>
 
+[<NoEquality; NoComparison>]
+type BoxedHandOff<'a> = { mutable builder: AsyncTaskMethodBuilder<'a>; mutable task: Task<'a> }
+
+[<Class>]
+type TailCallContext<'a> =
+    static member current: System.Threading.AsyncLocal<BoxedHandOff<'a>>
+
+    static member inline Push: builder: AsyncTaskMethodBuilder<'a> * task: Task<'a> -> unit
+
 /// <summary>
 /// This is used by the compiler as a template for creating state machine structs
 /// </summary>
@@ -63,12 +72,6 @@ and [<CompilerMessage("This construct  is for use by compiled F# code and should
 /// </summary>
 [<Class>]
 type TaskBuilderBase =
-
-    static member BindDepth: System.Threading.AsyncLocal<int>
-
-    static member inline CheckBindDepth: unit -> bool
-
-    member inline YieldIfRequested: code: TaskCode<'T, 'T> -> TaskCode<'T, 'T>
 
     /// <summary>
     /// Specifies the sequential composition of two units of task code.

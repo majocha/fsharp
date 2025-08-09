@@ -43,28 +43,22 @@ and TaskResumptionFunc<'TOverall> = ResumptionFunc<TaskStateMachineData<'TOveral
 and TaskResumptionDynamicInfo<'TOverall> = ResumptionDynamicInfo<TaskStateMachineData<'TOverall>>
 and TaskCode<'TOverall, 'T> = ResumableCode<TaskStateMachineData<'TOverall>, 'T>
 
+[<NoEquality; NoComparison>]
+type BoxedHandOff<'a> = { mutable builder: AsyncTaskMethodBuilder<'a>; mutable task: Task<'a> }
+
+type TailCallContext<'a> =
+    static member val current = AsyncLocal<BoxedHandOff<'a>>()
+
+    static member inline Push(builder: AsyncTaskMethodBuilder<_>, task) =
+        match TailCallContext<'a>.current.Value with
+        | NonNull { task = prevTask } when  builder.Task = prevTask ->
+            Console.WriteLine "cut short previous hand off"
+            TailCallContext<'a>.current.Value.task <- task
+        | _ ->
+            Console.WriteLine "new context"
+            TailCallContext<'a>.current.Value <- { builder = builder; task = task }
+
 type TaskBuilderBase() =
-
-    static member val BindDepth = AsyncLocal<int>()
-
-    static member inline CheckBindDepth() =
-        TaskBuilderBase.BindDepth.Value <- TaskBuilderBase.BindDepth.Value + 1
-        (TaskBuilderBase.BindDepth.Value + 1) % 100 = 0
-
-    member inline _.YieldIfRequested(code: TaskCode<'T, 'T> ): TaskCode<'T, 'T> =
-        TaskCode(fun sm ->
-            if sm.Data.ShouldYield then
-                sm.Data.ShouldYield <- false
-                let __stack_yield_fin = ResumableCode.Yield().Invoke(&sm)
-                if not __stack_yield_fin then
-                    let mutable __stack_yield_awaiter = YieldAwaitable.YieldAwaiter()
-                    sm.Data.MethodBuilder.AwaitUnsafeOnCompleted(&__stack_yield_awaiter, &sm)
-                    false
-                else
-                    code.Invoke(&sm)
-            else
-                code.Invoke(&sm)
-        )
 
     member inline _.Delay(generator: unit -> TaskCode<'TOverall, 'T>) : TaskCode<'TOverall, 'T> =
         TaskCode<'TOverall, 'T>(fun sm -> (generator ()).Invoke(&sm))
@@ -76,6 +70,7 @@ type TaskBuilderBase() =
 
     member inline _.Return(value: 'T) : TaskCode<'T, 'T> =
         TaskCode<'T, _>(fun sm ->
+            Console.WriteLine "returning"
             sm.Data.Result <- value
             true)
 
@@ -221,23 +216,28 @@ type TaskBuilder() =
                     //-- RESUMABLE CODE START
                     __resumeAt sm.ResumptionPoint
 
-                    let mutable __stack_exn: Exception = null
+                    let mutable targetBuilder = Unchecked.defaultof<_>
 
                     try
-                        let __stack_code_fin = this.YieldIfRequested(code).Invoke(&sm)
-                        if __stack_code_fin then sm.Data.MethodBuilder.SetResult(sm.Data.Result)
-                    with exn ->
-                        __stack_exn <- exn
+                        let __stack_code_fin = code.Invoke(&sm)
 
-                    // Run SetException outside the stack unwind, see https://github.com/dotnet/roslyn/issues/26567
-                    match __stack_exn with
-                    | null -> ()
-                    | exn -> sm.Data.MethodBuilder.SetException exn
+                        if __stack_code_fin then
+                            // materialize current builder
+                            sm.Data.MethodBuilder.Task |> ignore
+
+                            match TailCallContext<'T>.current.Value with
+                            | NonNull { builder = builder; task = target } when target = sm.Data.MethodBuilder.Task ->
+                                targetBuilder <- builder
+                            | _ -> targetBuilder <- sm.Data.MethodBuilder
+
+                            targetBuilder.SetResult(sm.Data.Result)
+                    with exn ->
+                        targetBuilder.SetException exn
                 //-- RESUMABLE CODE END
                 ))
                 (SetStateMachineMethodImpl<_>(fun sm state -> sm.Data.MethodBuilder.SetStateMachine(state)))
                 (AfterCode<_, _>(fun sm ->
-                    sm.Data.ShouldYield <- TaskBuilderBase.CheckBindDepth()
+                    //sm.Data.ShouldYield <- TaskBuilderBase.CheckBindDepth()
                     sm.Data.MethodBuilder <- AsyncTaskMethodBuilder<'T>.Create()
                     sm.Data.MethodBuilder.Start(&sm)
                     sm.Data.MethodBuilder.Task))
@@ -267,13 +267,23 @@ type BackgroundTaskBuilder() =
                     //-- RESUMABLE CODE START
                     __resumeAt sm.ResumptionPoint
 
+                    let mutable targetBuilder = Unchecked.defaultof<_>
+
                     try
-                        let __stack_code_fin = this.YieldIfRequested(code).Invoke(&sm)
+                        let __stack_code_fin = code.Invoke(&sm)
 
                         if __stack_code_fin then
-                            sm.Data.MethodBuilder.SetResult(sm.Data.Result)
+                            // materialize current builder
+                            sm.Data.MethodBuilder.Task |> ignore
+
+                            match TailCallContext<'T>.current.Value with
+                            | NonNull { builder = builder; task = target } when target = sm.Data.MethodBuilder.Task ->
+                                targetBuilder <- builder
+                            | _ -> targetBuilder <- sm.Data.MethodBuilder
+
+                            targetBuilder.SetResult(sm.Data.Result)
                     with exn ->
-                        sm.Data.MethodBuilder.SetException exn
+                        targetBuilder.SetException exn
                 //-- RESUMABLE CODE END
                 ))
                 (SetStateMachineMethodImpl<_>(fun sm state -> sm.Data.MethodBuilder.SetStateMachine(state)))
@@ -284,7 +294,7 @@ type BackgroundTaskBuilder() =
                         isNull SynchronizationContext.Current
                         && obj.ReferenceEquals(TaskScheduler.Current, TaskScheduler.Default)
                     then
-                        sm.Data.ShouldYield <- TaskBuilderBase.CheckBindDepth()
+                        //sm.Data.ShouldYield <- TaskBuilderBase.CheckBindDepth()
                         sm.Data.MethodBuilder <- AsyncTaskMethodBuilder<'T>.Create()
                         sm.Data.MethodBuilder.Start(&sm)
                         sm.Data.MethodBuilder.Task
@@ -293,7 +303,7 @@ type BackgroundTaskBuilder() =
 
                         Task.Run<'T>(fun () ->
                             let mutable sm = sm // host local mutable copy of contents of state machine on this thread pool thread
-                            sm.Data.ShouldYield <- TaskBuilderBase.CheckBindDepth()
+                            //sm.Data.ShouldYield <- TaskBuilderBase.CheckBindDepth()
                             sm.Data.MethodBuilder <- AsyncTaskMethodBuilder<'T>.Create()
                             sm.Data.MethodBuilder.Start(&sm)
                             sm.Data.MethodBuilder.Task)))
@@ -505,17 +515,13 @@ module HighPriority =
             this.Bind(task, this.Return)
 
         member inline this.ReturnFromFinal(task: Task<'T>) : TaskCode<'T, 'T> =
-            this.Bind(task, this.Return)
-            //TaskCode<_, _>(fun sm ->
-            //    let builder = sm.Data.MethodBuilder
-            //    task.ContinueWith( fun (task: Task<_>) ->
-            //        let awaiter = task.GetAwaiter()
-            //        try builder.SetResult(awaiter.GetResult()) with exn ->
-            //            Printf.printfn "TaskBuilder.ReturnFromFinal: %A" exn
-            //            builder.SetException exn
-            //    ) |> ignore
-            //    true
-            //)
+            TaskCode<_, _>(fun sm ->
+                Console.WriteLine "In return from final"
+                // materialize current builder
+                sm.Data.MethodBuilder.Task |> ignore
+                TailCallContext.Push(sm.Data.MethodBuilder, task)
+                false
+            )
 
     type TaskBuilder with
 
