@@ -260,7 +260,7 @@ type BackgroundTaskBuilder() =
             Task.Run<'T>(fun () -> TaskBuilder.RunDynamic(code))
 
     //// Same as TaskBuilder.Run except the start is inside Task.Run if necessary
-    member inline _.Run(code: TaskCode<'T, 'T>) : Task<'T> =
+    member inline this.Run(code: TaskCode<'T, 'T>) : Task<'T> =
         if __useResumableCode then
             __stateMachine<TaskStateMachineData<'T>, Task<'T>>
                 (MoveNextMethodImpl<_>(fun sm ->
@@ -268,7 +268,7 @@ type BackgroundTaskBuilder() =
                     __resumeAt sm.ResumptionPoint
 
                     try
-                        let __stack_code_fin = code.Invoke(&sm)
+                        let __stack_code_fin = this.YieldIfRequested(code).Invoke(&sm)
 
                         if __stack_code_fin then
                             sm.Data.MethodBuilder.SetResult(sm.Data.Result)
@@ -284,6 +284,7 @@ type BackgroundTaskBuilder() =
                         isNull SynchronizationContext.Current
                         && obj.ReferenceEquals(TaskScheduler.Current, TaskScheduler.Default)
                     then
+                        sm.Data.ShouldYield <- TaskBuilderBase.CheckBindDepth()
                         sm.Data.MethodBuilder <- AsyncTaskMethodBuilder<'T>.Create()
                         sm.Data.MethodBuilder.Start(&sm)
                         sm.Data.MethodBuilder.Task
@@ -292,6 +293,7 @@ type BackgroundTaskBuilder() =
 
                         Task.Run<'T>(fun () ->
                             let mutable sm = sm // host local mutable copy of contents of state machine on this thread pool thread
+                            sm.Data.ShouldYield <- TaskBuilderBase.CheckBindDepth()
                             sm.Data.MethodBuilder <- AsyncTaskMethodBuilder<'T>.Create()
                             sm.Data.MethodBuilder.Start(&sm)
                             sm.Data.MethodBuilder.Task)))
