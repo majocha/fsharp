@@ -52,10 +52,10 @@ type TailCallContext<'a> =
     static member inline Push(builder: AsyncTaskMethodBuilder<_>, task) =
         match TailCallContext<'a>.current.Value with
         | NonNull { task = prevTask } when  builder.Task = prevTask ->
-            Console.WriteLine "cut short previous hand off"
+            //Console.WriteLine "cut short previous hand off"
             TailCallContext<'a>.current.Value.task <- task
         | _ ->
-            Console.WriteLine "new context"
+            //Console.WriteLine "new context"
             TailCallContext<'a>.current.Value <- { builder = builder; task = task }
 
 type TaskBuilderBase() =
@@ -70,7 +70,7 @@ type TaskBuilderBase() =
 
     member inline _.Return(value: 'T) : TaskCode<'T, 'T> =
         TaskCode<'T, _>(fun sm ->
-            Console.WriteLine "returning"
+            //Console.WriteLine "returning"
             sm.Data.Result <- value
             true)
 
@@ -228,7 +228,8 @@ type TaskBuilder() =
                             match TailCallContext<'T>.current.Value with
                             | NonNull { builder = builder; task = target } when target = sm.Data.MethodBuilder.Task ->
                                 targetBuilder <- builder
-                            | _ -> targetBuilder <- sm.Data.MethodBuilder
+                            | Null -> targetBuilder <- sm.Data.MethodBuilder
+                            | _ -> failwith "wrong tail call target"
 
                             targetBuilder.SetResult(sm.Data.Result)
                     with exn ->
@@ -242,6 +243,7 @@ type TaskBuilder() =
                     sm.Data.MethodBuilder.Start(&sm)
                     sm.Data.MethodBuilder.Task))
         else
+            failwith "dynamic run"
             TaskBuilder.RunDynamic(code)
 
 type BackgroundTaskBuilder() =
@@ -279,7 +281,8 @@ type BackgroundTaskBuilder() =
                             match TailCallContext<'T>.current.Value with
                             | NonNull { builder = builder; task = target } when target = sm.Data.MethodBuilder.Task ->
                                 targetBuilder <- builder
-                            | _ -> targetBuilder <- sm.Data.MethodBuilder
+                            | Null -> targetBuilder <- sm.Data.MethodBuilder
+                            | _ -> failwith "wrong tail call target"
 
                             targetBuilder.SetResult(sm.Data.Result)
                     with exn ->
@@ -411,6 +414,7 @@ module LowPriority =
             and ^Awaiter: (member GetResult: unit -> 'T)>
             (task: ^TaskLike)
             : TaskCode<'T, 'T> =
+            //Console.WriteLine "In return from final Awaiter"
 
             this.Bind(task, this.Return)
 
@@ -516,10 +520,12 @@ module HighPriority =
 
         member inline this.ReturnFromFinal(task: Task<'T>) : TaskCode<'T, 'T> =
             TaskCode<_, _>(fun sm ->
-                Console.WriteLine "In return from final"
+                //Console.WriteLine "In return from final"
                 // materialize current builder
                 sm.Data.MethodBuilder.Task |> ignore
-                TailCallContext.Push(sm.Data.MethodBuilder, task)
+                let builder = sm.Data.MethodBuilder
+                task.ContinueWith(fun (t: Task<_>) -> builder.SetResult(t.GetAwaiter().GetResult())) |> ignore
+                //TailCallContext.Push(sm.Data.MethodBuilder, task)
                 false
             )
 
@@ -567,6 +573,7 @@ module MediumPriority =
             this.ReturnFrom(Async.StartImmediateAsTask computation)
 
         member inline this.ReturnFromFinal(computation: Async<'T>) : TaskCode<'T, 'T> =
+            //Console.WriteLine "In return from final Async"
             this.ReturnFromFinal(Async.StartImmediateAsTask computation)
 
     type TaskBuilder with

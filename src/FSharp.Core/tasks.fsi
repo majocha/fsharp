@@ -230,6 +230,14 @@ module LowPriority =
                 and ^Awaiter: (member get_IsCompleted: unit -> bool)
                 and ^Awaiter: (member GetResult: unit -> 'T)
 
+        [<NoEagerConstraintApplication>]
+        member inline ReturnFromFinal< ^TaskLike, ^Awaiter, 'T> :
+            task: ^TaskLike -> TaskCode<'T, 'T>
+                when ^TaskLike: (member GetAwaiter: unit -> ^Awaiter)
+                and ^Awaiter :> ICriticalNotifyCompletion
+                and ^Awaiter: (member get_IsCompleted: unit -> bool)
+                and ^Awaiter: (member GetResult: unit -> 'T)
+
         /// <summary>
         /// The entry point for the dynamic implementation of the corresponding operation. Do not use directly, only used when executing quotations that involve tasks or other reflective execution of F# code.
         /// </summary>
@@ -348,6 +356,8 @@ module MediumPriority =
         /// </summary>
         member inline ReturnFrom: computation: Async<'T> -> TaskCode<'T, 'T>
 
+        member inline ReturnFromFinal: computation: Async<'T> -> TaskCode<'T, 'T>
+
     type TaskBuilder with
 
         /// <summary>
@@ -446,6 +456,8 @@ module HighPriority =
         /// Specifies a unit of task code which draws a result from a task.
         /// </summary>
         member inline ReturnFrom: task: Task<'T> -> TaskCode<'T, 'T>
+
+        member inline ReturnFromFinal: task: Task<'T> -> TaskCode<'T, 'T>
 
         /// <summary>
         /// The entry point for the dynamic implementation of the corresponding operation. Do not use directly, only used when executing quotations that involve tasks or other reflective execution of F# code.
