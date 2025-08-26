@@ -53,24 +53,35 @@ type CachedEntity<'Key, 'Value> =
 
     override this.ToString() = $"{this.Key}"
 
-// Currently the Cache itself exposes Metrics.Counters that count raw cache events: hits, misses, evictions etc.
-// This class observes those counters and keeps a snapshot of readings. For now this is used only to print cache stats in debug mode.
-// TODO: We could add some System.Diagnostics.Metrics.Gauge instruments to this class, to get computed stats also exposed as metrics.
-type CacheMetrics(cacheId: string) =
-    static let meter = new Meter("FSharp.Compiler.Cache")
-    static let observedCaches = ConcurrentDictionary<string, CacheMetrics>()
+module CacheMetrics =
+    let Meter = new Meter("FSharp.Compiler.Cache")
+    let adds = Meter.CreateCounter<int64>("adds", "count")
+    let updates = Meter.CreateCounter<int64>("updates", "count")
+    let hits = Meter.CreateCounter<int64>("hits", "count")
+    let misses = Meter.CreateCounter<int64>("misses", "count")
+    let evictions = Meter.CreateCounter<int64>("evictions", "count")
+    let evictionFails = Meter.CreateCounter<int64>("eviction-fails", "count")
 
-    let adds = meter.CreateCounter<int64>("adds", "count", cacheId)
-    let updates = meter.CreateCounter<int64>("updates", "count", cacheId)
-    let hits = meter.CreateCounter<int64>("hits", "count", cacheId)
-    let misses = meter.CreateCounter<int64>("misses", "count", cacheId)
-    let evictions = meter.CreateCounter<int64>("evictions", "count", cacheId)
-    let evictionFails = meter.CreateCounter<int64>("eviction-fails", "count", cacheId)
-    let creations = meter.CreateCounter<int64>("creations", "count", cacheId)
-    let disposals = meter.CreateCounter<int64>("disposals", "count", cacheId)
     let allCounters = [ adds; updates; hits; misses; evictions; evictionFails ]
 
-    let totals = Map [ for counter in allCounters -> counter.Name, ref 0L ]
+    let creations = Meter.CreateCounter<int64>("creations", "count")
+    let disposals = Meter.CreateCounter<int64>("disposals", "count")
+
+    let mkTag name = KeyValuePair<_, obj>("name", name)
+    
+    let Add (tag : KeyValuePair<_, _>) = adds.Add(1L, tag)
+    let Update (tag : KeyValuePair<_, _>) = updates.Add(1L, tag)
+    let Hit (tag : KeyValuePair<_, _>) = hits.Add(1L, tag)
+    let Miss (tag : KeyValuePair<_, _>) = misses.Add(1L, tag)
+    let Eviction (tag : KeyValuePair<_, _>) = evictions.Add(1L, tag)
+    let EvictionFail (tag : KeyValuePair<_, _>) = evictionFails.Add(1L, tag)
+    let Create (tag : KeyValuePair<_, _>) = creations.Add(1L, tag)
+    let Dispose (tag : KeyValuePair<_, _>) = disposals.Add(1L, tag)
+
+// Currently the Cache emits telemetry for raw cache events: hits, misses, evictions etc.
+// This class observes those counters and keeps a snapshot of readings. It is used in tests and can be used to print cache stats in debug mode.
+type CacheMetricsListener(cacheId) =
+    let totals = Map [ for counter in CacheMetrics.allCounters -> counter.Name, ref 0L ]
 
     let incr key v =
         Interlocked.Add(totals[key], v) |> ignore
@@ -80,56 +91,33 @@ type CacheMetrics(cacheId: string) =
     let mutable ratio = Double.NaN
 
     let updateRatio () =
-        ratio <- float (total hits.Name) / float (total hits.Name + total misses.Name)
+        ratio <- float (total CacheMetrics.hits.Name) / float (total CacheMetrics.hits.Name + total CacheMetrics.misses.Name)
 
-    let mutable listenerOpt = ValueNone
+    let listener = new MeterListener()
 
-    let startListening () =
-        let listener = new MeterListener()
+    let tag = CacheMetrics.mkTag cacheId
 
-        for i in allCounters do
-            listener.EnableMeasurementEvents i
+    do
 
-        listener.SetMeasurementEventCallback(fun instrument v _ _ ->
-            incr instrument.Name v
+        for instrument in CacheMetrics.allCounters do
+            listener.EnableMeasurementEvents instrument
 
-            if instrument = hits || instrument = misses then
-                updateRatio ())
+        listener.SetMeasurementEventCallback(fun instrument v tags _ ->
+            if tags[0] = tag then
+                incr instrument.Name v
+                if instrument = CacheMetrics.hits || instrument = CacheMetrics.misses then
+                    updateRatio ())
 
         listener.Start()
-        listenerOpt <- ValueSome listener
 
-    let tag = KeyValuePair<_, obj>("cacheId", cacheId)
+    member _.Dispose() =
+        listener.Dispose()
 
-    member _.Add() = adds.Add(1L, tag)
-    member _.Update() = updates.Add(1L, tag)
-    member _.Hit() = hits.Add(1L, tag)
-    member _.Miss() = misses.Add(1L, tag)
-    member _.Eviction() = evictions.Add(1L, tag)
-    member _.EvictionFail() = evictionFails.Add(1L, tag)
-    member _.Creation() = creations.Add(1L, tag)
-    member _.Disposal() = disposals.Add(1L, tag)
-
-    member this.ObserveMetrics() =
-        observedCaches[cacheId] <- this
-        startListening ()
-
-    member this.Dispose() =
-        observedCaches.TryRemove cacheId |> ignore
-        listenerOpt |> ValueOption.iter _.Dispose()
-
-    member _.GetInstanceTotals() =
+    member _.GetTotals() =
         [ for k in totals.Keys -> k, total k ] |> Map.ofList
 
-    member _.GetInstanceStats() = [ "hit-ratio", ratio ] |> Map.ofList
+    member _.GetStats() = [ "hit-ratio", ratio ] |> Map.ofList
 
-    static member val Meter = meter
-
-    static member GetTotals(cacheId) =
-        observedCaches[cacheId].GetInstanceTotals()
-
-    static member GetStats(cacheId) =
-        observedCaches[cacheId].GetInstanceStats()
 
 [<RequireQualifiedAccess>]
 type EvictionMechanism =
@@ -161,11 +149,8 @@ type EvictionQueueMessage<'Entity, 'Target> =
 [<DebuggerDisplay("{GetStats()}")>]
 type Cache<'Key, 'Value when 'Key: not null> internal (totalCapacity: int, headroom, comparer, name, listen, mechanism) =
 
-    let metrics = new CacheMetrics(name)
-
-    do
-        if listen then
-            metrics.ObserveMetrics()
+    let listener = 
+        if listen then CacheMetricsListener(name) |> ValueSome else ValueNone
 
     let mutable store =
         ConcurrentDictionary<'Key, CachedEntity<'Key, 'Value>>(Environment.ProcessorCount, totalCapacity, comparer)
@@ -177,6 +162,8 @@ type Cache<'Key, 'Value when 'Key: not null> internal (totalCapacity: int, headr
 
     let evicted = Event<_>()
     let evictionFailed = Event<_>()
+
+    let tag = CacheMetrics.mkTag name
 
     // Track disposal state (0 = not disposed, 1 = disposed)
     let mutable disposed = 0
@@ -209,10 +196,10 @@ type Cache<'Key, 'Value when 'Key: not null> internal (totalCapacity: int, headr
 
                 match store.TryRemove(first.Value.Key) with
                 | true, _ ->
-                    metrics.Eviction()
+                    CacheMetrics.Eviction tag
                     evicted.Trigger()
                 | _ ->
-                    metrics.EvictionFail()
+                    CacheMetrics.EvictionFail tag
                     evictionFailed.Trigger()
                     deadKeysCount <- deadKeysCount + 1
 
@@ -260,7 +247,7 @@ type Cache<'Key, 'Value when 'Key: not null> internal (totalCapacity: int, headr
 
             post, dispose
 
-    do metrics.Creation()
+    do CacheMetrics.Create tag
 
     member val Evicted = evicted.Publish
     member val EvictionFailed = evictionFailed.Publish
@@ -268,12 +255,12 @@ type Cache<'Key, 'Value when 'Key: not null> internal (totalCapacity: int, headr
     member _.TryGetValue(key: 'Key, value: outref<'Value>) =
         match store.TryGetValue(key) with
         | true, entity ->
-            metrics.Hit()
+            CacheMetrics.Hit tag
             post (EvictionQueueMessage.Update entity)
             value <- entity.Value
             true
         | _ ->
-            metrics.Miss()
+            CacheMetrics.Miss tag
             value <- Unchecked.defaultof<'Value>
             false
 
@@ -283,7 +270,7 @@ type Cache<'Key, 'Value when 'Key: not null> internal (totalCapacity: int, headr
         let added = store.TryAdd(key, entity)
 
         if added then
-            metrics.Add()
+            CacheMetrics.Add tag
             post (EvictionQueueMessage.Add(entity, store))
 
         added
@@ -300,11 +287,11 @@ type Cache<'Key, 'Value when 'Key: not null> internal (totalCapacity: int, headr
 
         if wasMiss then
             post (EvictionQueueMessage.Add(result, store))
-            metrics.Add()
-            metrics.Miss()
+            CacheMetrics.Add tag
+            CacheMetrics.Miss tag
         else
             post (EvictionQueueMessage.Update result)
-            metrics.Hit()
+            CacheMetrics.Hit tag
 
         result.Value
 
@@ -319,19 +306,21 @@ type Cache<'Key, 'Value when 'Key: not null> internal (totalCapacity: int, headr
 
         // Returned value tells us if the entity was added or updated.
         if Object.ReferenceEquals(addValue, result) then
-            metrics.Add()
+            CacheMetrics.Add tag
             post (EvictionQueueMessage.Add(addValue, store))
         else
-            metrics.Update()
+            CacheMetrics.Update tag
             post (EvictionQueueMessage.Update result)
+
+    member _.Metrics = if listen then listener.Value else failwith "Metrics not observed"
 
     // Private dispose method to handle cleanup (thread-safe)
     member private this.Dispose(disposing: bool) =
         if Interlocked.Exchange(&disposed, 1) = 0 then
             if Interlocked.Exchange(&disposed, 1) = 0 && disposing then
                 disposeEvictionProcessor ()
-                metrics.Disposal()
-                metrics.Dispose()
+                CacheMetrics.Dispose tag
+                listener |> ValueOption.iter _.Dispose()
 
     interface IDisposable with
         member this.Dispose() =

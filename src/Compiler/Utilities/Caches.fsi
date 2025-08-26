@@ -16,6 +16,14 @@ type internal CacheOptions =
 
     static member Default: CacheOptions
 
+module internal CacheMetrics =
+    val Meter: Meter
+
+[<Class>]
+type internal CacheMetricsListener =
+    member GetStats: unit -> Map<string, float>
+    member GetTotals: unit -> Map<string, int64>
+
 module internal Cache =
     val OverrideCapacityForTesting: unit -> unit
 
@@ -34,6 +42,8 @@ type internal Cache<'Key, 'Value when 'Key: not null> =
     member Evicted: IEvent<unit>
     member EvictionFailed: IEvent<unit>
 
+    member Metrics: CacheMetricsListener
+
     static member Create<'Key, 'Value> :
         options: CacheOptions *
         ?comparer: IEqualityComparer<'Key> *
@@ -42,8 +52,3 @@ type internal Cache<'Key, 'Value when 'Key: not null> =
         ?noEviction: bool ->
             Cache<'Key, 'Value>
 
-[<Class>]
-type internal CacheMetrics =
-    static member Meter: Meter
-    static member GetStats: cacheId: string -> Map<string, float>
-    static member GetTotals: cacheId: string -> Map<string, int64>
