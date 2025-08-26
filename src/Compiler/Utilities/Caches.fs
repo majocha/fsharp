@@ -138,7 +138,7 @@ module Cache =
 
     /// Use for testing purposes to reduce memory consumption in testhost and its subprocesses.
     let OverrideCapacityForTesting () =
-        Environment.SetEnvironmentVariable(overrideVariable, "512", EnvironmentVariableTarget.Process)
+        Environment.SetEnvironmentVariable(overrideVariable, "4096", EnvironmentVariableTarget.Process)
 
     let applyOverride capacity =
         match Int32.TryParse(Environment.GetEnvironmentVariable(overrideVariable)) with
@@ -346,6 +346,7 @@ type Cache<'Key, 'Value when 'Key: not null> internal (totalCapacity: int, headr
             | _ -> EvictionMechanism.MailboxProcessor
 
         let totalCapacity = Cache.applyOverride options.TotalCapacity
+
         // Determine evictable headroom as the percentage of total capcity, since we want to not resize the dictionary.
         let headroom = int (float totalCapacity * float options.HeadroomPercentage / 100.0)
 
@@ -354,4 +355,3 @@ type Cache<'Key, 'Value when 'Key: not null> internal (totalCapacity: int, headr
         let comparer = defaultArg comparer EqualityComparer<'Key>.Default
 
         new Cache<'Key, 'Value>(totalCapacity, headroom, comparer, name, observeMetrics, mechanism)
-

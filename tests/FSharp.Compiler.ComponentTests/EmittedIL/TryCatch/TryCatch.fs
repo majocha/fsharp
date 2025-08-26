@@ -64,8 +64,7 @@ module TryCatch =
            File.Copy(fsharpCoreFile, Path.Combine(Path.GetDirectoryName(dllFile), Path.GetFileName(fsharpCoreFile)), true)
            let result = CompilerAssert.ExecuteAndReturnResult (dllFile, isFsx=false, deps = s.Dependencies, newProcess=true)
 
-           if not (result.StdErr.Contains "stack overflow" || result.StdErr.Contains "StackOverflow") then
-                failwith $"Expected stack overflow exception, got: STDERR:\n {result.StdErr} STDOUT:\n {result.StdOut}"
+           Assert.True(result.StdErr.Contains "stack overflow" || result.StdErr.Contains "StackOverflow")
 
         | _ -> failwith (sprintf "%A" compilationResult)
 
