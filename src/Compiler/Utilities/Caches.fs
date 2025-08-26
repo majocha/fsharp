@@ -314,23 +314,19 @@ type Cache<'Key, 'Value when 'Key: not null> internal (totalCapacity: int, headr
 
     member _.Metrics = if listen then listener.Value else failwith "Metrics not observed"
 
-    // Private dispose method to handle cleanup (thread-safe)
-    member private this.Dispose(disposing: bool) =
+    member _.Dispose() =
         if Interlocked.Exchange(&disposed, 1) = 0 then
-            if Interlocked.Exchange(&disposed, 1) = 0 && disposing then
-                disposeEvictionProcessor ()
-                CacheMetrics.Dispose tag
-                listener |> ValueOption.iter _.Dispose()
+            disposeEvictionProcessor ()
+            CacheMetrics.Dispose tag
+            listener |> ValueOption.iter _.Dispose()
 
     interface IDisposable with
         member this.Dispose() =
-            this.Dispose(true)
+            this.Dispose()
             GC.SuppressFinalize(this)
 
-    member this.Dispose() = this.Dispose(true)
-
-    // Finalizer to ensure cleanup if Dispose is not called
-    override this.Finalize() = this.Dispose(false)
+    // Finalizer to ensure eviction loop is cancelled if Dispose wasn't called.
+    override this.Finalize() = this.Dispose()
 
     static member Create<'Key, 'Value>(options: CacheOptions, ?comparer: IEqualityComparer<'Key>, ?name, ?observeMetrics, ?noEviction) =
         if options.TotalCapacity < 0 then

@@ -18,16 +18,7 @@ let shouldNeverTimeout = 200_000
 let ``Create and dispose many`` () =
     let caches = 
         [ for _  in 1 .. 100 do
-            Cache.Create<string, int>(CacheOptions.Default, observeMetrics = true) ]
-
-    for c in caches do
-        c.Dispose()
-
-[<Fact>]
-let ``Create and dispose many named`` () =
-    let caches = 
-        [ for i in 1 .. 100 do
-            Cache.Create<string, int>(CacheOptions.Default, name = $"testCache{i}", observeMetrics = true) ]
+            Cache.Create<string, int>(CacheOptions.Default, name = "Create and dispose many", observeMetrics = true) ]
 
     for c in caches do
         c.Dispose()
