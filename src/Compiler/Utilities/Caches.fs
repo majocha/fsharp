@@ -66,6 +66,8 @@ type CacheMetrics(cacheId: string) =
     let misses = meter.CreateCounter<int64>("misses", "count", cacheId)
     let evictions = meter.CreateCounter<int64>("evictions", "count", cacheId)
     let evictionFails = meter.CreateCounter<int64>("eviction-fails", "count", cacheId)
+    let creations = meter.CreateCounter<int64>("creations", "count", cacheId)
+    let disposals = meter.CreateCounter<int64>("disposals", "count", cacheId)
     let allCounters = [ adds; updates; hits; misses; evictions; evictionFails ]
 
     let totals = Map [ for counter in allCounters -> counter.Name, ref 0L ]
@@ -80,9 +82,11 @@ type CacheMetrics(cacheId: string) =
     let updateRatio () =
         ratio <- float (total hits.Name) / float (total hits.Name + total misses.Name)
 
-    let listener = new MeterListener()
+    let mutable listenerOpt = ValueNone
 
     let startListening () =
+        let listener = new MeterListener()
+
         for i in allCounters do
             listener.EnableMeasurementEvents i
 
@@ -93,6 +97,7 @@ type CacheMetrics(cacheId: string) =
                 updateRatio ())
 
         listener.Start()
+        listenerOpt <- ValueSome listener
 
     let tag = KeyValuePair<_, obj>("cacheId", cacheId)
 
@@ -102,6 +107,8 @@ type CacheMetrics(cacheId: string) =
     member _.Miss() = misses.Add(1L, tag)
     member _.Eviction() = evictions.Add(1L, tag)
     member _.EvictionFail() = evictionFails.Add(1L, tag)
+    member _.Creation() = creations.Add(1L, tag)
+    member _.Disposal() = disposals.Add(1L, tag)
 
     member this.ObserveMetrics() =
         observedCaches[cacheId] <- this
@@ -109,7 +116,7 @@ type CacheMetrics(cacheId: string) =
 
     member this.Dispose() =
         observedCaches.TryRemove cacheId |> ignore
-        listener.Dispose()
+        listenerOpt |> ValueOption.iter _.Dispose()
 
     member _.GetInstanceTotals() =
         [ for k in totals.Keys -> k, total k ] |> Map.ofList
@@ -253,6 +260,8 @@ type Cache<'Key, 'Value when 'Key: not null> internal (totalCapacity: int, headr
 
             post, dispose
 
+    do metrics.Creation()
+
     member val Evicted = evicted.Publish
     member val EvictionFailed = evictionFailed.Publish
 
@@ -321,6 +330,7 @@ type Cache<'Key, 'Value when 'Key: not null> internal (totalCapacity: int, headr
         if Interlocked.Exchange(&disposed, 1) = 0 then
             if Interlocked.Exchange(&disposed, 1) = 0 && disposing then
                 disposeEvictionProcessor ()
+                metrics.Disposal()
                 metrics.Dispose()
 
     interface IDisposable with
