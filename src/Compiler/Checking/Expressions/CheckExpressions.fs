@@ -956,9 +956,10 @@ let AdjustValSynInfoInSignature g ty (SynValInfo(argsData, retData) as sigMD) =
         sigMD
 
 let argInfoCache =
-    Caches.Cache.Create<_, ArgReprInfo>({Caches.CacheOptions.Default with TotalCapacity = 65536}, name = "argInfoCache")
+    Extras.LifetimeAssociation.attach <| fun () ->
+        Caches.Cache.Create<_, ArgReprInfo>(Caches.CacheOptions.Default, name = "argInfoCache", noEviction = true)
 
-let TranslateTopArgSynInfo _cenv isArg m tcAttributes (SynArgInfo(Attributes attrs, isOpt, nm)) =
+let TranslateTopArgSynInfo cenv isArg m tcAttributes (SynArgInfo(Attributes attrs, isOpt, nm)) =
     // Synthesize an artificial "OptionalArgument" attribute for the parameter
     let optAttrs =
         if isOpt then
@@ -985,7 +986,7 @@ let TranslateTopArgSynInfo _cenv isArg m tcAttributes (SynArgInfo(Attributes att
 
     let argInfo =
         match key with
-        | Some key -> argInfoCache.GetOrAdd(key, mkDefaultArgInfo)
+        | Some key -> (argInfoCache cenv).GetOrAdd(key, mkDefaultArgInfo)
         | _ -> mkDefaultArgInfo ()
 
     // Set freshly computed attribs in case they are different in the cache
