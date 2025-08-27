@@ -10,22 +10,6 @@ open System.Diagnostics.Metrics
 open System.Runtime.CompilerServices
 open System.Runtime.InteropServices.ComTypes
 
-[<Struct; RequireQualifiedAccess; NoComparison; NoEquality>]
-type CacheOptions =
-    {
-        /// Total capacity, determines the size of the underlying store.
-        TotalCapacity: int
-
-        /// Safety margin size as a percentage of TotalCapacity.
-        HeadroomPercentage: int
-    }
-
-    static member Default =
-        {
-            TotalCapacity = 1024
-            HeadroomPercentage = 50
-        }
-
 // It is important that this is not a struct, because LinkedListNode holds a reference to it,
 // and it holds the reference to that Node, in a circular way.
 [<Sealed; NoComparison; NoEquality>]
@@ -68,19 +52,19 @@ module CacheMetrics =
     let disposals = Meter.CreateCounter<int64>("disposals", "count")
 
     let mkTag name = KeyValuePair<_, obj>("name", name)
-    
-    let Add (tag : KeyValuePair<_, _>) = adds.Add(1L, tag)
-    let Update (tag : KeyValuePair<_, _>) = updates.Add(1L, tag)
-    let Hit (tag : KeyValuePair<_, _>) = hits.Add(1L, tag)
-    let Miss (tag : KeyValuePair<_, _>) = misses.Add(1L, tag)
-    let Eviction (tag : KeyValuePair<_, _>) = evictions.Add(1L, tag)
-    let EvictionFail (tag : KeyValuePair<_, _>) = evictionFails.Add(1L, tag)
-    let Create (tag : KeyValuePair<_, _>) = creations.Add(1L, tag)
-    let Dispose (tag : KeyValuePair<_, _>) = disposals.Add(1L, tag)
+
+    let Add (tag: KeyValuePair<_, _>) = adds.Add(1L, tag)
+    let Update (tag: KeyValuePair<_, _>) = updates.Add(1L, tag)
+    let Hit (tag: KeyValuePair<_, _>) = hits.Add(1L, tag)
+    let Miss (tag: KeyValuePair<_, _>) = misses.Add(1L, tag)
+    let Eviction (tag: KeyValuePair<_, _>) = evictions.Add(1L, tag)
+    let EvictionFail (tag: KeyValuePair<_, _>) = evictionFails.Add(1L, tag)
+    let Created (tag: KeyValuePair<_, _>) = creations.Add(1L, tag)
+    let Disposed (tag: KeyValuePair<_, _>) = disposals.Add(1L, tag)
 
 // Currently the Cache emits telemetry for raw cache events: hits, misses, evictions etc.
 // This class observes those counters and keeps a snapshot of readings. It is used in tests and can be used to print cache stats in debug mode.
-type CacheMetricsListener(cacheId) =
+type CacheMetricsListener(tag) =
     let totals = Map [ for counter in CacheMetrics.allCounters -> counter.Name, ref 0L ]
 
     let incr key v =
@@ -91,11 +75,11 @@ type CacheMetricsListener(cacheId) =
     let mutable ratio = Double.NaN
 
     let updateRatio () =
-        ratio <- float (total CacheMetrics.hits.Name) / float (total CacheMetrics.hits.Name + total CacheMetrics.misses.Name)
+        ratio <-
+            float (total CacheMetrics.hits.Name)
+            / float (total CacheMetrics.hits.Name + total CacheMetrics.misses.Name)
 
     let listener = new MeterListener()
-
-    let tag = CacheMetrics.mkTag cacheId
 
     do
 
@@ -105,25 +89,57 @@ type CacheMetricsListener(cacheId) =
         listener.SetMeasurementEventCallback(fun instrument v tags _ ->
             if tags[0] = tag then
                 incr instrument.Name v
+
                 if instrument = CacheMetrics.hits || instrument = CacheMetrics.misses then
                     updateRatio ())
 
         listener.Start()
 
-    member _.Dispose() =
-        listener.Dispose()
+    interface IDisposable with
+        member _.Dispose() = listener.Dispose()
 
     member _.GetTotals() =
         [ for k in totals.Keys -> k, total k ] |> Map.ofList
 
     member _.GetStats() = [ "hit-ratio", ratio ] |> Map.ofList
 
-
 [<RequireQualifiedAccess>]
-type EvictionMechanism =
+type EvictionMode =
     | NoEviction
     | Immediate
     | MailboxProcessor
+
+[<Struct; RequireQualifiedAccess; NoComparison; NoEquality>]
+type CacheOptions<'Key> =
+    {
+        /// Total capacity, determines the size of the underlying store.
+        TotalCapacity: int
+
+        /// Safety margin size as a percentage of TotalCapacity.
+        HeadroomPercentage: int
+
+        /// Mechanism to use for evicting items from the cache.
+        EvictionMode: EvictionMode
+
+        /// Comparer to use for keys.
+        Comparer: IEqualityComparer<'Key>
+    }
+
+module CacheOptions =
+    let getDefault() = {
+        CacheOptions.TotalCapacity = 1024
+        CacheOptions.HeadroomPercentage = 50
+        CacheOptions.EvictionMode = EvictionMode.MailboxProcessor
+        CacheOptions.Comparer = HashIdentity.Structural
+    }
+    let getReferenceIdentity () = {
+        CacheOptions.TotalCapacity = 1024
+        CacheOptions.HeadroomPercentage = 50
+        CacheOptions.EvictionMode = EvictionMode.MailboxProcessor
+        CacheOptions.Comparer = HashIdentity.Reference
+    }
+    let withNoEviction options = { options with CacheOptions.EvictionMode = EvictionMode.NoEviction }
+
 
 module Cache =
     // During testing a lot of compilations are started in app domains and subprocesses.
@@ -147,18 +163,29 @@ type EvictionQueueMessage<'Entity, 'Target> =
 
 [<Sealed; NoComparison; NoEquality>]
 [<DebuggerDisplay("{GetStats()}")>]
-type Cache<'Key, 'Value when 'Key: not null> internal (totalCapacity: int, headroom, comparer, name, listen, mechanism) =
+type Cache<'Key, 'Value when 'Key: not null> internal (options: CacheOptions<'Key>, ?name) =
 
-    let listener = 
-        if listen then CacheMetricsListener(name) |> ValueSome else ValueNone
+    do
+        if options.TotalCapacity < 0 then
+            invalidArg "Capacity" "Capacity must be positive"
+
+        if options.HeadroomPercentage < 0 then
+            invalidArg "HeadroomPercentage" "HeadroomPercentage must be positive"
+
+    let options = { options with TotalCapacity = Cache.applyOverride options.TotalCapacity }
+
+    let name = defaultArg name (Guid.NewGuid().ToString())
+
+    // Determine evictable headroom as the percentage of total capcity, since we want to not resize the dictionary.
+    let headroom = int (float options.TotalCapacity * float options.HeadroomPercentage / 100.0)
 
     let mutable store =
-        ConcurrentDictionary<'Key, CachedEntity<'Key, 'Value>>(Environment.ProcessorCount, totalCapacity, comparer)
+        ConcurrentDictionary<'Key, CachedEntity<'Key, 'Value>>(Environment.ProcessorCount, options.TotalCapacity, options.Comparer)
 
     let evictionQueue = LinkedList<CachedEntity<'Key, 'Value>>()
 
     // Non-evictable capacity.
-    let capacity = totalCapacity - headroom
+    let capacity = options.TotalCapacity - headroom
 
     let evicted = Event<_>()
     let evictionFailed = Event<_>()
@@ -174,7 +201,7 @@ type Cache<'Key, 'Value when 'Key: not null> internal (totalCapacity: int, headr
     // In such case we rebuild the store to remove dead keys.
     let rebuildStore () =
         let newStore =
-            ConcurrentDictionary<'Key, CachedEntity<'Key, 'Value>>(Environment.ProcessorCount, totalCapacity, comparer)
+            ConcurrentDictionary<'Key, CachedEntity<'Key, 'Value>>(Environment.ProcessorCount, options.TotalCapacity, options.Comparer)
 
         for entity in evictionQueue do
             newStore.TryAdd(entity.Key, entity) |> ignore
@@ -232,10 +259,10 @@ type Cache<'Key, 'Value when 'Key: not null> internal (totalCapacity: int, headr
         lock evictionQueue <| fun () -> processEvictionMessage msg
 
     let post, disposeEvictionProcessor =
-        match mechanism with
-        | EvictionMechanism.NoEviction -> ignore, ignore
-        | EvictionMechanism.Immediate -> immediate, ignore
-        | EvictionMechanism.MailboxProcessor ->
+        match options.EvictionMode with
+        | EvictionMode.NoEviction -> ignore, ignore
+        | EvictionMode.Immediate -> immediate, ignore
+        | EvictionMode.MailboxProcessor ->
             let cts = new CancellationTokenSource()
             let evictionProcessor = startEvictionProcessor cts.Token
             let post = evictionProcessor.Post
@@ -247,7 +274,7 @@ type Cache<'Key, 'Value when 'Key: not null> internal (totalCapacity: int, headr
 
             post, dispose
 
-    do CacheMetrics.Create tag
+    do CacheMetrics.Created tag
 
     member val Evicted = evicted.Publish
     member val EvictionFailed = evictionFailed.Publish
@@ -312,13 +339,12 @@ type Cache<'Key, 'Value when 'Key: not null> internal (totalCapacity: int, headr
             CacheMetrics.Update tag
             post (EvictionQueueMessage.Update result)
 
-    member _.Metrics = if listen then listener.Value else failwith "Metrics not observed"
+    member _.CreateMetricsListener() = new CacheMetricsListener(tag)
 
     member _.Dispose() =
         if Interlocked.Exchange(&disposed, 1) = 0 then
             disposeEvictionProcessor ()
-            CacheMetrics.Dispose tag
-            listener |> ValueOption.iter _.Dispose()
+            CacheMetrics.Disposed tag
 
     interface IDisposable with
         member this.Dispose() =
@@ -327,26 +353,3 @@ type Cache<'Key, 'Value when 'Key: not null> internal (totalCapacity: int, headr
 
     // Finalizer to ensure eviction loop is cancelled if Dispose wasn't called.
     override this.Finalize() = this.Dispose()
-
-    static member Create<'Key, 'Value>(options: CacheOptions, ?comparer: IEqualityComparer<'Key>, ?name, ?observeMetrics, ?noEviction) =
-        if options.TotalCapacity < 0 then
-            invalidArg "Capacity" "Capacity must be positive"
-
-        if options.HeadroomPercentage < 0 then
-            invalidArg "HeadroomPercentage" "HeadroomPercentage must be positive"
-
-        let mechanism =
-            match noEviction with
-            | Some true -> EvictionMechanism.NoEviction
-            | _ -> EvictionMechanism.MailboxProcessor
-
-        let totalCapacity = Cache.applyOverride options.TotalCapacity
-
-        // Determine evictable headroom as the percentage of total capcity, since we want to not resize the dictionary.
-        let headroom = int (float totalCapacity * float options.HeadroomPercentage / 100.0)
-
-        let name = defaultArg name (Guid.NewGuid().ToString())
-        let observeMetrics = defaultArg observeMetrics false
-        let comparer = defaultArg comparer EqualityComparer<'Key>.Default
-
-        new Cache<'Key, 'Value>(totalCapacity, headroom, comparer, name, observeMetrics, mechanism)

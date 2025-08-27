@@ -956,8 +956,8 @@ let AdjustValSynInfoInSignature g ty (SynValInfo(argsData, retData) as sigMD) =
         sigMD
 
 let argInfoCache =
-    Extras.LifetimeAssociation.attach <| fun () ->
-        Caches.Cache.Create<_, ArgReprInfo>(Caches.CacheOptions.Default, name = "argInfoCache", noEviction = true)
+    let options = Caches.CacheOptions.getDefault() |> Caches.CacheOptions.withNoEviction
+    LifetimeAssociation.attach <| fun () -> new Caches.Cache<_, ArgReprInfo>(options, "argInfoCache")
 
 let TranslateTopArgSynInfo cenv isArg m tcAttributes (SynArgInfo(Attributes attrs, isOpt, nm)) =
     // Synthesize an artificial "OptionalArgument" attribute for the parameter
@@ -4051,8 +4051,8 @@ type ImplicitlyBoundTyparsAllowed =
 // In order to avoid checking implicit-yield expressions multiple times, we cache the resulting checked expressions.
 // This avoids exponential behavior in the type checker when nesting implicit-yield expressions.
 let cachedImplicitYieldExpressions =
-    Extras.LifetimeAssociation.attach <| fun () ->
-        Caches.Cache.Create<SynExpr, _>(Caches.CacheOptions.Default, HashIdentity.Reference, "implicitYieldExpressions", noEviction = true)
+    let options = Caches.CacheOptions.getReferenceIdentity() |> Caches.CacheOptions.withNoEviction
+    LifetimeAssociation.attach <| fun () -> new Caches.Cache<SynExpr, _>(options, "implicitYieldExpressions")
 
 //-------------------------------------------------------------------------
 // Checking types and type constraints

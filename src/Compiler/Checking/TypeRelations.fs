@@ -61,8 +61,8 @@ type TTypeCacheKey =
     override this.ToString () = $"{this.ty1.DebugText}-{this.ty2.DebugText}"
 
 let typeSubsumptionCache =
-    Caches.Cache.Create<TTypeCacheKey, bool>({ TotalCapacity = 131072; HeadroomPercentage = 75 }, name = "typeSubsumptionCache")
-
+    let options = { Caches.CacheOptions.getDefault() with TotalCapacity = 131072; HeadroomPercentage = 75 }
+    new Caches.Cache<TTypeCacheKey, bool>(options, "typeSubsumptionCache")
 
 /// Implements a :> b without coercion based on finalized (no type variable) types
 // Note: This relation is approximate and not part of the language specification.

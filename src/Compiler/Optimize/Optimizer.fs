@@ -9,6 +9,7 @@ open Internal.Utilities.Collections
 open Internal.Utilities.Library
 open Internal.Utilities.Library.Extras
 open FSharp.Compiler
+open FSharp.Compiler.Caches
 open FSharp.Compiler.AbstractIL.Diagnostics
 open FSharp.Compiler.AbstractIL.IL
 open FSharp.Compiler.AttributeChecking
@@ -37,9 +38,8 @@ open System.Collections.ObjectModel
 let OptimizerStackGuardDepth = GetEnvInteger "FSHARP_Optimizer" 50
 
 let freeLocalsCache =
-    Extras.LifetimeAssociation.attach <| fun () ->
-        Caches.Cache.Create<_, _>({Caches.CacheOptions.Default with TotalCapacity = 8192}, name = "freeLocalsCache", noEviction = true)
-
+    let options = CacheOptions.getReferenceIdentity() |> CacheOptions.withNoEviction
+    LifetimeAssociation.attach <| fun () -> new Cache<_, _>(options,  "freeLocalsCache")
 
 let i_ldlen = [ I_ldlen; (AI_conv DT_I4) ] 
 
