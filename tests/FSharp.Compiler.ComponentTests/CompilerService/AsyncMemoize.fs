@@ -53,8 +53,6 @@ let expect next (expected: 't list) =
 let countOf value events =
     events |> Seq.filter (fst >> (=) value) |> Seq.length
 
-    events |> Seq.length
-
 let received event = function (a, _) :: _ when a = event -> true | _ -> false
 
 let internal wrapKey key =
