@@ -49,16 +49,16 @@ type AsyncLazy<'t> private (initial: AsyncLazyState<'t>, cancelUnawaited: bool, 
         | state -> state // Nothing more to do if state already transitioned.
 
     let detachable (work: Task<'t>) =
-        async {
+        async2 {
             try
-                let! ct = Async.CancellationToken
+                let ct = Async2.CancellationToken
                 // Using ContinueWith with a CancellationToken allows detaching from the running 'work' task.
                 // If the current async workflow is canceled, the 'work' task will continue running independently.
-                do! work.ContinueWith(ignore<Task<'t>>, ct) |> Async.AwaitTask
+                do! work.ContinueWith(ignore<Task<'t>>, ct)
             with :? TaskCanceledException ->
                 ()
             // If we're here it means there was no cancellation and the 'work' task has completed.
-            return! work |> Async.AwaitTask
+            return! work
         }
 
     let onComplete (t: Task<'t>) =
@@ -85,15 +85,15 @@ type AsyncLazy<'t> private (initial: AsyncLazyState<'t>, cancelUnawaited: bool, 
 
             Running(computation, work, cts, 1), detachable work
         | Running(c, work, cts, count) -> Running(c, work, cts, count + 1), detachable work
-        | Completed result as state -> state, async { return result }
-        | Faulted exn as state -> state, async { return raise exn }
+        | Completed result as state -> state, async2 { return result }
+        | Faulted exn as state -> state, async2 { return raise exn }
 
     // computation will deallocate after state transition to Completed ot Faulted.
     new(computation, ?cancelUnawaited: bool, ?cacheException) =
         AsyncLazy(Initial computation, defaultArg cancelUnawaited true, defaultArg cacheException true)
 
     member _.Request() =
-        async {
+        async2 {
             try
                 return! withStateUpdate request
             finally
@@ -278,6 +278,10 @@ type internal AsyncMemoize<'TKey, 'TVersion, 'TValue
             | Ok result -> return result
             | Error exn -> return raise exn
         }
+
+    member this.GetAsync(key, computation: Async<_>) =
+        this.Get(key, async2 {return! computation})
+        |> Async2.toAsync
 
     member _.TryGet(key: 'TKey, predicate: 'TVersion -> bool) : 'TValue option =
         lock cache

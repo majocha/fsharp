@@ -2104,7 +2104,7 @@ type internal TransparentCompiler
         : Async2<FSharpParseFileResults> =
         let parseFileAsync =
             async2 {
-                let! ct = Async.CancellationToken
+                let ct = Async2.CancellationToken
 
                 let diagnostics, parsedInput, anyErrors =
                     ParseAndCheckFile.parseFile (sourceText, fileName, options, userOpName, false, flatErrors, false, ct)
