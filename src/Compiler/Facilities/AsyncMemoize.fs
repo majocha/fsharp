@@ -10,8 +10,8 @@ open FSharp.Compiler.DiagnosticsLogger
 open Internal.Utilities.Library
 
 type AsyncLazyState<'t> =
-    | Initial of computation: Async<'t>
-    | Running of initialComputation: Async<'t> * work: Task<'t> * CancellationTokenSource * requestCount: int
+    | Initial of computation: Async2<'t>
+    | Running of initialComputation: Async2<'t> * work: Task<'t> * CancellationTokenSource * requestCount: int
     | Completed of result: 't
     | Faulted of exn
 
@@ -79,7 +79,7 @@ type AsyncLazy<'t> private (initial: AsyncLazyState<'t>, cancelUnawaited: bool, 
             let cts = new CancellationTokenSource()
 
             let work =
-                Async
+                Async2
                     .StartAsTask(computation, cancellationToken = cts.Token)
                     .ContinueWith(onComplete, TaskContinuationOptions.NotOnCanceled)
 
@@ -176,7 +176,7 @@ type private KeyData<'TKey, 'TVersion> =
         Version: 'TVersion
     }
 
-type Job<'t> = AsyncLazy<Result<'t, exn> * CapturingDiagnosticsLogger>
+type internal Job<'t> = AsyncLazy<Result<'t, exn> * CapturingDiagnosticsLogger>
 
 [<DebuggerDisplay("{DebuggerDisplay}")>]
 type internal AsyncMemoize<'TKey, 'TVersion, 'TValue
@@ -224,14 +224,14 @@ type internal AsyncMemoize<'TKey, 'TVersion, 'TValue
             }
 
         let wrappedComputation =
-            Async.TryCancelled(
-                async {
+            Async2.TryCancelled(
+                async2 {
                     let sw = Stopwatch.StartNew()
                     log Started key
                     let logger = CapturingDiagnosticsLogger "cache"
                     SetThreadDiagnosticsLoggerNoUnwind logger
 
-                    match! computation |> Async.Catch with
+                    match! computation |> Async2.Catch with
                     | Choice1Of2 result ->
                         log Finished key
                         Interlocked.Add(&duration, sw.ElapsedMilliseconds) |> ignore
@@ -261,7 +261,7 @@ type internal AsyncMemoize<'TKey, 'TVersion, 'TValue
 
             cached |> Option.map countHit |> Option.defaultWith cacheSetNewJob
 
-        async {
+        async2 {
             let otherVersions, job = lock cache getOrAdd
 
             log Requested key
