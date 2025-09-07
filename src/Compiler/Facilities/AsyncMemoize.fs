@@ -8,6 +8,7 @@ open System.Runtime.CompilerServices
 
 open FSharp.Compiler.DiagnosticsLogger
 open Internal.Utilities.Library
+open System
 
 type AsyncLazyState<'t> =
     | Initial of computation: Async2<'t>
@@ -231,12 +232,16 @@ type internal AsyncMemoize<'TKey, 'TVersion, 'TValue
                     let logger = CapturingDiagnosticsLogger "cache"
                     SetThreadDiagnosticsLoggerNoUnwind logger
 
-                    match! computation |> Async2.Catch with
-                    | Choice1Of2 result ->
+                    try
+                        let! result = computation
                         log Finished key
                         Interlocked.Add(&duration, sw.ElapsedMilliseconds) |> ignore
                         return Result.Ok result, logger
-                    | Choice2Of2 exn ->
+                    with
+                    | :? OperationCanceledException ->
+                        log Canceled key
+                        return Unchecked.defaultof<_>
+                    | exn ->
                         log Failed key
                         return Result.Error exn, logger
                 },
