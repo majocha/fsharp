@@ -25,20 +25,19 @@ module CacheMetrics =
     let mutable private nextCacheId = 0
 
     let mkTags (name: string) =
-        let tagList = TagList()
-        tagList.Add("name", box name)
         let cacheId = Interlocked.Increment &nextCacheId
-        tagList.Add("cacheId", box cacheId)
-        tagList
+        [| "name", box name; "cacheId", box cacheId |]
+        |> Array.map KeyValuePair
+        |> TagList
 
-    let Add tags = adds.Add(1L, &tags)
-    let Update tags = updates.Add(1L, &tags)
-    let Hit tags = hits.Add(1L, &tags)
-    let Miss tags = misses.Add(1L, &tags)
-    let Eviction tags = evictions.Add(1L, &tags)
-    let EvictionFail tags = evictionFails.Add(1L, &tags)
-    let Created tags = creations.Add(1L, &tags)
-    let Disposed tags = disposals.Add(1L, &tags)
+    let Add (tags: inref<TagList>) = adds.Add(1L, &tags)
+    let Update (tags: inref<TagList>) = updates.Add(1L, &tags)
+    let Hit (tags: inref<TagList>) = hits.Add(1L, &tags)
+    let Miss (tags: inref<TagList>) = misses.Add(1L, &tags)
+    let Eviction (tags: inref<TagList>) = evictions.Add(1L, &tags)
+    let EvictionFail (tags: inref<TagList>) = evictionFails.Add(1L, &tags)
+    let Created (tags: inref<TagList>) = creations.Add(1L, &tags)
+    let Disposed (tags: inref<TagList>) = disposals.Add(1L, &tags)
 
     type Stats() =
         let totals = Map [ for counter in allCounters -> counter.Name, ref 0L ]
@@ -89,13 +88,16 @@ module CacheMetrics =
 
     let StatsToString () =
         let sb = Text.StringBuilder()
+        sb.AppendLine "Cache Metrics:" |> ignore
         for kv in statsByName do
-            sb.AppendFormat("Cache {0}: {1}", kv.Key, kv.Value.ToString()) |> ignore
-        sb.ToString()
+            sb.AppendLine $"Cache {kv.Key}: {kv.Value}" |> ignore
+        sb.AppendLine() |> ignore
+        string sb
 
     // Currently the Cache emits telemetry for raw cache events: hits, misses, evictions etc.
     // This type observes those counters and keeps a snapshot of readings. It is used in tests and can be used to print cache stats in debug mode.
     type CacheMetricsListener(cacheTags: TagList) =
+
         let stats = Stats()
         let listener = new MeterListener()
 
@@ -267,10 +269,10 @@ type Cache<'Key, 'Value when 'Key: not null> internal (options: CacheOptions<'Ke
 
                 match store.TryRemove(first.Value.Key) with
                 | true, _ ->
-                    CacheMetrics.Eviction tags
+                    CacheMetrics.Eviction &tags
                     evicted.Trigger()
                 | _ ->
-                    CacheMetrics.EvictionFail tags
+                    CacheMetrics.EvictionFail &tags
                     evictionFailed.Trigger()
                     deadKeysCount <- deadKeysCount + 1
 
@@ -322,7 +324,7 @@ type Cache<'Key, 'Value when 'Key: not null> internal (options: CacheOptions<'Ke
     let debugListener = new CacheMetrics.CacheMetricsListener(tags)
 #endif
 
-    do CacheMetrics.Created tags
+    do CacheMetrics.Created &tags
 
     member val Evicted = evicted.Publish
     member val EvictionFailed = evictionFailed.Publish
@@ -330,12 +332,12 @@ type Cache<'Key, 'Value when 'Key: not null> internal (options: CacheOptions<'Ke
     member _.TryGetValue(key: 'Key, value: outref<'Value>) =
         match store.TryGetValue(key) with
         | true, entity ->
-            CacheMetrics.Hit tags
+            CacheMetrics.Hit &tags
             post (EvictionQueueMessage.Update entity)
             value <- entity.Value
             true
         | _ ->
-            CacheMetrics.Miss tags
+            CacheMetrics.Miss &tags
             value <- Unchecked.defaultof<'Value>
             false
 
@@ -345,7 +347,7 @@ type Cache<'Key, 'Value when 'Key: not null> internal (options: CacheOptions<'Ke
         let added = store.TryAdd(key, entity)
 
         if added then
-            CacheMetrics.Add tags
+            CacheMetrics.Add &tags
             post (EvictionQueueMessage.Add(entity, store))
 
         added
@@ -362,11 +364,11 @@ type Cache<'Key, 'Value when 'Key: not null> internal (options: CacheOptions<'Ke
 
         if wasMiss then
             post (EvictionQueueMessage.Add(result, store))
-            CacheMetrics.Add tags    
-            CacheMetrics.Miss tags
+            CacheMetrics.Add &tags    
+            CacheMetrics.Miss &tags
         else
             post (EvictionQueueMessage.Update result)
-            CacheMetrics.Hit tags
+            CacheMetrics.Hit &tags
 
         result.Value
 
@@ -381,10 +383,10 @@ type Cache<'Key, 'Value when 'Key: not null> internal (options: CacheOptions<'Ke
 
         // Returned value tells us if the entity was added or updated.
         if Object.ReferenceEquals(addValue, result) then
-            CacheMetrics.Add tags
+            CacheMetrics.Add &tags
             post (EvictionQueueMessage.Add(addValue, store))
         else
-            CacheMetrics.Update tags
+            CacheMetrics.Update &tags
             post (EvictionQueueMessage.Update result)
 
     member _.CreateMetricsListener() = new CacheMetrics.CacheMetricsListener(tags)
@@ -392,7 +394,7 @@ type Cache<'Key, 'Value when 'Key: not null> internal (options: CacheOptions<'Ke
     member _.Dispose() =
         if Interlocked.Exchange(&disposed, 1) = 0 then
             disposeEvictionProcessor ()
-            CacheMetrics.Disposed tags
+            CacheMetrics.Disposed &tags
 
     interface IDisposable with
         member this.Dispose() =
