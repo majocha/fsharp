@@ -102,6 +102,7 @@ module FSharpOutputPane =
 
 module FSharpServiceTelemetry =
     open FSharp.Compiler.Caches
+    open System.Threading.Tasks
 
     let listen filter =
         let indent (activity: Activity) =
@@ -129,6 +130,14 @@ module FSharpServiceTelemetry =
             )
 
         ActivitySource.AddActivityListener(listener)
+
+    let periodicallyDisplayCacheStats() = backgroundTask {
+        CacheMetrics.ListenToAll()
+        while true do
+            do! Task.Delay(TimeSpan.FromSeconds 10.0)
+            FSharpOutputPane.logMsg "---- Cache Stats ----"
+            FSharpOutputPane.logMsg (CacheMetrics.StatsToString())
+    }
 
 #if DEBUG
     open OpenTelemetry.Resources
