@@ -95,17 +95,17 @@ module CacheMetrics =
 
     // Currently the Cache emits telemetry for raw cache events: hits, misses, evictions etc.
     // This type observes those counters and keeps a snapshot of readings. It is used in tests and can be used to print cache stats in debug mode.
-    type CacheMetricsListener(cacheTags) =
+    type CacheMetricsListener(cacheTags: TagList) =
         let stats = Stats()
         let listener = new MeterListener()
 
         do
-
             for instrument in allCounters do
                 listener.EnableMeasurementEvents instrument
 
             listener.SetMeasurementEventCallback(fun instrument v tags _ ->
-                if TagList tags = cacheTags then stats.Incr instrument.Name v)
+                let tagsMatch = tags[0] = cacheTags[0] && tags[1] = cacheTags[1]
+                if tagsMatch then stats.Incr instrument.Name v)
 
             listener.Start()
 
