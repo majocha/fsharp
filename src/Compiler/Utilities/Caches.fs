@@ -208,7 +208,7 @@ module CacheOptions =
 
     let getDefault comparer =
         {
-            CacheOptions.TotalCapacity = 1024
+            CacheOptions.TotalCapacity = 4096
             CacheOptions.HeadroomPercentage = 50
             CacheOptions.EvictionMode = defaultEvictionMode
             CacheOptions.Comparer = comparer
