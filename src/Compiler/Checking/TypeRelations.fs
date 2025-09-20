@@ -7,7 +7,7 @@ module internal FSharp.Compiler.TypeRelations
 open FSharp.Compiler.Features
 open Internal.Utilities.Collections
 open Internal.Utilities.Library
-open Internal.Utilities.TypeHashing.StructuralUtilities
+open Internal.Utilities.TypeHashing
 
 open FSharp.Compiler.DiagnosticsLogger
 open FSharp.Compiler.TcGlobals
