@@ -12,6 +12,7 @@ open FSharp.Compiler.TypedTreeBasics
 open FSharp.Compiler.TypedTreeOps
 open System.Collections.Immutable
 open System
+open System.Runtime.CompilerServices
 
 type ObserverVisibility =
     | PublicOnly
@@ -403,8 +404,6 @@ module StructuralUtilities =
         | MeasureRational of int * int
         | NeverEqual of never: NeverEqual
 
-    type TypeStructure = TypeToken array
-
     let inline toNullnessToken (n: Nullness) =
         match n.TryEvaluate() with
         | ValueSome k -> TypeToken.Nullness k
@@ -425,8 +424,7 @@ module StructuralUtilities =
                 TypeToken.MeasureRational (GetNumerator r, GetDenominator r)
         |]
 
-    let table =
-        new Cache<TType, _>(CacheOptions.getReferenceIdentity (), "accumulateTType")
+    let table = new ConditionalWeakTable<TType, _>()
 
     let rec private accumulateTTypeAux (ty: TType) =
         [|
@@ -469,7 +467,40 @@ module StructuralUtilities =
             | TType_measure m -> yield! accumulateMeasure m
         |]
 
-    and accumulateTType ty = table.GetOrAdd(ty, accumulateTTypeAux)
+    and accumulateTType ty =
+        match table.TryGetValue ty with
+        | (true, value) -> value
+        | _ ->
+            let tokens = accumulateTTypeAux ty
+            try table.Add(ty, tokens) with _ -> ()
+            tokens
+
+    [<Struct; NoComparison; CustomEquality>]
+    type TypeStructure =
+        | TypeStructure of WeakReference<TType> * int
+        override this.GetHashCode () =  
+            let (TypeStructure (_, h)) = this in h
+
+        static member Create(ty: TType) =
+            TypeStructure(WeakReference<TType>(ty), accumulateTType ty |> hash)
+
+        interface IEquatable<TypeStructure> with
+            member this.Equals that =
+                let (TypeStructure (wr1, _)) = this
+                let (TypeStructure (wr2, _)) = that
+                match wr1.TryGetTarget(), wr2.TryGetTarget() with
+                | (true, ty1), (true, ty2) ->
+                    if ty1 === ty2 then true
+                    else
+                        accumulateTType ty1 = accumulateTType ty2
+                | _ -> false
+
+        override this.Equals that =
+            match that with
+            | :? TypeStructure as that -> (this :> IEquatable<_>).Equals (that)
+            | _ -> false
 
     /// Get the full structure of a type as a sequence of tokens, suitable for equality
-    let inline getTypeStructure ty = accumulateTType ty
+    let inline getTypeStructure ty = TypeStructure.Create ty
+
+
