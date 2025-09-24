@@ -7,8 +7,13 @@ open System.Runtime.CompilerServices
 
 #nowarn 3513
 
-type Async2<'t> =
-    abstract Start: unit -> Task<'t>
+
+type IAsync2Invocation<'t> =
+    abstract Task: Task<'t>
+
+and Async2<'t> =
+    abstract StartImmediate: CancellationToken -> IAsync2Invocation<'t>
+    abstract TailCall: CancellationToken * TaskCompletionSource<'t> voption -> unit
     abstract GetAwaiter: unit -> TaskAwaiter<'t>
 
 module Async2Implementation =
@@ -21,11 +26,6 @@ module Async2Implementation =
     let failIfNot condition message =
         if not condition then
             failwith message
-
-    [<Struct>]
-    type Context = { Token: CancellationToken }
-
-    let currentContext = AsyncLocal<Context>()
 
     /// A structure that looks like an Awaiter
     type Awaiter<'Awaiter, 'TResult
@@ -81,6 +81,8 @@ module Async2Implementation =
             member _.UnsafeOnCompleted(continuation) = set continuation
 
         member this.Ref: ICriticalNotifyCompletion ref = ref this
+
+        member this.Set action = set action
 
         static member Current = holder.Value
 
@@ -145,16 +147,6 @@ module Async2Implementation =
             with exn ->
                 Throw exn
 
-    [<Struct; NoComparison>]
-    type Async2Impl<'T>(start: unit -> Task<'T>) =
-
-        interface Async2<'T> with
-
-            member _.Start() = start ()
-            member _.GetAwaiter() = (start ()).GetAwaiter()
-
-    //static let tailCallSource = AsyncLocal<TaskCompletionSource<'T> voption>()
-
     [<Struct>]
     type Async2Data<'t> =
         [<DefaultValue(false)>]
@@ -163,17 +155,42 @@ module Async2Implementation =
         [<DefaultValue(false)>]
         val mutable MethodBuilder: AsyncTaskMethodBuilder<'t>
 
+        [<DefaultValue(false)>]
+        val mutable TailCallSource: TaskCompletionSource<'t> voption
+
+        [<DefaultValue(false)>]
+        val mutable CancellationToken: CancellationToken
+
     type Async2StateMachine<'TOverall> = ResumableStateMachine<Async2Data<'TOverall>>
     type IAsync2StateMachine<'TOverall> = IResumableStateMachine<Async2Data<'TOverall>>
     type Async2ResumptionFunc<'TOverall> = ResumptionFunc<Async2Data<'TOverall>>
     type Async2ResumptionDynamicInfo<'TOverall> = ResumptionDynamicInfo<Async2Data<'TOverall>>
+
     type Async2Code<'TOverall, 'T> = ResumableCode<Async2Data<'TOverall>, 'T>
+
+    [<Struct; NoComparison>]
+    type Async2InvocationImpl<'t, 'm when 'm :> IAsyncStateMachine and 'm :> IAsync2StateMachine<'t>> =
+        [<DefaultValue(false)>]
+        val mutable Machine: 'm
+
+        interface IAsync2Invocation<'t> with
+            member inv.Task = inv.Machine.Data.MethodBuilder.Task
+
+    [<Struct; NoComparison>]
+    type Async2Impl<'t>(invoke: CancellationToken -> TaskCompletionSource<'t> voption -> IAsync2Invocation<'t>) =
+
+        interface Async2<'t> with
+            member _.StartImmediate ct = invoke ct ValueNone
+            member _.TailCall(ct, tc) =
+                BindContext.ResetBindCount()
+                invoke ct tc |> ignore
+            member _.GetAwaiter() = (invoke CancellationToken.None ValueNone).Task.GetAwaiter()
 
     [<AutoOpen>]
     module Async2Code =
         let inline filterCancellation ([<InlineIfLambda>] catch: exn -> Async2Code<_, _>) (exn: exn) =
             Async2Code(fun sm ->
-                let ct = currentContext.Value.Token
+                let ct = sm.Data.CancellationToken
 
                 match exn with
                 | :? OperationCanceledException as oce when ct.IsCancellationRequested || oce.CancellationToken = ct -> raise exn
@@ -181,7 +198,7 @@ module Async2Implementation =
 
         let inline throwIfCancellationRequested (code: Async2Code<_, _>) =
             Async2Code(fun sm ->
-                currentContext.Value.Token.ThrowIfCancellationRequested()
+                sm.Data.CancellationToken.ThrowIfCancellationRequested()
                 code.Invoke(&sm))
 
         let inline yieldOnBindLimit () =
@@ -238,7 +255,6 @@ module Async2Implementation =
         member inline _.For(sequence: seq<'T>, [<InlineIfLambda>] body: 'T -> Async2Code<'TOverall, unit>) : Async2Code<'TOverall, unit> =
             ResumableCode.For(sequence, fun x -> body x |> throwIfCancellationRequested)
 
-        [<NoEagerConstraintApplication>]
         static member inline BindDynamic
             (sm: byref<Async2StateMachine<_>>, awaiter, [<InlineIfLambda>] continuation: _ -> Async2Code<_, _>)
             =
@@ -254,9 +270,9 @@ module Async2Implementation =
                 sm.ResumptionDynamicInfo.ResumptionData <- awaiter :> ICriticalNotifyCompletion
                 false
 
-        [<NoEagerConstraintApplication>]
-        member inline _.Bind(awaiter, [<InlineIfLambda>] continuation: 'U -> Async2Code<'Data, 'T>) : Async2Code<'Data, 'T> =
+        member inline _.BindAwaiter(getAwaiter: CancellationToken -> Awaiter<_,_>, [<InlineIfLambda>] continuation: 'U -> Async2Code<'Data, 'T>) : Async2Code<'Data, 'T> =
             Async2Code(fun sm ->
+                let mutable awaiter = getAwaiter sm.Data.CancellationToken
                 if __useResumableCode then
                     if Awaiter.isCompleted awaiter then
                         continuation(ExceptionCache.GetResultOrThrow awaiter).Invoke(&sm)
@@ -266,14 +282,38 @@ module Async2Implementation =
                         if __stack_yield_fin then
                             continuation(ExceptionCache.GetResultOrThrow awaiter).Invoke(&sm)
                         else
-                            let mutable __stack_awaiter = awaiter
-                            sm.Data.MethodBuilder.AwaitUnsafeOnCompleted(&__stack_awaiter, &sm)
+                            sm.Data.MethodBuilder.AwaitUnsafeOnCompleted(&awaiter, &sm)
                             false
                 else
                     Async2Builder.BindDynamic(&sm, awaiter, continuation))
 
-        [<NoEagerConstraintApplication>]
-        member inline this.ReturnFrom(awaiter) : Async2Code<'T, 'T> = this.Bind(awaiter, this.Return)
+        member inline this.Bind(code: Async2<'U>, [<InlineIfLambda>] continuation: 'U -> Async2Code<'Data, 'T>) : Async2Code<'Data, 'T> =
+            this.BindAwaiter((fun ct -> code.StartImmediate(ct).Task.GetAwaiter()), continuation)
+
+        member inline this.Bind(getAwaiter, [<InlineIfLambda>] continuation) =
+            this.BindAwaiter(getAwaiter, continuation)
+
+        member inline this.ReturnFrom(code: Async2<'T>) : Async2Code<'T, 'T> = this.Bind(code, this.Return)
+
+        member inline this.ReturnFrom(awaiter) = this.BindAwaiter(awaiter, this.Return)
+
+        member inline this.ReturnFromFinal(code: Async2<'T>) =
+            Async2Code( fun sm ->
+                let ct = sm.Data.CancellationToken
+                BindContext.ResetBindCount()
+                match sm.Data.TailCallSource with
+                | ValueNone ->
+                    // This is the start of a tail call chain. we need to return here when the entire chain is done.
+                    let tcs = TaskCompletionSource<_>()
+                    Trampoline.Current.Set (fun () -> code.TailCall (ct, ValueSome tcs))
+                    this.BindAwaiter((fun _ -> tcs.Task.GetAwaiter()), this.Return).Invoke(&sm)
+                | ValueSome tcs ->
+                    // We are already in a tail call chain.
+                    Trampoline.Current.Set (fun () -> code.TailCall (ct, ValueSome tcs))
+                    false // Return false to abandon this state machine and continue on the next one.
+            )
+
+        member inline this.ReturnFromFinal(awaiter) : Async2Code<'T, 'T> = this.BindAwaiter(awaiter, this.Return)
 
         static member inline RunDynamic(code: Async2Code<'T, 'T>) : Async2<'T> =
             let initialResumptionFunc = Async2ResumptionFunc<'T>(fun sm -> code.Invoke &sm)
@@ -305,8 +345,14 @@ module Async2Implementation =
                             with exn ->
                                 state <- SetException(ExceptionCache.CaptureOrRetrieve exn)
                                 continuation <- BindContext.IncrementBindCountDynamic()
-                        | SetResult -> sm.Data.MethodBuilder.SetResult sm.Data.Result
-                        | SetException edi -> sm.Data.MethodBuilder.SetException(edi.SourceException)
+                        | SetResult ->
+                            match sm.Data.TailCallSource with
+                            | ValueSome tcs -> tcs.SetResult sm.Data.Result
+                            | _ -> sm.Data.MethodBuilder.SetResult sm.Data.Result
+                        | SetException edi ->
+                            match sm.Data.TailCallSource with
+                            | ValueSome tcs -> tcs.SetException(edi.SourceException)
+                            | _ -> sm.Data.MethodBuilder.SetException(edi.SourceException)
 
                         let continuation = continuation
 
@@ -323,13 +369,15 @@ module Async2Implementation =
                         sm.Data.MethodBuilder.SetStateMachine(state)
                 }
 
-            Async2Impl(fun () ->
+            Async2Impl(fun ct tc ->
                 let mutable copy = Async2StateMachine()
                 copy.ResumptionDynamicInfo <- resumptionInfo ()
                 copy.Data <- Async2Data()
+                copy.Data.CancellationToken <- ct
+                copy.Data.TailCallSource <- tc
                 copy.Data.MethodBuilder <- AsyncTaskMethodBuilder<'T>.Create()
                 copy.Data.MethodBuilder.Start(&copy)
-                copy.Data.MethodBuilder.Task)
+                Async2InvocationImpl<'T, _>(Machine = copy))
 
         member inline _.Run(code: Async2Code<'T, 'T>) : Async2<'T> =
             if __useResumableCode then
@@ -349,7 +397,9 @@ module Async2Implementation =
                                     let __stack_go2 = yieldOnBindLimit().Invoke(&sm)
 
                                     if __stack_go2 then
-                                        sm.Data.MethodBuilder.SetResult(sm.Data.Result)
+                                        match sm.Data.TailCallSource with
+                                        | ValueSome tcs -> tcs.SetResult sm.Data.Result
+                                        | _ -> sm.Data.MethodBuilder.SetResult(sm.Data.Result)
                             with exn ->
                                 error <- ValueSome(ExceptionCache.CaptureOrRetrieve exn)
 
@@ -357,23 +407,27 @@ module Async2Implementation =
                                 let __stack_go2 = yieldOnBindLimit().Invoke(&sm)
 
                                 if __stack_go2 then
-                                    sm.Data.MethodBuilder.SetException(error.Value.SourceException)))
+                                    match sm.Data.TailCallSource with
+                                    | ValueSome tcs -> tcs.SetException(error.Value.SourceException)
+                                    | _ -> sm.Data.MethodBuilder.SetException(error.Value.SourceException)))
 
                     (SetStateMachineMethodImpl<_>(fun sm state -> sm.Data.MethodBuilder.SetStateMachine state))
 
                     (AfterCode<_, _>(fun sm ->
                         let sm = sm
 
-                        Async2Impl(fun () ->
+                        Async2Impl(fun ct tc ->
                             let mutable copy = sm
                             copy.Data <- Async2Data()
+                            copy.Data.CancellationToken <- ct
+                            copy.Data.TailCallSource <- tc
                             copy.Data.MethodBuilder <- AsyncTaskMethodBuilder<'T>.Create()
                             copy.Data.MethodBuilder.Start(&copy)
-                            copy.Data.MethodBuilder.Task)))
+                            Async2InvocationImpl<'T, _>(Machine = copy))))
             else
                 Async2Builder.RunDynamic(code)
 
-        member inline _.Source(code: Async2<_>) = code.Start().GetAwaiter()
+        member inline _.Source(code: Async2<_>) = code
 
 [<AutoOpen>]
 module Async2AutoOpens =
@@ -386,12 +440,10 @@ module Async2LowPriority =
     open Async2Implementation
 
     type Async2Builder with
-        member inline _.Source(awaitable: Awaitable<_, _, _>) = awaitable.GetAwaiter()
+        member inline _.Source(awaitable: Awaitable<_, _, _>) = fun (_: CancellationToken) -> awaitable.GetAwaiter()
 
         member inline this.Source(expr: Async<'T>) =
-            let ct = currentContext.Value.Token
-            let t = Async.StartAsTask(expr, cancellationToken = ct)
-            this.Source(t.ConfigureAwait(false))
+            fun (ct: CancellationToken) -> Async.StartAsTask(expr, cancellationToken = ct).GetAwaiter()
 
         member inline _.Source(items: _ seq) : _ seq = upcast items
 
@@ -400,65 +452,43 @@ module Async2MediumPriority =
     open Async2Implementation
 
     type Async2Builder with
-        member inline _.Source(task: Task) = task.ConfigureAwait(false).GetAwaiter()
-        member inline _.Source(task: Task<_>) = task.ConfigureAwait(false).GetAwaiter()
+        member inline _.Source(task: Task) = fun (_: CancellationToken) -> task.ConfigureAwait(false).GetAwaiter()
+        member inline _.Source(task: Task<_>) = fun (_: CancellationToken) -> task.ConfigureAwait(false).GetAwaiter()
 
 open Async2Implementation
 
-type Async2 =
-    static member CancellationToken = currentContext.Value.Token
-
-    static member UseTokenAsync() =
-        async {
-            let! ct = Async.CancellationToken
-            let old = currentContext.Value.Token
-            currentContext.Value <- { currentContext.Value with Token = ct }
-
-            return
-                { new IDisposable with
-                    member _.Dispose() =
-                        currentContext.Value <-
-                            { currentContext.Value with
-                                Token = old
-                            }
-                }
-        }
-
 module Async2 =
 
-    let inline startWithContext context (code: Async2<_>) =
-        let old = currentContext.Value
-        currentContext.Value <- context
+    let CheckAndThrowToken = AsyncLocal<CancellationToken>()
 
-        try
-            // Only bound computations can participate in trampolining, otherwise we risk sync over async deadlocks.
-            // To prevent this, we reset the bind count here.
-            // This computation will not initially bounce, even if it is nested inside another async2 computation.
-            BindContext.ResetBindCount()
-            code.Start()
-        finally
-            currentContext.Value <- old
+    let inline start (code: Async2<_>) ct =
+        CheckAndThrowToken.Value <- ct
+        // Only bound computations can participate in trampolining, otherwise we risk sync over async deadlocks.
+        // To prevent this, we reset the bind count here.
+        // This computation will not initially bounce, even if it is nested inside another async2 computation.
+        BindContext.ResetBindCount()
+        code.StartImmediate ct
 
     let run ct (code: Async2<'t>) =
-        let context = { Token = ct }
 
         if
             isNull SynchronizationContext.Current
             && TaskScheduler.Current = TaskScheduler.Default
         then
-            (code |> startWithContext context).GetAwaiter().GetResult()
+            start code ct |> _.Task.GetAwaiter().GetResult()
         else
-            Task.Run<'t>(fun () -> code |> startWithContext context).GetAwaiter().GetResult()
+            Task.Run<'t>(fun () -> start code ct |> _.Task).GetAwaiter().GetResult()
 
     let runWithoutCancellation code = run CancellationToken.None code
 
-    let startAsTaskWithoutCancellation code =
-        startWithContext { Token = CancellationToken.None } code
+    let startAsTaskWithoutCancellation code = start code CancellationToken.None
 
-    let startAsTask ct code = startWithContext { Token = ct } code
+    let startAsTask ct code = start code ct |> _.Task
+
+    let queue ct code = Task.Run(fun () -> start code ct)
 
     let queueTask ct code =
-        Task.Run<'t>(fun () -> startWithContext { Token = ct } code)
+        Task.Run<'t>(fun () -> startAsTask ct code)
 
     let toAsync (code: Async2<'t>) =
         async {
@@ -467,11 +497,11 @@ module Async2 =
             return! Async.AwaitTask task
         }
 
-    let fromValue (value: 't) : Async2<'t> =
-        let task = Task.FromResult value
-        Async2Impl(fun () -> task)
+    let fromValue (value: 't) : Async2<'t> = async2 { return value }
 
-type Async2 with
+    let CancellationToken = async2.Run(Async2Code( fun sm -> sm.Data.Result <- sm.Data.CancellationToken; true))
+
+type Async2 =
     static member Ignore(computation: Async2<_>) : Async2<unit> =
         async2 {
             let! _ = computation
@@ -492,7 +522,8 @@ type Async2 with
 
     static member Parallel(computations: Async2<_> seq) =
         async2 {
-            use lcts = CancellationTokenSource.CreateLinkedTokenSource Async2.CancellationToken
+            let! ct = Async2.CancellationToken
+            use lcts = CancellationTokenSource.CreateLinkedTokenSource ct
 
             let tasks =
                 seq {
@@ -532,7 +563,7 @@ type Async2 with
 
     static member TryCancelled(computation: Async2<'T>, compensation) =
         async2 {
-            let ct = Async2.CancellationToken
+            let! ct = Async2.CancellationToken
             let task = computation |> Async2.startAsTask ct
 
             try
@@ -544,21 +575,20 @@ type Async2 with
 
     static member StartChild(computation: Async2<'T>) : Async2<Async2<'T>> =
         async2 {
-            let ct = Async2.CancellationToken
-            let task = computation |> Async2.queueTask ct
-            return Async2Impl(fun () -> task)
+            let! ct = Async2.CancellationToken
+            return async2 { return! computation |> Async2.queueTask ct }
         }
 
     static member StartChildAsTask(computation: Async2<'T>) : Async2<Task<'T>> =
         async2 {
-            let ct = Async2.CancellationToken
+            let! ct = Async2.CancellationToken
             let task = computation |> Async2.queueTask ct
             return task
         }
 
     static member AwaitWaitHandle(waitHandle: WaitHandle) : Async2<bool> =
         async2 {
-            let ct = Async2.CancellationToken
+            let! ct = Async2.CancellationToken
 
             let tcs =
                 TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously)
