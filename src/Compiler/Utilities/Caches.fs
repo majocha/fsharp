@@ -221,6 +221,17 @@ type CachedEntity<'Key, 'Value> =
 
     member this.UpdateValue(value: 'Value) = this.value <- value
 
+    // Reinitialize for reuse from pool. Node stays bound to this entity and must not be in any list at call time.
+    member internal this.Reinit(key: 'Key, value: 'Value) =
+        assert (isNull this.Node.List)
+        this.key <- key
+        this.value <- value
+
+    // Clear references before putting the entity back to the pool.
+    member internal this.Clear() =
+        this.key <- Unchecked.defaultof<'Key>
+        this.value <- Unchecked.defaultof<'Value>
+
     static member Create(key: 'Key, value: 'Value) =
         let entity = CachedEntity(key, value)
         // The contract is that each CachedEntity always has a LinkedListNode referencing itself.
@@ -269,6 +280,34 @@ type Cache<'Key, 'Value when 'Key: not null> internal (options: CacheOptions<'Ke
 
     let mutable deadKeysCount = 0
 
+    // Simple, bounded, thread-safe pool of CachedEntity instances per Cache instance.
+    let pool = ConcurrentBag<CachedEntity<'Key, 'Value>>()
+    let mutable pooledCount = 0
+    // Limit pool size to headroom (evictable part of capacity). Adjust as needed.
+    let poolLimit = max 0 headroom
+
+    let tryRent (key: 'Key) (value: 'Value) =
+        let mutable entity = Unchecked.defaultof<CachedEntity<'Key, 'Value>>
+
+        if pool.TryTake(&entity) then
+            Interlocked.Decrement(&pooledCount) |> ignore
+            entity.Reinit(key, value)
+            entity
+        else
+            CachedEntity.Create(key, value)
+
+    let returnToPool (entity: CachedEntity<'Key, 'Value>) =
+        // Entity must not be part of any eviction list when returned to pool.
+        if isNull entity.Node.List then
+            entity.Clear()
+            let n = Interlocked.Increment(&pooledCount)
+
+            if n <= poolLimit then
+                pool.Add(entity)
+            else
+                // overflow: drop it
+                Interlocked.Decrement(&pooledCount) |> ignore
+
     // Keys with unreliable identity can prevent eviction, taking up space in the cache.
     // In such case we rebuild the store to remove dead keys.
     let rebuildStore () =
@@ -296,6 +335,8 @@ type Cache<'Key, 'Value when 'Key: not null> internal (options: CacheOptions<'Ke
                 match store.TryRemove(first.Value.Key) with
                 | true, _ ->
                     CacheMetrics.Eviction &tags
+                    // Entity is no longer in store and already removed from list: safe to pool.
+                    returnToPool first.Value
                     evicted.Trigger()
                 | _ ->
                     CacheMetrics.EvictionFail &tags
@@ -368,13 +409,16 @@ type Cache<'Key, 'Value when 'Key: not null> internal (options: CacheOptions<'Ke
             false
 
     member _.TryAdd(key: 'Key, value: 'Value) =
-        let entity = CachedEntity.Create(key, value)
+        let entity = tryRent key value
 
         let added = store.TryAdd(key, entity)
 
         if added then
             CacheMetrics.Add &tags
             post (EvictionQueueMessage.Add(entity, store))
+        else
+            // Lost the race; entity unused -> return to pool.
+            returnToPool entity
 
         added
 
@@ -388,7 +432,8 @@ type Cache<'Key, 'Value when 'Key: not null> internal (options: CacheOptions<'Ke
             entity.Value
         | _ ->
             // Slow path: compute and attempt to add without creating a delegate
-            let newEntity = CachedEntity.Create(key, valueFactory key)
+            let computed = valueFactory key
+            let newEntity = tryRent key computed
 
             if store.TryAdd(key, newEntity) then
                 post (EvictionQueueMessage.Add(newEntity, store))
@@ -396,7 +441,9 @@ type Cache<'Key, 'Value when 'Key: not null> internal (options: CacheOptions<'Ke
                 CacheMetrics.Miss &tags
                 newEntity.Value
             else
-                // Another thread won the race; treat as hit
+                // Another thread won the race; our entity not used -> return to pool
+                returnToPool newEntity
+                // Treat as hit
                 match store.TryGetValue(key) with
                 | true, existing ->
                     CacheMetrics.Hit &tags
@@ -425,7 +472,7 @@ type Cache<'Key, 'Value when 'Key: not null> internal (options: CacheOptions<'Ke
                     result.Value
 
     member _.AddOrUpdate(key, value) =
-        let addValue = CachedEntity.Create(key, value)
+        let addValue = tryRent key value
 
         let updateValue (_: 'Key) (oldEntity: CachedEntity<_, _>) =
             oldEntity.UpdateValue(value)
@@ -438,6 +485,8 @@ type Cache<'Key, 'Value when 'Key: not null> internal (options: CacheOptions<'Ke
             CacheMetrics.Add &tags
             post (EvictionQueueMessage.Add(addValue, store))
         else
+            // Update path: our addValue wasn't used, return it to pool.
+            returnToPool addValue
             CacheMetrics.Update &tags
             post (EvictionQueueMessage.Update result)
 
