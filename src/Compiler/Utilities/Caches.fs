@@ -378,25 +378,51 @@ type Cache<'Key, 'Value when 'Key: not null> internal (options: CacheOptions<'Ke
 
         added
 
+    // Optimized to not allocate a delegate on cache hits.
     member _.GetOrAdd(key, valueFactory) =
-        let mutable wasMiss = false
-
-        let makeEntity key =
-            wasMiss <- true
-            let entity = CachedEntity.Create(key, valueFactory key)
-            entity
-
-        let result = store.GetOrAdd(key, makeEntity)
-
-        if wasMiss then
-            post (EvictionQueueMessage.Add(result, store))
-            CacheMetrics.Add &tags
-            CacheMetrics.Miss &tags
-        else
-            post (EvictionQueueMessage.Update result)
+        // Fast path: no delegate allocation on cache hits
+        match store.TryGetValue(key) with
+        | true, entity ->
             CacheMetrics.Hit &tags
+            post (EvictionQueueMessage.Update entity)
+            entity.Value
+        | _ ->
+            // Slow path: compute and attempt to add without creating a delegate
+            let newEntity = CachedEntity.Create(key, valueFactory key)
 
-        result.Value
+            if store.TryAdd(key, newEntity) then
+                post (EvictionQueueMessage.Add(newEntity, store))
+                CacheMetrics.Add &tags
+                CacheMetrics.Miss &tags
+                newEntity.Value
+            else
+                // Another thread won the race; treat as hit
+                match store.TryGetValue(key) with
+                | true, existing ->
+                    CacheMetrics.Hit &tags
+                    post (EvictionQueueMessage.Update existing)
+                    existing.Value
+                | _ ->
+                    // Extremely rare race; fall back to a single GetOrAdd attempt
+                    let mutable created = false
+
+                    let result =
+                        store.GetOrAdd(
+                            key,
+                            (fun k ->
+                                created <- true
+                                CachedEntity.Create(k, valueFactory k))
+                        )
+
+                    if created then
+                        post (EvictionQueueMessage.Add(result, store))
+                        CacheMetrics.Add &tags
+                        CacheMetrics.Miss &tags
+                    else
+                        CacheMetrics.Hit &tags
+                        post (EvictionQueueMessage.Update result)
+
+                    result.Value
 
     member _.AddOrUpdate(key, value) =
         let addValue = CachedEntity.Create(key, value)
