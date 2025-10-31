@@ -17,8 +17,20 @@ module CacheMetrics =
     let misses = Meter.CreateCounter<int64>("misses", "count")
     let evictions = Meter.CreateCounter<int64>("evictions", "count")
     let evictionFails = Meter.CreateCounter<int64>("eviction-fails", "count")
+    let entityAllocations = Meter.CreateCounter<int64>("entity-allocations", "count")
+    let poolHits = Meter.CreateCounter<int64>("pool-hits", "count")
 
-    let allCounters = [ adds; updates; hits; misses; evictions; evictionFails ]
+    let allCounters =
+        [
+            adds
+            updates
+            hits
+            misses
+            evictions
+            evictionFails
+            entityAllocations
+            poolHits
+        ]
 
     let creations = Meter.CreateCounter<int64>("creations", "count")
     let disposals = Meter.CreateCounter<int64>("disposals", "count")
@@ -39,6 +51,8 @@ module CacheMetrics =
     let Miss (tags: inref<TagList>) = misses.Add(1L, &tags)
     let Eviction (tags: inref<TagList>) = evictions.Add(1L, &tags)
     let EvictionFail (tags: inref<TagList>) = evictionFails.Add(1L, &tags)
+    let EntityAllocation (tags: inref<TagList>) = entityAllocations.Add(1L, &tags)
+    let PoolHit (tags: inref<TagList>) = poolHits.Add(1L, &tags)
     let Created (tags: inref<TagList>) = creations.Add(1L, &tags)
     let Disposed (tags: inref<TagList>) = disposals.Add(1L, &tags)
 
@@ -291,9 +305,11 @@ type Cache<'Key, 'Value when 'Key: not null> internal (options: CacheOptions<'Ke
 
         if pool.TryTake(&entity) then
             Interlocked.Decrement(&pooledCount) |> ignore
+            CacheMetrics.PoolHit &tags
             entity.Reinit(key, value)
             entity
         else
+            CacheMetrics.EntityAllocation &tags
             CachedEntity.Create(key, value)
 
     let returnToPool (entity: CachedEntity<'Key, 'Value>) =
@@ -458,6 +474,7 @@ type Cache<'Key, 'Value when 'Key: not null> internal (options: CacheOptions<'Ke
                             key,
                             (fun k ->
                                 created <- true
+                                CacheMetrics.EntityAllocation &tags
                                 CachedEntity.Create(k, valueFactory k))
                         )
 
