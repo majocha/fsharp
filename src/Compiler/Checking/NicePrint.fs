@@ -724,7 +724,7 @@ module PrintTypes =
             (sprintf "%s%s%s"
                 (if denv.showStaticallyResolvedTyparAnnotations then prefixOfStaticReq typar.StaticReq else "'")
                 (if denv.showInferenceTyparAnnotations then prefixOfInferenceTypar typar else "")
-                typar.DisplayName)
+                (typar.DeclaredName |> Option.defaultValue typar.DisplayName))
         |> mkNav typar.Range
         |> wordL
 
