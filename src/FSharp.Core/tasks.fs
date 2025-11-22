@@ -23,6 +23,17 @@ open Microsoft.FSharp.Core.CompilerServices.StateMachineHelpers
 open Microsoft.FSharp.Core.LanguagePrimitives.IntrinsicOperators
 open Microsoft.FSharp.Collections
 
+module TailCallMap =
+    let private targets = ConditionalWeakTable<obj, obj>()
+
+    let AddTarget(source: Task<'T>, target: obj) =
+        targets.Add(source, target)
+
+    let TryGetTarget(source: Task<'T>) : obj option =
+        match targets.TryGetValue(source) with
+        | true, target -> Some target
+        | _ -> None
+
 /// The extra data stored in ResumableStateMachine for tasks
 [<Struct; NoComparison; NoEquality>]
 type TaskStateMachineData<'T> =
@@ -364,6 +375,19 @@ module LowPriority =
 
             this.Bind(task, this.Return)
 
+        [<NoEagerConstraintApplication>]
+        member inline this.ReturnFromFinal< ^TaskLike, ^Awaiter, 'T
+            when ^TaskLike: (member GetAwaiter: unit -> ^Awaiter)
+            and ^Awaiter :> ICriticalNotifyCompletion
+            and ^Awaiter: (member get_IsCompleted: unit -> bool)
+            and ^Awaiter: (member GetResult: unit -> 'T)>
+            (task: ^TaskLike)
+            : TaskCode<'T, 'T> =
+
+            TaskCode(fun sm ->
+                TailCallMap.AddTarget(sm.Data.MethodBuilder.Task, task)
+                false)
+
         member inline _.Using<'Resource, 'TOverall, 'T when 'Resource :> IDisposable | null>
             (resource: 'Resource, body: 'Resource -> TaskCode<'TOverall, 'T>)
             =
@@ -464,6 +488,11 @@ module HighPriority =
         member inline this.ReturnFrom(task: Task<'T>) : TaskCode<'T, 'T> =
             this.Bind(task, this.Return)
 
+        member inline this.ReturnFromFinal(task: Task<'T>) : TaskCode<'T, 'T> =
+            TaskCode(fun sm ->
+                TailCallMap.AddTarget(sm.Data.MethodBuilder.Task, task)
+                false)
+
     type TaskBuilder with
 
         // This overload is required for type inference in tasks cases
@@ -506,6 +535,9 @@ module MediumPriority =
 
         member inline this.ReturnFrom(computation: Async<'T>) : TaskCode<'T, 'T> =
             this.ReturnFrom(Async.StartImmediateAsTask computation)
+
+        member inline this.ReturnFromFinal(computation: Async<'T>) : TaskCode<'T, 'T> =
+            this.ReturnFromFinal(Async.StartImmediateAsTask computation)
 
     type TaskBuilder with
 
