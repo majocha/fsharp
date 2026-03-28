@@ -2154,6 +2154,8 @@ type ILMethodDef
     member x.IsPreserveSig =
         x.ImplAttributes &&& MethodImplAttributes.PreserveSig <> enum 0
 
+    member x.IsAsync = x.ImplAttributes &&& enum<MethodImplAttributes> 0x2000 <> enum 0
+
     member x.IsSynchronized =
         x.ImplAttributes &&& MethodImplAttributes.Synchronized <> enum 0
 
@@ -2206,6 +2208,9 @@ type ILMethodDef
 
     member x.WithPreserveSig(condition) =
         x.With(implAttributes = (x.ImplAttributes |> conditionalAdd condition MethodImplAttributes.PreserveSig))
+
+    member x.WithAsync(condition) =
+        x.With(implAttributes = (x.ImplAttributes |> conditionalAdd condition (enum<MethodImplAttributes> 0x2000)))
 
     member x.WithSynchronized(condition) =
         x.With(implAttributes = (x.ImplAttributes |> conditionalAdd condition MethodImplAttributes.Synchronized))

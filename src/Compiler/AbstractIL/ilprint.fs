@@ -617,6 +617,8 @@ let goutput_mbody is_entrypoint env os (md: ILMethodDef) =
 
     output_string os (if md.IsManaged then "managed " else " ")
 
+    output_string os (if md.IsAsync then "async " else " ")
+
     output_string os (if md.IsForwardRef then "forwardref " else " ")
 
     output_string os " \n{ \n"

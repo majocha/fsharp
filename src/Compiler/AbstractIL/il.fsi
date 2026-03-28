@@ -1178,6 +1178,8 @@ type ILMethodDef =
 
     member IsPreserveSig: bool
 
+    member IsAsync: bool
+
     member IsSynchronized: bool
 
     member IsNoInline: bool
@@ -1223,6 +1225,8 @@ type ILMethodDef =
     member internal WithPInvoke: bool -> ILMethodDef
 
     member internal WithPreserveSig: bool -> ILMethodDef
+
+    member internal WithAsync: bool -> ILMethodDef
 
     member internal WithSynchronized: bool -> ILMethodDef
 

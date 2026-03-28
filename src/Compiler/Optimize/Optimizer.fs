@@ -3037,6 +3037,21 @@ and CopyExprForInlining cenv isInlineIfLambda expr (m: range) =
         |> copyExpr g CloneAllAndMarkExprValsAsCompilerGenerated
         |> remarkExpr m
 
+/// Check if a Val has MethodImplOptions.Async (0x2000).
+and HasMethodImplAsyncFlag (g: TcGlobals) (v: Val) =
+    match v.Attribs with
+    | ValAttribInt g WellKnownValAttributes.MethodImplAttribute flags -> (flags &&& 0x2000) <> 0x0
+    | _ -> false
+
+/// Runtime-async methods contain Await intrinsics that are only valid inside async methods.
+/// Returns true if the callee is async but the enclosing function is not, meaning inlining
+/// the body would place Await calls in a non-async context.
+and IsAsyncIntoNonAsyncContext (g: TcGlobals) (env: IncrementalOptimizationEnv) (calleeVal: Val) =
+    HasMethodImplAsyncFlag g calleeVal &&
+    (match env.functionVal with
+     | Some (callerVal, _) -> not (HasMethodImplAsyncFlag g callerVal)
+     | None -> true)
+
 /// Make optimization decisions once we know the optimization information
 /// for a value
 and TryOptimizeVal cenv env (vOpt: ValRef option, shouldInline, inlineIfLambda, valInfoForVal, m) = 
@@ -3073,6 +3088,10 @@ and TryOptimizeVal cenv env (vOpt: ValRef option, shouldInline, inlineIfLambda, 
         Some (remarkExpr m (copyExpr g CloneAllAndMarkExprValsAsCompilerGenerated expr))
 
     | CurriedLambdaValue (_, _, _, expr, _) when shouldInline || inlineIfLambda ->
+        // Don't inline a runtime-async method into a non-async caller.
+        match vOpt with
+        | Some v when IsAsyncIntoNonAsyncContext g env v.Deref -> None
+        | _ ->
         let fvs = freeInExpr CollectLocals expr
         if fvs.UsesMethodLocalConstructs then
             // Discarding lambda for binding because uses protected members --- TBD: Should we warn or error here
@@ -3489,6 +3508,14 @@ and TryInlineApplication cenv env finfo (tyargs: TType list, args: Expr list, m)
             | _ -> false
 
         if isApplicationPartialExpr then None else
+
+        // Don't inline a runtime-async method into a non-async caller.
+        let isAsyncIntoNonAsync =
+            match finfo.Info with
+            | ValValue(vref, _) -> IsAsyncIntoNonAsyncContext g env vref.Deref
+            | _ -> false
+
+        if isAsyncIntoNonAsync then None else
 
         // Inlining lambda 
         let f2R = CopyExprForInlining cenv false f2 m

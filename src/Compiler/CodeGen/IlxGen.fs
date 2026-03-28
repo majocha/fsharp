@@ -9294,10 +9294,11 @@ and ComputeMethodImplAttribs cenv (_v: Val) attrs =
             attrs
 
     let hasPreserveSigImplFlag = ((implflags &&& 0x80) <> 0x0) || hasPreserveSigAttr
+    let hasAsyncImplFlag = (implflags &&& 0x2000) <> 0x0
     let hasSynchronizedImplFlag = (implflags &&& 0x20) <> 0x0
     let hasNoInliningImplFlag = (implflags &&& 0x08) <> 0x0
     let hasAggressiveInliningImplFlag = (implflags &&& 0x0100) <> 0x0
-    hasPreserveSigImplFlag, hasSynchronizedImplFlag, hasNoInliningImplFlag, hasAggressiveInliningImplFlag, attrs
+    hasPreserveSigImplFlag, hasAsyncImplFlag, hasSynchronizedImplFlag, hasNoInliningImplFlag, hasAggressiveInliningImplFlag, attrs
 
 and GenMethodForBinding
     cenv
@@ -9484,7 +9485,7 @@ and GenMethodForBinding
         | _ -> [], None
 
     // check if the hasPreserveSigNamedArg and hasSynchronizedImplFlag implementation flags have been specified
-    let hasPreserveSigImplFlag, hasSynchronizedImplFlag, hasNoInliningFlag, hasAggressiveInliningImplFlag, attrs =
+    let hasPreserveSigImplFlag, hasAsyncImplFlag, hasSynchronizedImplFlag, hasNoInliningFlag, hasAggressiveInliningImplFlag, attrs =
         ComputeMethodImplAttribs cenv v attrs
 
     let securityAttributes, attrs =
@@ -9767,6 +9768,7 @@ and GenMethodForBinding
                 .WithSecurity(not (List.isEmpty securityAttributes))
                 .WithPInvoke(hasDllImport)
                 .WithPreserveSig(hasPreserveSigImplFlag || hasPreserveSigNamedArg)
+                .WithAsync(hasAsyncImplFlag)
                 .WithSynchronized(hasSynchronizedImplFlag)
                 .WithNoInlining(hasNoInliningFlag)
                 .WithAggressiveInlining(hasAggressiveInliningImplFlag)
@@ -10843,7 +10845,7 @@ and GenAbstractBinding cenv eenv tref (vref: ValRef) =
     let memberInfo = Option.get vref.MemberInfo
     let attribs = vref.Attribs
 
-    let hasPreserveSigImplFlag, hasSynchronizedImplFlag, hasNoInliningFlag, hasAggressiveInliningImplFlag, attribs =
+    let hasPreserveSigImplFlag, hasAsyncImplFlag, hasSynchronizedImplFlag, hasNoInliningFlag, hasAggressiveInliningImplFlag, attribs =
         ComputeMethodImplAttribs cenv vref.Deref attribs
 
     if memberInfo.MemberFlags.IsDispatchSlot && not memberInfo.IsImplemented then
@@ -10894,6 +10896,7 @@ and GenAbstractBinding cenv eenv tref (vref: ValRef) =
             mdef
                 .WithFinal(memberInfo.MemberFlags.IsFinal)
                 .WithPreserveSig(hasPreserveSigImplFlag)
+                .WithAsync(hasAsyncImplFlag)
                 .WithSynchronized(hasSynchronizedImplFlag)
                 .WithNoInlining(hasNoInliningFlag)
                 .WithAggressiveInlining(hasAggressiveInliningImplFlag)
