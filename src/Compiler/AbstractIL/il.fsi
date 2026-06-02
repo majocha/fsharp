@@ -1187,6 +1187,9 @@ type ILMethodDef =
     /// SafeHandle finalizer must be run.
     member IsMustRun: bool
 
+    /// https://github.com/dotnet/runtime/blob/main/docs/design/specs/runtime-async.md
+    member IsAsync: bool
+    
     /// Functional update of the value
     member internal With:
         ?name: string *
@@ -1229,6 +1232,8 @@ type ILMethodDef =
     member internal WithNoInlining: bool -> ILMethodDef
 
     member internal WithAggressiveInlining: bool -> ILMethodDef
+
+    member internal WithAsync: bool -> ILMethodDef
 
     member internal WithRuntime: bool -> ILMethodDef
 
