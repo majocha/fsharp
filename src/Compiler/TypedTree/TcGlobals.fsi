@@ -434,6 +434,8 @@ type internal TcGlobals =
 
     member cgh__stateMachine_vref: TypedTree.ValRef
 
+    member cgh__runtimeAsync_vref: TypedTree.ValRef
+
     member cgh__useResumableCode_vref: TypedTree.ValRef
 
     member char_operator_info: IntrinsicValRef

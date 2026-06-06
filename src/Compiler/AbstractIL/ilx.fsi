@@ -120,7 +120,8 @@ type IlxClosureInfo =
     { cloStructure: IlxClosureLambdas
       cloFreeVars: IlxClosureFreeVar[]
       cloCode: InterruptibleLazy<ILMethodBody>
-      cloUseStaticField: bool }
+      cloUseStaticField: bool
+      cloIsRuntimeAsync: bool }
 
 /// Represents a discriminated union type prior to erasure
 type IlxUnionInfo =

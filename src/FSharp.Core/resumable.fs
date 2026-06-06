@@ -110,6 +110,15 @@ module StateMachineHelpers =
         failwith
             "__stateMachine should always be guarded by __useResumableCode and only used in valid state machine implementations"
 
+[<AutoOpen>]
+module RuntimeAsyncHelpers =
+
+    [<MethodImpl(MethodImplOptions.NoInlining)>]
+    let __runtimeAsync<'T, 'U> (expr: 'T) : 'U =
+        ignore expr
+        failwith
+            "__runtimeAsync unexpectedly not erased"
+
 module ResumableCode =
     open System.Runtime.ExceptionServices
 

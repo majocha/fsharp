@@ -168,6 +168,7 @@ type IlxClosureInfo =
         cloFreeVars: IlxClosureFreeVar[]
         cloCode: InterruptibleLazy<ILMethodBody>
         cloUseStaticField: bool
+        cloIsRuntimeAsync: bool
     }
 
 type IlxUnionInfo =

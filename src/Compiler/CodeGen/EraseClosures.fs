@@ -394,6 +394,9 @@ let convMethodDef thisClo (md: ILMethodDef) =
     let b' = convMethodBody thisClo md.Body
     md.With(body = notlazy b')
 
+let applyRuntimeAsyncFlag (clo: IlxClosureInfo) (md: ILMethodDef) =
+    if clo.cloIsRuntimeAsync then md.WithAsync(true) else md
+
 // --------------------------------------------------------------------
 // Make fields for free variables of a type abstraction.
 //   REVIEW: change type abstractions to use other closure mechanisms.
@@ -576,6 +579,7 @@ let rec convIlxClosureDef cenv encl (td: ILTypeDef) clo =
                         mkILReturn cenv.ilg.typ_Object,
                         MethodBody.IL(notlazy convil)
                     )
+                    |> applyRuntimeAsyncFlag clo
 
                 let ctorMethodDef =
                     mkILStorageCtor (
@@ -722,6 +726,7 @@ let rec convIlxClosureDef cenv encl (td: ILTypeDef) clo =
                             mkILReturn fixedNowReturnTy,
                             MethodBody.IL(notlazy convil)
                         )
+                        |> applyRuntimeAsyncFlag clo
 
                     let ctorMethodDef =
                         mkILStorageCtor (

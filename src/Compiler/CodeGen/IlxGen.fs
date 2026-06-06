@@ -1021,6 +1021,9 @@ type IlxClosureInfo =
         /// The whole expression for the closure
         cloExpr: Expr
 
+        /// Indicates the generated closure method should be emitted with the async IL flag.
+        isRuntimeAsync: bool
+
         /// The name of the generated closure class
         cloName: string
 
@@ -1050,6 +1053,22 @@ type IlxClosureInfo =
         ilCloLambdas: IlxClosureLambdas
 
     }
+
+let private isLambdaExpr expr =
+    match expr with
+    | Expr.Lambda _
+    | Expr.TyLambda _ -> true
+    | _ -> false
+
+[<return: Struct>]
+let private (|RuntimeAsyncLambdaExpr|_|) (g: TcGlobals) expr =
+    let rec loop isRuntimeAsync expr =
+        match stripDebugPoints expr with
+        | ValApp g g.cgh__runtimeAsync_vref (_, [ innerExpr ], _m) -> loop true innerExpr
+        | expr when isLambdaExpr expr -> ValueSome(isRuntimeAsync, expr)
+        | _ -> ValueNone
+
+    loop false expr
 
 //--------------------------------------------------------------------------
 // ValStorage
@@ -3151,6 +3170,9 @@ and GenExprAux (cenv: cenv) (cgbuf: CodeGenBuffer) eenv expr (sequel: sequel) =
 
         | Expr.LetRec(binds, body, m, _) -> GenLetRec cenv cgbuf eenv (binds, body, m) sequel
 
+        | Expr.App(Expr.Val(vref, _, _), _, _, [ arg ], _) when valRefEq g vref g.cgh__runtimeAsync_vref && isLambdaExpr arg ->
+            GenLambda cenv cgbuf eenv false [] expr sequel
+
         | Expr.Lambda _
         | Expr.TyLambda _ -> GenLambda cenv cgbuf eenv false [] expr sequel
 
@@ -4389,6 +4411,9 @@ and GenApp (cenv: cenv) cgbuf eenv (f, fty, tyargs, curriedArgs, m) sequel =
         GenExpr cenv cgbuf eenv arg2 Continue
         CG.EmitInstr cgbuf (pop 2) (Push [ g.ilg.typ_Bool ]) AI_ceq
         GenSequel cenv eenv.cloc cgbuf sequel
+
+    | Expr.Val(v, _, _), _, [ arg ] when valRefEq g v g.cgh__runtimeAsync_vref ->
+        GenExpr cenv cgbuf eenv arg sequel
 
     | Expr.Val(v, _, m), _, _ when
         valRefEq g v g.cgh__resumeAt_vref
@@ -6632,7 +6657,8 @@ and GenObjectExpr cenv cgbuf eenvouter objExpr (baseType, baseValOpt, basecall, 
              mimpls,
              super,
              interfaceTys,
-             Some cloinfo.cloSpec)
+             Some cloinfo.cloSpec,
+             cloinfo.isRuntimeAsync)
 
     for cloTypeDef in cloTypeDefs do
         cgbuf.mgbuf.AddTypeDef(ilCloTypeRef, cloTypeDef, false, false, None)
@@ -6830,7 +6856,8 @@ and GenSequenceExpr
              [],
              ilCloBaseTy,
              [],
-             Some ilxCloSpec)
+             Some ilxCloSpec,
+             false)
 
     for cloTypeDef in cloTypeDefs do
         cgbuf.mgbuf.AddTypeDef(ilCloTypeRef, cloTypeDef, false, false, None)
@@ -6863,7 +6890,8 @@ and GenClosureTypeDefs
         mimpls,
         ext,
         ilIntfTys,
-        cloSpec: IlxClosureSpec option
+        cloSpec: IlxClosureSpec option,
+        isRuntimeAsync
     ) =
     let g = cenv.g
 
@@ -6876,6 +6904,7 @@ and GenClosureTypeDefs
                 (match cloSpec with
                  | None -> false
                  | Some cloSpec -> cloSpec.UseStaticField)
+            cloIsRuntimeAsync = isRuntimeAsync
         }
 
     let mdefs, fdefs =
@@ -6935,12 +6964,36 @@ and GenClosureTypeDefs
 
 and GenStaticDelegateClosureTypeDefs
     cenv
-    (tref: ILTypeRef, ilGenParams, attrs, ilCloAllFreeVars, ilCloLambdas, ilCtorBody, mdefs, mimpls, ext, ilIntfTys, staticCloInfo)
+    (
+        tref: ILTypeRef,
+        ilGenParams,
+        attrs,
+        ilCloAllFreeVars,
+        ilCloLambdas,
+        ilCtorBody,
+        mdefs,
+        mimpls,
+        ext,
+        ilIntfTys,
+        staticCloInfo,
+        isRuntimeAsync
+    )
     =
     let tdefs =
         GenClosureTypeDefs
             cenv
-            (tref, ilGenParams, attrs, ilCloAllFreeVars, ilCloLambdas, ilCtorBody, mdefs, mimpls, ext, ilIntfTys, staticCloInfo)
+            (tref,
+             ilGenParams,
+             attrs,
+             ilCloAllFreeVars,
+             ilCloLambdas,
+             ilCtorBody,
+             mdefs,
+             mimpls,
+             ext,
+             ilIntfTys,
+             staticCloInfo,
+             isRuntimeAsync)
 
     // Apply the abstract attribute, turning the sealed class into abstract sealed (i.e. static class).
     // Remove the redundant constructor.
@@ -7013,7 +7066,8 @@ and GenClosureAsLocalTypeFunction cenv (cgbuf: CodeGenBuffer) eenv thisVars expr
              [],
              g.ilg.typ_Object,
              [],
-             Some cloinfo.cloSpec)
+             Some cloinfo.cloSpec,
+             cloinfo.isRuntimeAsync)
 
     cloinfo, ilCloTypeRef, cloTypeDefs
 
@@ -7044,13 +7098,19 @@ and GenClosureAsFirstClassFunction cenv (cgbuf: CodeGenBuffer) eenv thisVars m e
              [],
              g.ilg.typ_Object,
              [],
-             Some cloinfo.cloSpec)
+             Some cloinfo.cloSpec,
+             cloinfo.isRuntimeAsync)
 
     cloinfo, ilCloTypeRef, cloTypeDefs
 
 /// Generate the closure class for a function
 and GenLambdaClosure cenv (cgbuf: CodeGenBuffer) eenv isLocalTypeFunc thisVars expr =
-    match expr with
+    let _, lambdaExpr =
+        match expr with
+        | RuntimeAsyncLambdaExpr cenv.g (isRuntimeAsync, lambdaExpr) -> isRuntimeAsync, lambdaExpr
+        | _ -> false, expr
+
+    match lambdaExpr with
     | Expr.Lambda(_, _, _, _, _, m, _)
     | Expr.TyLambda(_, _, _, m, _) ->
 
@@ -7262,6 +7322,11 @@ and GetIlxClosureFreeVars cenv m (thisVars: ValRef list) boxity eenv takenNames 
 and GetIlxClosureInfo cenv m boxity isLocalTypeFunc canUseStaticField thisVars eenvouter expr =
     let g = cenv.g
 
+    let isRuntimeAsync, expr =
+        match expr with
+        | RuntimeAsyncLambdaExpr g (isRuntimeAsync, lambdaExpr) -> isRuntimeAsync, lambdaExpr
+        | _ -> false, expr
+
     let returnTy =
         match expr with
         | Expr.Lambda(_, _, _, _, _, _, returnTy)
@@ -7335,6 +7400,7 @@ and GetIlxClosureInfo cenv m boxity isLocalTypeFunc canUseStaticField thisVars e
     let cloinfo =
         {
             cloExpr = expr
+            isRuntimeAsync = isRuntimeAsync
             cloName = ilCloTypeRef.Name
             cloArityInfo = narginfo
             ilCloLambdas = ilCloLambdas
@@ -7458,7 +7524,8 @@ and GenDelegateExpr cenv cgbuf eenvouter expr (TObjExprMethod(slotsig, _attribs,
              [],
              g.ilg.typ_Object,
              [],
-             None)
+             None,
+             false)
 
     for cloTypeDef in cloTypeDefs do
         cgbuf.mgbuf.AddTypeDef(ilDelegeeTypeRef, cloTypeDef, false, false, None)

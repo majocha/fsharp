@@ -193,6 +193,11 @@ module StateMachineHelpers =
         afterCode: AfterCode<'Data, 'Result> 
             -> 'Result
 
+[<AutoOpen>]
+module RuntimeAsyncHelpers =
+    [<MethodImpl(MethodImplOptions.NoInlining)>]
+    val __runtimeAsync<'T, 'U> : expr: 'T -> 'U
+
 /// <summary>Adding this attribute to the method adjusts the processing of some generic methods
 /// during overload resolution.</summary>
 ///

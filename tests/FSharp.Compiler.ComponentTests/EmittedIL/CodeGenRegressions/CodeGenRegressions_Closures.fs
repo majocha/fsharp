@@ -424,3 +424,35 @@ let runAll (fArr: (int -> int) array) x =
         ]
         |> ignore
 
+    [<Fact>]
+    let ``__runtimeAsync sets cil managed async flag and is erased`` () =
+        let source =
+            """
+module Test
+
+open Microsoft.FSharp.Core.CompilerServices
+
+let asyncF = __runtimeAsync (fun (x: int) -> x + 1)
+"""
+
+        let result =
+            FSharp source
+            |> asLibrary
+            |> compile
+            |> shouldSucceed
+
+        // Ensure "async" implementation flag is set on the Invoke method
+        result
+        |> verifyIL [
+            "Invoke"
+            "cil managed async"
+        ]
+        |> ignore
+
+        // Ensure that __runtimeAsync is erased and not present as a method call in IL
+        result
+        |> verifyILNotPresent [
+            "__runtimeAsync"
+        ]
+        |> ignore
+

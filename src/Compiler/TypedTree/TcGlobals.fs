@@ -576,6 +576,7 @@ type TcGlobals(
   let fslib_MFNativePtrModule_nleref               = mkNestedNonLocalEntityRef fslib_MFNativeInterop_nleref "NativePtrModule"
   let fslib_MFOptionModule_nleref              = mkNestedNonLocalEntityRef fslib_MFCore_nleref "OptionModule"
   let fslib_MFStateMachineHelpers_nleref            = mkNestedNonLocalEntityRef fslib_MFCompilerServices_nleref "StateMachineHelpers"
+  let fslib_MFRuntimeAsyncHelpers_nleref            = mkNestedNonLocalEntityRef fslib_MFCompilerServices_nleref "RuntimeAsyncHelpers"
   let fslib_MFRuntimeHelpers_nleref            = mkNestedNonLocalEntityRef fslib_MFCompilerServices_nleref "RuntimeHelpers"
   let fslib_MFQuotations_nleref                = mkNestedNonLocalEntityRef fslib_MF_nleref "Quotations"
 
@@ -868,6 +869,7 @@ type TcGlobals(
   let v_cgh__debugPoint_info       = makeIntrinsicValRef(fslib_MFStateMachineHelpers_nleref,                   "__debugPoint"                         , None                 , None          , [vara],     ([[v_int_ty]; [varaTy]], varaTy))
   let v_cgh__resumeAt_info         = makeIntrinsicValRef(fslib_MFStateMachineHelpers_nleref,                   "__resumeAt"                           , None                 , None          , [vara],     ([[v_int_ty]; [varaTy]], varaTy))
   let v_cgh__stateMachine_info     = makeIntrinsicValRef(fslib_MFStateMachineHelpers_nleref,                   "__stateMachine"                       , None                 , None          , [vara; varb],     ([[varaTy]], varbTy)) // inaccurate type but it doesn't matter for linking
+  let v_cgh__runtimeAsync_info     = makeIntrinsicValRef(fslib_MFRuntimeAsyncHelpers_nleref,                  "__runtimeAsync"                       , None                 , None          , [vara; varb],     ([[varaTy]], varbTy))
   let v_cgh__resumableEntry_info   = makeIntrinsicValRef(fslib_MFStateMachineHelpers_nleref,                   "__resumableEntry"                     , None                 , None          , [vara],     ([[v_int_ty --> varaTy]; [v_unit_ty --> varaTy]], varaTy))
   let v_seq_to_array_info          = makeIntrinsicValRef(fslib_MFSeqModule_nleref,                             "toArray"                              , None                 , Some "ToArray", [varb],     ([[mkSeqTy varbTy]], mkArrayType 1 varbTy))
   let v_seq_to_list_info           = makeIntrinsicValRef(fslib_MFSeqModule_nleref,                             "toList"                               , None                 , Some "ToList" , [varb],     ([[mkSeqTy varbTy]], mkListTy varbTy))
@@ -1754,6 +1756,7 @@ type TcGlobals(
 
 
   member val cgh__stateMachine_vref = ValRefForIntrinsic v_cgh__stateMachine_info
+  member val cgh__runtimeAsync_vref = ValRefForIntrinsic v_cgh__runtimeAsync_info
   member val cgh__useResumableCode_vref = ValRefForIntrinsic v_cgh__useResumableCode_info
   member val cgh__debugPoint_vref = ValRefForIntrinsic v_cgh__debugPoint_info
   member val cgh__resumeAt_vref = ValRefForIntrinsic v_cgh__resumeAt_info
