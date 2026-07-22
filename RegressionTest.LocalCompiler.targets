@@ -1,0 +1,25 @@
+<Project>
+  <UsingTask TaskName="Fsc" AssemblyFile="$(RegressionTestLocalCompilerTaskAssembly)" Override="true" />
+  <UsingTask TaskName="ResolveLocalFSharpCoreReference" AssemblyFile="$(RegressionTestLocalCompilerTaskAssembly)" />
+
+  <Target Name="UseRegressionTestLocalFSharpCoreReference" BeforeTargets="ResolveAssemblyReferences" Condition="'$(MSBuildProjectExtension)' == '.fsproj'">
+    <ResolveLocalFSharpCoreReference
+      LocalFSharpCompilerPath="$(LocalFSharpCompilerPath)"
+      LocalFSharpCompilerConfiguration="$(LocalFSharpCompilerConfiguration)"
+      TargetFramework="$(TargetFramework)"
+      TargetFrameworkIdentifier="$(TargetFrameworkIdentifier)"
+      TargetFrameworkVersion="$(TargetFrameworkVersion)">
+      <Output TaskParameter="ResolvedFSharpCorePath" PropertyName="RegressionTestLocalFSharpCorePath" />
+    </ResolveLocalFSharpCoreReference>
+
+    <Error Condition="'$(RegressionTestLocalFSharpCorePath)' == '' or !Exists('$(RegressionTestLocalFSharpCorePath)')" Text="The local FSharp.Core override could not be resolved for '$(MSBuildProjectName)'." />
+
+    <ItemGroup>
+      <Reference Remove="@(Reference)" Condition="'%(Reference.Identity)' == 'FSharp.Core' or '%(Reference.FileName)' == 'FSharp.Core' or '%(Reference.NuGetPackageId)' == 'FSharp.Core'" />
+      <Reference Include="FSharp.Core">
+        <HintPath>$(RegressionTestLocalFSharpCorePath)</HintPath>
+        <Private>true</Private>
+      </Reference>
+    </ItemGroup>
+  </Target>
+</Project>

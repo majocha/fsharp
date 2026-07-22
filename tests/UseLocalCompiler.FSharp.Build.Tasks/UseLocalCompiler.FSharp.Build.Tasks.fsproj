@@ -16,6 +16,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <Compile Include="ResolveLocalFSharpCoreReference.fs" />
     <Compile Include="Fsc.fs" />
   </ItemGroup>
 

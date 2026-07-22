@@ -1,0 +1,10 @@
+<Project>
+  <PropertyGroup>
+    <LoadLocalFSharpBuild Condition="'$(LoadLocalFSharpBuild)' == ''">False</LoadLocalFSharpBuild>
+    <LocalFSharpCompilerConfiguration Condition="'$(LocalFSharpCompilerConfiguration)' == ''">Release</LocalFSharpCompilerConfiguration>
+    <LocalFSharpCompilerPath Condition="'$(LocalFSharpCompilerPath)' == ''">$(MSBuildThisFileDirectory)</LocalFSharpCompilerPath>
+    <RegressionTestLocalCompilerTaskAssembly Condition="'$(RegressionTestLocalCompilerTaskAssembly)' == ''">$([System.IO.Path]::Combine('$(LocalFSharpCompilerPath)', 'artifacts', 'bin', 'UseLocalCompiler.FSharp.Build.Tasks', '$(LocalFSharpCompilerConfiguration)', 'netstandard2.0', 'UseLocalCompiler.FSharp.Build.Tasks.dll'))</RegressionTestLocalCompilerTaskAssembly>
+  </PropertyGroup>
+
+  <Import Project="$(MSBuildThisFileDirectory)RegressionTest.LocalCompiler.targets" Condition="'$(LoadLocalFSharpBuild)' == 'True'" />
+</Project>

@@ -53,7 +53,7 @@ jobs:
         downloadPath: '$(Pipeline.Workspace)/FSharpCompiler/artifacts/bin/UseLocalCompiler.FSharp.Build.Tasks'
 
     - task: DownloadPipelineArtifact@2
-      displayName:  Download local test props
+      displayName: Download regression local compiler bootstrap
       inputs:
         artifactName: 'UseLocalCompilerProps'
         downloadPath: '$(Pipeline.Workspace)/Props'
@@ -151,7 +151,7 @@ jobs:
         Set-Location $(Pipeline.Workspace)/TestRepo
         
         Write-Host "Running PrepareRepoForRegressionTesting.fsx..."
-        dotnet fsi $(Build.SourcesDirectory)/eng/scripts/PrepareRepoForRegressionTesting.fsx "$(Pipeline.Workspace)/Props/UseLocalCompiler.Directory.Build.props"
+        dotnet fsi $(Build.SourcesDirectory)/eng/scripts/PrepareRepoForRegressionTesting.fsx "$(Pipeline.Workspace)/Props/RegressionTest.LocalCompiler.props"
         
         if ($LASTEXITCODE -ne 0) {
           Write-Host "Failed to prepare repository for regression testing"
@@ -414,7 +414,7 @@ jobs:
           Write-Host "rm -f global.json"
           Write-Host ""
           Write-Host "# 3. Prepare the repo for local compiler"
-          Write-Host "dotnet fsi ../fsharp/eng/scripts/PrepareRepoForRegressionTesting.fsx `"../fsharp/UseLocalCompiler.Directory.Build.props`""
+          Write-Host "dotnet fsi ../fsharp/eng/scripts/PrepareRepoForRegressionTesting.fsx `"../fsharp/RegressionTest.LocalCompiler.props`""
           Write-Host ""
           Write-Host "# 4. Build with local compiler"
           Write-Host "export LocalFSharpCompilerPath=`$PWD/../fsharp"

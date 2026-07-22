@@ -18,7 +18,7 @@ let useLocalCompilerPropsPath =
 
 printfn "PrepareRepoForRegressionTesting.fsx"
 printfn "==================================="
-printfn "UseLocalCompiler props path: %s" useLocalCompilerPropsPath
+printfn "Regression local compiler props path: %s" useLocalCompilerPropsPath
 
 if not (File.Exists(useLocalCompilerPropsPath)) then
     failwithf "Local test props file not found at: %s" useLocalCompilerPropsPath
@@ -58,9 +58,9 @@ if File.Exists(propsFilePath) then
         projectElement.InsertAfter(newline, importElement) |> ignore
         
         doc.Save(propsFilePath)
-        printfn "✓ Added UseLocalCompiler import to Directory.Build.props"
+        printfn "✓ Added regression local compiler import to Directory.Build.props"
     else
-        printfn "✓ UseLocalCompiler import already exists"
+        printfn "✓ Regression local compiler import already exists"
     
     let otherFlagsWithTimes = doc.SelectSingleNode("//OtherFlags[contains(text(), '--times')]")
     
@@ -101,7 +101,7 @@ else
     printfn "Directory.Build.props does not exist, creating it..."
     let newContent = sprintf "<Project>\n  <Import Project=\"%s\" />\n  <PropertyGroup>\n    <OtherFlags>$(OtherFlags) --nowarn:75 --times</OtherFlags>\n  </PropertyGroup>\n</Project>\n" absolutePropsPath
     File.WriteAllText(propsFilePath, newContent)
-    printfn "✓ Created Directory.Build.props with UseLocalCompiler import and --times flag"
+    printfn "✓ Created Directory.Build.props with regression local compiler import and --times flag"
 
 printfn ""
 printfn "Final Directory.Build.props content:"
