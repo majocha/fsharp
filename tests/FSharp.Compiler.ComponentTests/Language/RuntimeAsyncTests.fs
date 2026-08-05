@@ -2,6 +2,7 @@ module Language.RuntimeAsyncTests
 
 open Xunit
 open FSharp.Test.Compiler
+open System.IO
 
 let private runtimeAsyncSource = """
 module RuntimeAsyncTest
@@ -149,6 +150,34 @@ let ``runtime task builder executes through runtime async`` () =
     |> withLangVersionPreview
     |> compileExeAndRun
     |> shouldSucceed
+
+[<Fact>]
+let ``runtime task builder fixture executes through runtime async`` () =
+    Path.Combine(__SOURCE_DIRECTORY__, "RuntimeAsync", "RuntimeTasks.fs")
+    |> FsFromPath
+    |> withLangVersionPreview
+    |> compileExeAndRun
+    |> shouldSucceed
+
+// Equivalent to TaskBuilder's testUsingAsyncDisposableExnAsync. Compilation succeeds,
+// but executing the fixture currently terminates the process with 0xC0000409.
+[<Fact>]
+let ``runtime task async disposal exception compiles (runtime execution is failing)`` () =
+    Path.Combine(__SOURCE_DIRECTORY__, "RuntimeAsync", "RuntimeTasksAsyncDisposalException.fs")
+    |> FsFromPath
+    |> withLangVersionPreview
+    |> compile
+    |> shouldSucceed
+
+[<Fact>]
+let ``runtime task exceptional for loop records known disposal failure`` () =
+    Path.Combine(__SOURCE_DIRECTORY__, "RuntimeAsync", "RuntimeTasksForExceptionDisposal.fs")
+    |> FsFromPath
+    |> withLangVersionPreview
+    |> compileExeAndRun
+    |> withStdOutContains "Problematic: for loop does not dispose enumerator after an exception"
+    |> shouldSucceed
+
 #else
 [<Fact>]
 let ``runtime async reports unsupported target runtime`` () =
