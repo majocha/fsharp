@@ -860,8 +860,14 @@ type InfoReader(g: TcGlobals, amap: ImportMap) as this =
     let isRuntimeFeatureVirtualStaticsInInterfacesSupported =
         lazy isRuntimeFeatureSupported "VirtualStaticsInInterfaces"
 
-    let isRuntimeFeatureAsyncSupported =
-        lazy isRuntimeFeatureSupported "Async"
+    let isRuntimeAsyncSupported =
+        lazy (
+            match g.System_Runtime_CompilerServices_MethodImplOptions_ty with
+            | Some methodImplOptionsTy ->
+                GetIntrinsicILFieldInfosUncached ((None, AccessorDomain.AccessibleFromEverywhere), range0, methodImplOptionsTy)
+                |> List.exists (fun (ilFieldInfo: ILFieldInfo) -> ilFieldInfo.FieldName = "Async")
+            | _ ->
+                false)
 
     member _.g = g
     member _.amap = amap
@@ -927,7 +933,7 @@ type InfoReader(g: TcGlobals, amap: ImportMap) as this =
         // Both default and static interface method consumption features are tied to the runtime support of DIMs.
         | LanguageFeature.DefaultInterfaceMemberConsumption -> isRuntimeFeatureDefaultImplementationsOfInterfacesSupported.Value
         | LanguageFeature.InterfacesWithAbstractStaticMembers -> isRuntimeFeatureVirtualStaticsInInterfacesSupported.Value
-        | LanguageFeature.RuntimeAsync -> isRuntimeFeatureAsyncSupported.Value
+        | LanguageFeature.RuntimeAsync -> isRuntimeAsyncSupported.Value
         | _ -> true
             
     /// Get the declared constructors of any F# type

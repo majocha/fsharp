@@ -233,15 +233,20 @@ The compiler should reject:
 * suspension in exception-handling regions;
 * unsupported byref, byref-like, pinned-local, `tail.`, and `localloc`
   situations;
-* compilation when the referenced corlib does not advertise runtime-async
-  support.
+* compilation when the referenced runtime libraries do not expose
+  `MethodImplOptions.Async` and `AsyncHelpers`.
 
-The compiler already probes `RuntimeFeature` fields through
-`InfoReader`. Runtime-async support should use the agreed
-`RuntimeFeature.Async` capability marker when it becomes part of the runtime
-contract, rather than hard-coding an SDK or runtime version.
+The compiler already probes target-runtime metadata through `InfoReader`.
+Runtime-async support uses the `MethodImplOptions.Async` field exposed by
+.NET 11, together with the `AsyncHelpers` API used by suspension points, rather
+than hard-coding an SDK or runtime version.
 
 ## Runtime and SDK compatibility
+
+On .NET 11, projects must opt in to Runtime Async with
+`<Features>runtime-async=on</Features>`. This is separate from F# preview
+language support; `EnablePreviewFeatures` is not required by .NET 11 for the
+runtime feature itself.
 
 The SDK selected by `global.json` is not sufficient to establish runtime-async
 support. Three versions can differ:
@@ -273,9 +278,8 @@ Build and test infrastructure must therefore:
   than embedding version checks in the F# compiler.
 
 The capability probe should verify the actual execution environment, including
-the async-capability marker, `MethodImplOptions.Async`, `AsyncHelpers`, and a
-minimal marked method that suspends and resumes. A reflection-only probe is not
-enough to prove JIT support.
+`MethodImplOptions.Async`, `AsyncHelpers`, and a minimal marked method that
+suspends and resumes. A metadata-only probe is not enough to prove JIT support.
 
 ## Test plan
 
@@ -310,7 +314,9 @@ Cover at least:
 * direct calls from synchronous methods.
 
 Runtime tests should follow the runtime repository's capability-gated pattern
-and record enough SDK/runtime information to reproduce failures.
+and record enough SDK/runtime information to reproduce failures. Keep these
+tests in compiler component tests so they compile with the compiler under test,
+not with the SDK compiler used to build the test assembly.
 
 ## Implementation order
 

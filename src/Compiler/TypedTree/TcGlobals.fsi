@@ -270,6 +270,8 @@ type internal TcGlobals =
 
     member System_Runtime_CompilerServices_RuntimeFeature_ty: TypedTree.TType option
 
+    member System_Runtime_CompilerServices_MethodImplOptions_ty: TypedTree.TType option
+
     member addrof2_vref: TypedTree.ValRef
 
     member addrof_vref: TypedTree.ValRef

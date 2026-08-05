@@ -151,6 +151,7 @@ module Utilities =
         <OutputType>Exe</OutputType>
         <TargetFramework>$TARGETFRAMEWORK</TargetFramework>
         <UseFSharpPreview>true</UseFSharpPreview>
+        <Features>runtime-async=on</Features>
         <DisableImplicitFSharpCoreReference>true</DisableImplicitFSharpCoreReference>
   </PropertyGroup>
 

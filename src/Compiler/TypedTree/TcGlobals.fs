@@ -1464,6 +1464,8 @@ type TcGlobals(
 
   // Review: Does this need to be an option type?
   member val System_Runtime_CompilerServices_RuntimeFeature_ty = tryFindSysTyconRef sysCompilerServices "RuntimeFeature" |> Option.map mkNonGenericTy
+  member val System_Runtime_CompilerServices_MethodImplOptions_ty =
+      tryFindSysTyconRef sysCompilerServices "MethodImplOptions" |> Option.map mkNonGenericTy
 
   member val iltyp_StreamingContext = tryFindSysILTypeRef tname_StreamingContext  |> Option.map mkILNonGenericValueTy
   member val iltyp_SerializationInfo = tryFindSysILTypeRef tname_SerializationInfo  |> Option.map mkILNonGenericBoxedTy
