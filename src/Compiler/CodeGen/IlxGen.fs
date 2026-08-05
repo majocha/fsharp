@@ -3127,6 +3127,13 @@ let ComputeDebugPointForBinding g bind =
         | _, (Expr.Lambda _ | Expr.TyLambda _) -> false, None
         | DebugPointAtBinding.Yes m, _ -> false, Some m
 
+let rec TryUnwrapRuntimeAsyncExpr g expr =
+    match expr with
+    | Expr.DebugPoint(_, innerExpr) -> TryUnwrapRuntimeAsyncExpr g innerExpr
+    | Expr.App(Expr.Val(vref, _, _), _, [], [ Expr.Lambda(_, _, _, [ _ ], body, _, _) ], _) when valRefEq g vref g.cgh__runtimeAsync_vref ->
+        true, body
+    | _ -> false, expr
+
 //-------------------------------------------------------------------------
 // Generate expressions
 //-------------------------------------------------------------------------
@@ -7102,8 +7109,16 @@ and GenClosureAsLocalTypeFunction cenv (cgbuf: CodeGenBuffer) eenv thisVars expr
 
         strip cloinfo.ilCloLambdas
 
+    let isRuntimeAsync, body = TryUnwrapRuntimeAsyncExpr g body
+
     let ilCloBody =
         CodeGenMethodForExpr cenv cgbuf.mgbuf (entryPointInfo, cloinfo.cloName, eenvinner, 1, None, body, Return)
+
+    let ilCloBody =
+        if isRuntimeAsync then
+            { ilCloBody with IsRuntimeAsync = true }
+        else
+            ilCloBody
 
     let ilCtorBody =
         mkILMethodBody (true, [], 8, nonBranchingInstrsToCode (mkCallBaseConstructor (g.ilg.typ_Object, [])), None, eenv.imports)
@@ -7119,6 +7134,7 @@ and GenClosureAsLocalTypeFunction cenv (cgbuf: CodeGenBuffer) eenv thisVars expr
                 mkILReturn ilCloFormalReturnTy,
                 MethodBody.IL(InterruptibleLazy.FromValue ilCloBody)
             )
+            |> fun mdef -> mdef.WithAsync(isRuntimeAsync)
         ]
 
     let cloTypeDefs =
@@ -7149,8 +7165,16 @@ and GenClosureAsFirstClassFunction cenv (cgbuf: CodeGenBuffer) eenv thisVars m e
 
     let ilCloTypeRef = cloinfo.cloSpec.TypeRef
 
+    let isRuntimeAsync, body = TryUnwrapRuntimeAsyncExpr g body
+
     let ilCloBody =
         CodeGenMethodForExpr cenv cgbuf.mgbuf (entryPointInfo, cloinfo.cloName, eenvinner, 1, None, body, Return)
+
+    let ilCloBody =
+        if isRuntimeAsync then
+            { ilCloBody with IsRuntimeAsync = true }
+        else
+            ilCloBody
 
     let cloTypeDefs =
         GenClosureTypeDefs
@@ -9797,6 +9821,8 @@ and GenMethodForBinding
             | h :: t -> [ h ], t, true
         | _ -> [], methLambdaVars, false
 
+    let isRuntimeAsync, methLambdaBody = TryUnwrapRuntimeAsyncExpr g methLambdaBody
+
     let nonUnitNonSelfMethodVars, body =
         BindUnitVars cenv.g (nonSelfMethodVars, paramInfos, methLambdaBody)
 
@@ -10231,6 +10257,7 @@ and GenMethodForBinding
                 .WithSynchronized(hasSynchronizedImplFlag)
                 .WithNoInlining(hasNoInliningFlag)
                 .WithAggressiveInlining(hasAggressiveInliningImplFlag)
+                .WithAsync(isRuntimeAsync)
                 .With(isEntryPoint = isExplicitEntryPoint, securityDecls = secDecls)
 
         let mdef =

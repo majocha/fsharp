@@ -8687,8 +8687,17 @@ and Propagate (cenv: cenv) (overallTy: OverallTy) (env: TcEnv) tpenv (expr: Appl
 
         | DelayedApp (atomicFlag, isSugar, synLeftExprOpt, synArg, mExprAndArg) :: delayedList' ->
             let denv = env.DisplayEnv
-            match UnifyFunctionTypeUndoIfFailed cenv denv mExpr exprTy with
-            | ValueSome (_, resultTy) ->
+            let isRuntimeAsync =
+                match expr.Expr with
+                | Expr.Val(vref, _, _)
+                | Expr.App(Expr.Val(vref, _, _), _, [ _ ], [], _)
+                    when valRefEq g vref g.cgh__runtimeAsync_vref -> true
+                | _ -> false
+
+            match isRuntimeAsync, UnifyFunctionTypeUndoIfFailed cenv denv mExpr exprTy with
+            | true, _ ->
+                ()
+            | false, ValueSome (_, resultTy) ->
 
                 // We add tag parameter to the return type for "&x" and 'NativePtr.toByRef'
                 // See RFC FS-1053.md
@@ -8701,7 +8710,7 @@ and Propagate (cenv: cenv) (overallTy: OverallTy) (env: TcEnv) tpenv (expr: Appl
 
                 propagate isAddrOf delayedList' mExprAndArg resultTy
 
-            | _ ->
+            | false, _ ->
                 let mArg = synArg.Range
                 match synArg with
                 // async { ... }
@@ -8997,10 +9006,112 @@ and TcApplicationThen (cenv: cenv) (overallTy: OverallTy) env tpenv mExprAndArg 
         else
             None
 
+    let tryTcRuntimeAsyncApplication () =
+        let isRuntimeAsyncVref vref =
+            valRefEq g vref g.cgh__runtimeAsync_vref
+
+        let isSupportedRuntimeAsyncCarrier ty =
+            match stripTyEqns g ty with
+            | AppTy g (tcref, []) when tcref.IsILTycon ->
+                let fullName = tcref.CompiledRepresentationForNamedType.FullName
+                fullName = "System.Threading.Tasks.Task"
+                || fullName = "System.Threading.Tasks.ValueTask"
+            | AppTy g (tcref, [ _ ]) when tcref.IsILTycon ->
+                let fullName = tcref.CompiledRepresentationForNamedType.FullName
+                fullName = "System.Threading.Tasks.Task`1"
+                || fullName = "System.Threading.Tasks.ValueTask`1"
+            | _ ->
+                false
+
+        let intrinsic, carrierTy =
+            match leftExpr with
+            | ApplicableExpr(expr=Expr.Val (vref, flags, m))
+                when isRuntimeAsyncVref vref ->
+                Some(vref, flags, m), overallTy.Commit
+            | ApplicableExpr(expr=Expr.App (Expr.Val (vref, flags, m), _, [ carrierTy ], [], _))
+                when isRuntimeAsyncVref vref ->
+                Some(vref, flags, m), carrierTy
+            | _ ->
+                None, Unchecked.defaultof<_>
+
+        match intrinsic with
+        | None ->
+            None
+        | Some(vref, flags, m) ->
+            checkLanguageFeatureAndRecover g.langVersion LanguageFeature.RuntimeAsync m
+
+            if not (isSupportedRuntimeAsyncCarrier carrierTy) then
+                errorR (Error(FSComp.SR.tcRuntimeAsyncInvalidReturnType(), m))
+
+            checkLanguageFeatureRuntimeAndRecover cenv.infoReader LanguageFeature.RuntimeAsync m
+
+            let bodyDomainTy = NewInferenceType g
+            let bodyResultTy = NewInferenceType g
+            let bodyTy = mkFunTy g bodyDomainTy bodyResultTy
+            let arg, tpenv =
+                TcExprFlex2 cenv bodyTy env false tpenv synArg
+
+            let isDeclarationMarker =
+                match arg with
+                | Expr.Lambda(_, _, _, [ v ], _, _, _) -> isUnitTy g v.Type
+                | _ -> false
+
+            if isDeclarationMarker then
+                let markerTy = mkFunTy g bodyTy carrierTy
+                let marker =
+                    Expr.App(Expr.Val(vref, flags, m), markerTy, [], [ arg ], mExprAndArg)
+
+                Some(TcDelayed cenv overallTy env tpenv mExprAndArg (MakeApplicableExprNoFlex cenv marker) carrierTy atomicFlag delayed)
+            else
+                let rec transformLambda expr =
+                    match expr with
+                    | Expr.Lambda(uniq, ctorThisValOpt, baseValOpt, vs, body, mLambda, _) ->
+                        let body, bodyTy =
+                            match body with
+                            | Expr.Lambda _ ->
+                                let body = transformLambda body
+                                body, tyOfExpr g body
+                            | _ ->
+                                let unitVal, _ = mkCompGenLocal mLambda "unitVar" g.unit_ty
+                                let unitLambda = mkLambda mLambda unitVal (body, tyOfExpr g body)
+                                let unitLambdaTy = tyOfExpr g unitLambda
+                                let markerTy = mkFunTy g unitLambdaTy carrierTy
+                                let marker =
+                                    Expr.App(
+                                        Expr.Val(vref, flags, m),
+                                        markerTy,
+                                        [],
+                                        [ unitLambda ],
+                                        mExprAndArg
+                                    )
+
+                                marker, carrierTy
+
+                        Expr.Lambda(uniq, ctorThisValOpt, baseValOpt, vs, body, mLambda, bodyTy)
+                    | _ ->
+                        error (InternalError("Expected a lambda in __runtimeAsync", mExprAndArg))
+
+                let transformed = transformLambda arg
+                let transformedTy = tyOfExpr g transformed
+                Some(
+                    TcDelayed
+                        cenv
+                        overallTy
+                        env
+                        tpenv
+                        mExprAndArg
+                        (MakeApplicableExprNoFlex cenv transformed)
+                        transformedTy
+                        atomicFlag
+                        delayed
+                )
+
     // If the type of 'synArg' unifies as a function type, then this is a function application, otherwise
     // it is an error or a computation expression or indexer or delegate invoke
-    match UnifyFunctionTypeUndoIfFailed cenv denv mLeftExpr exprTy with
-    | ValueSome (domainTy, resultTy) ->
+    match tryTcRuntimeAsyncApplication (), UnifyFunctionTypeUndoIfFailed cenv denv mLeftExpr exprTy with
+    | Some result, _ ->
+        result
+    | None, ValueSome (domainTy, resultTy) ->
 
         // atomicLeftExpr[idx] unifying as application gives a warning
         if not isSugar then
@@ -9066,7 +9177,7 @@ and TcApplicationThen (cenv: cenv) (overallTy: OverallTy) env tpenv mExprAndArg 
             let exprAndArg, resultTy = buildApp cenv leftExpr resultTy arg mExprAndArg
             TcDelayed cenv overallTy env tpenv mExprAndArg exprAndArg resultTy atomicFlag delayed
 
-    | ValueNone ->
+    | None, ValueNone ->
         // Type-directed invocables
 
         match synArg with

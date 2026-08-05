@@ -110,6 +110,13 @@ module StateMachineHelpers =
         failwith
             "__stateMachine should always be guarded by __useResumableCode and only used in valid state machine implementations"
 
+    [<MethodImpl(MethodImplOptions.NoInlining)>]
+    let __runtimeAsync<'T> (body: 'T -> 'T) : 'T =
+        ignore body
+
+        failwith
+            "__runtimeAsync is a compiler intrinsic and should only be used in runtime-async method bodies"
+
 module ResumableCode =
     open System.Runtime.ExceptionServices
 

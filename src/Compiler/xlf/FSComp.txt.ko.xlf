@@ -652,6 +652,11 @@
         <target state="translated">이름과 형식이 같으면 [&lt;Struct&gt;] 구분된 공용 구조체에서 기본 필드 공유</target>
         <note />
       </trans-unit>
+      <trans-unit id="featureRuntimeAsync">
+        <source>runtime async</source>
+        <target state="new">runtime async</target>
+        <note />
+      </trans-unit>
       <trans-unit id="featureScopedNowarn">
         <source>Support for scoped enabling / disabling of warnings by #warn and #nowarn directives, also inside modules</source>
         <target state="new">Support for scoped enabling / disabling of warnings by #warn and #nowarn directives, also inside modules</target>
@@ -1885,6 +1890,11 @@
       <trans-unit id="tcResumableCodeNotSupported">
         <source>Using resumable code or resumable state machines requires /langversion:preview</source>
         <target state="translated">다시 시작 가능한 코드 또는 다시 시작 가능한 상태 시스템을 사용하려면 /langversion:preview가 필요합니다.</target>
+        <note />
+      </trans-unit>
+      <trans-unit id="tcRuntimeAsyncInvalidReturnType">
+        <source>The __runtimeAsync intrinsic requires a return type of Task, Task&lt;'T&gt;, ValueTask, or ValueTask&lt;'T&gt;.</source>
+        <target state="new">The __runtimeAsync intrinsic requires a return type of Task, Task&lt;'T&gt;, ValueTask, or ValueTask&lt;'T&gt;.</target>
         <note />
       </trans-unit>
       <trans-unit id="tcSetterForInitOnlyPropertyCannotBeCalled1">
