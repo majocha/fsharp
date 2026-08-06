@@ -3134,7 +3134,10 @@ let rec TryUnwrapRuntimeAsyncExpr (g: TcGlobals) expr =
         | _ -> false
 
     match expr with
-    | Expr.DebugPoint(_, innerExpr) -> TryUnwrapRuntimeAsyncExpr g innerExpr
+    | Expr.DebugPoint(_, innerExpr) ->
+        match TryUnwrapRuntimeAsyncExpr g innerExpr with
+        | true, body -> true, body
+        | false, _ -> false, expr
     | Expr.App(Expr.Val(vref, _, _), _, [], [ Expr.Lambda(_, _, _, [ _ ], body, _, _) ], _) when isRuntimeAsyncVref vref -> true, body
     | _ -> false, expr
 
