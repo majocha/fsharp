@@ -20,11 +20,38 @@ let getValueTask () : ValueTask<int> =
     StateMachineHelpers.__runtimeAsync<ValueTask<int>> (fun () ->
         AsyncHelpers.Await(ValueTask<int>(Task.Delay(1).ContinueWith(fun (_: Task) -> 7))))
 
+let rawBody : Task<int> =
+    StateMachineHelpers.__runtimeAsync<Task<int>> (1)
+
 type Calculator() =
     member _.Add(x: int, y: int) : Task<int> =
         StateMachineHelpers.__runtimeAsync<Task<int>> (fun () ->
             AsyncHelpers.Await(Task.Delay(1))
             x + y)
+
+    member _.AddRaw(x: int) : Task<int> =
+        StateMachineHelpers.__runtimeAsync<Task<int>> (x + 1)
+"""
+
+let private runtimeAsyncRawSource = """
+module RuntimeAsyncRawTest
+
+open System.Threading.Tasks
+open Microsoft.FSharp.Core.CompilerServices
+
+let rawValue : Task<int> =
+    StateMachineHelpers.__runtimeAsync<Task<int>> (40 + 2)
+
+type Calculator() =
+    member _.Add(value: int) : Task<int> =
+        StateMachineHelpers.__runtimeAsync<Task<int>> (value + 1)
+
+[<EntryPoint>]
+let main _ =
+    let rawResult = rawValue.GetAwaiter().GetResult()
+    let memberResult = Calculator().Add(40).GetAwaiter().GetResult()
+
+    if rawResult = 42 && memberResult = 41 then 0 else 1
 """
 
 let private runtimeTaskSource = """
@@ -44,9 +71,11 @@ type RuntimeTaskBuilder() =
         StateMachineHelpers.__runtimeAsync<Task<'T>> (fun () ->
             AsyncHelpers.Await(generator()))
 
-    member _.Zero() : Task<unit> = delayed ()
+    member _.Zero() : Task<unit> =
+        StateMachineHelpers.__runtimeAsync<Task<unit>> (fun () -> ())
 
-    member _.Return(value: 'T) = delayed value
+    member _.Return(value: 'T) =
+        StateMachineHelpers.__runtimeAsync<Task<'T>> (fun () -> value)
 
     member _.Bind(task: Task, continuation: unit -> Task<'U>) =
         StateMachineHelpers.__runtimeAsync<Task<'U>> (fun () ->
@@ -142,6 +171,13 @@ let ``runtime async compiles functions members and ValueTask`` () =
     FSharp runtimeAsyncSource
     |> withLangVersionPreview
     |> compile
+    |> shouldSucceed
+
+[<Fact>]
+let ``runtime async raw expressions execute`` () =
+    FSharp runtimeAsyncRawSource
+    |> withLangVersionPreview
+    |> compileExeAndRun
     |> shouldSucceed
 
 [<Fact>]

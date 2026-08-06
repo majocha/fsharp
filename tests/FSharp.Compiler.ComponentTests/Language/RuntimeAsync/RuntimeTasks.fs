@@ -33,9 +33,11 @@ type RuntimeTaskBuilder() =
     member _.Run(generator: unit -> Task<'T>) : Task<'T> =
         StateMachineHelpers.__runtimeAsync<Task<'T>> (fun () -> AsyncHelpers.Await(generator()))
 
-    member _.Zero() : Task<unit> = Task.FromResult()
+    member _.Zero() : Task<unit> =
+        StateMachineHelpers.__runtimeAsync<Task<unit>> (fun () -> ())
 
-    member _.Return(value: 'T) : Task<'T> = Task.FromResult value
+    member _.Return(value: 'T) : Task<'T> =
+        StateMachineHelpers.__runtimeAsync<Task<'T>> (fun () -> value)
 
     member _.ReturnFrom(task: Task<'T>) : Task<'T> = task
 
