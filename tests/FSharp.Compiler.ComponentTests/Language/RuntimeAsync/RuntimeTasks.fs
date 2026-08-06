@@ -99,26 +99,17 @@ type RuntimeTaskBuilder() =
                     disposable.Dispose()
                 | _ -> ())
 
-    member _.While(guard: unit -> bool, body: unit -> Task<unit>) =
-        let rec loop () =
-            if guard() then
-                sequenceTasks (body()) loop
-            else
-                Task.FromResult()
+    member _.While(guard: unit -> bool, body: unit -> Task<unit>) : Task<unit> =
+        StateMachineHelpers.__runtimeAsync<Task<unit>> (fun () ->
+            while guard() do
+                AsyncHelpers.Await(body()))
 
-        loop()
+    member _.For(sequence: seq<'T>, body: 'T -> Task<unit>) : Task<unit> =
+        StateMachineHelpers.__runtimeAsync<Task<unit>> (fun () ->
+            use enumerator = sequence.GetEnumerator()
 
-    member _.For(sequence: seq<'T>, body: 'T -> Task<unit>) =
-        let enumerator = sequence.GetEnumerator()
-
-        let rec loop () =
-            if enumerator.MoveNext() then
-                sequenceTasks (body enumerator.Current) loop
-            else
-                enumerator.Dispose()
-                Task.FromResult()
-
-        loop()
+            while enumerator.MoveNext() do
+                AsyncHelpers.Await(body enumerator.Current))
 
     member _.MergeSources(left: Task<'T1>, right: Task<'T2>) =
         StateMachineHelpers.__runtimeAsync<Task<'T1 * 'T2>> (fun () ->
@@ -620,8 +611,7 @@ let private checkLoops () =
 
     require (resultOf caughtFor = 42) "for loop exception"
 
-    if not failedEnumeratorDisposed then
-        printfn "Problematic: for loop does not dispose enumerator after an exception"
+    require failedEnumeratorDisposed "for loop disposal after exception"
 
 let private checkExceptionsAndStackSafety () =
     let mutable ranBeforeException = false

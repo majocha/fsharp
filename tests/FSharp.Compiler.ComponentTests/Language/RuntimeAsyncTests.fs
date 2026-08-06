@@ -169,15 +169,6 @@ let ``runtime task async disposal exception compiles (runtime execution is faili
     |> compile
     |> shouldSucceed
 
-[<Fact>]
-let ``runtime task exceptional for loop records known disposal failure`` () =
-    Path.Combine(__SOURCE_DIRECTORY__, "RuntimeAsync", "RuntimeTasksForExceptionDisposal.fs")
-    |> FsFromPath
-    |> withLangVersionPreview
-    |> compileExeAndRun
-    |> withStdOutContains "Problematic: for loop does not dispose enumerator after an exception"
-    |> shouldSucceed
-
 #else
 [<Fact>]
 let ``runtime async reports unsupported target runtime`` () =
