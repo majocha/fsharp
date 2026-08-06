@@ -8687,11 +8687,16 @@ and Propagate (cenv: cenv) (overallTy: OverallTy) (env: TcEnv) tpenv (expr: Appl
 
         | DelayedApp (atomicFlag, isSugar, synLeftExprOpt, synArg, mExprAndArg) :: delayedList' ->
             let denv = env.DisplayEnv
+            let isRuntimeAsyncVref (vref: ValRef) =
+                match vref.TryDeref, g.cgh__runtimeAsync_vref.TryDeref with
+                | ValueSome v1, ValueSome v2 -> v1 === v2
+                | _ -> false
+
             let isRuntimeAsync =
                 match expr.Expr with
                 | Expr.Val(vref, _, _)
                 | Expr.App(Expr.Val(vref, _, _), _, [ _ ], [], _)
-                    when valRefEq g vref g.cgh__runtimeAsync_vref -> true
+                    when isRuntimeAsyncVref vref -> true
                 | _ -> false
 
             match isRuntimeAsync, UnifyFunctionTypeUndoIfFailed cenv denv mExpr exprTy with
@@ -9007,8 +9012,10 @@ and TcApplicationThen (cenv: cenv) (overallTy: OverallTy) env tpenv mExprAndArg 
             None
 
     let tryTcRuntimeAsyncApplication () =
-        let isRuntimeAsyncVref vref =
-            valRefEq g vref g.cgh__runtimeAsync_vref
+        let isRuntimeAsyncVref (vref: ValRef) =
+            match vref.TryDeref, g.cgh__runtimeAsync_vref.TryDeref with
+            | ValueSome v1, ValueSome v2 -> v1 === v2
+            | _ -> false
 
         let isSupportedRuntimeAsyncCarrier ty =
             match stripTyEqns g ty with

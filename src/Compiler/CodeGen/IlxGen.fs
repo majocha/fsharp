@@ -3127,11 +3127,15 @@ let ComputeDebugPointForBinding g bind =
         | _, (Expr.Lambda _ | Expr.TyLambda _) -> false, None
         | DebugPointAtBinding.Yes m, _ -> false, Some m
 
-let rec TryUnwrapRuntimeAsyncExpr g expr =
+let rec TryUnwrapRuntimeAsyncExpr (g: TcGlobals) expr =
+    let isRuntimeAsyncVref (vref: ValRef) =
+        match vref.TryDeref, g.cgh__runtimeAsync_vref.TryDeref with
+        | ValueSome v1, ValueSome v2 -> v1 === v2
+        | _ -> false
+
     match expr with
     | Expr.DebugPoint(_, innerExpr) -> TryUnwrapRuntimeAsyncExpr g innerExpr
-    | Expr.App(Expr.Val(vref, _, _), _, [], [ Expr.Lambda(_, _, _, [ _ ], body, _, _) ], _) when valRefEq g vref g.cgh__runtimeAsync_vref ->
-        true, body
+    | Expr.App(Expr.Val(vref, _, _), _, [], [ Expr.Lambda(_, _, _, [ _ ], body, _, _) ], _) when isRuntimeAsyncVref vref -> true, body
     | _ -> false, expr
 
 //-------------------------------------------------------------------------
