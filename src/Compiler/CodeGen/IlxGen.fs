@@ -3138,7 +3138,7 @@ let rec TryUnwrapRuntimeAsyncExpr (g: TcGlobals) expr =
         match TryUnwrapRuntimeAsyncExpr g innerExpr with
         | true, body -> true, body
         | false, _ -> false, expr
-    | Expr.App(Expr.Val(vref, _, _), _, [], [ Expr.Lambda(_, _, _, [ _ ], body, _, _) ], _) when isRuntimeAsyncVref vref -> true, body
+    | Expr.App(Expr.Val(vref, _, _), _, [ _ ], [ body ], _) when isRuntimeAsyncVref vref -> true, body
     | _ -> false, expr
 
 //-------------------------------------------------------------------------
@@ -7141,7 +7141,7 @@ and GenClosureAsLocalTypeFunction cenv (cgbuf: CodeGenBuffer) eenv thisVars expr
                 mkILReturn ilCloFormalReturnTy,
                 MethodBody.IL(InterruptibleLazy.FromValue ilCloBody)
             )
-            |> fun mdef -> mdef.WithAsync(isRuntimeAsync)
+            |> fun mdef -> mdef.WithAsync(isRuntimeAsync).WithNoInlining(isRuntimeAsync)
         ]
 
     let cloTypeDefs =
@@ -10265,6 +10265,7 @@ and GenMethodForBinding
                 .WithNoInlining(hasNoInliningFlag)
                 .WithAggressiveInlining(hasAggressiveInliningImplFlag)
                 .WithAsync(isRuntimeAsync)
+                .WithNoInlining(isRuntimeAsync)
                 .With(isEntryPoint = isExplicitEntryPoint, securityDecls = secDecls)
 
         let mdef =

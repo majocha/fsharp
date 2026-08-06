@@ -9,40 +9,45 @@ open Microsoft.FSharp.Core.CompilerServices
 let private delayed value =
     Task.Delay(1).ContinueWith(fun (_: Task) -> value)
 
+type RuntimeAsyncCode<'T> = unit -> 'T
+
 type RuntimeTaskBuilder() =
-    member _.Delay(generator: unit -> Task<'T>) = generator
+    member inline _.Delay([<InlineIfLambda>] generator: unit -> RuntimeAsyncCode<'T>) =
+        fun () -> (generator())()
 
-    member _.Run(generator: unit -> Task<'T>) : Task<'T> =
-        StateMachineHelpers.__runtimeAsync<Task<'T>> (fun () ->
-            AsyncHelpers.Await(generator()))
+    member inline _.Run([<InlineIfLambda>] code: RuntimeAsyncCode<'T>) : Task<'T> =
+        StateMachineHelpers.__runtimeAsync (code())
 
-    member _.Return(value: 'T) : Task<'T> =
-        StateMachineHelpers.__runtimeAsync<Task<'T>> (fun () -> value)
+    member inline _.Return(value: 'T) : RuntimeAsyncCode<'T> =
+        fun () -> value
 
-    member _.Zero() : Task<unit> =
-        StateMachineHelpers.__runtimeAsync<Task<unit>> (fun () -> ())
+    member inline _.Zero() : RuntimeAsyncCode<unit> =
+        fun () -> ()
 
-    member _.Bind(task: Task<'T>, continuation: 'T -> Task<'U>) =
-        StateMachineHelpers.__runtimeAsync<Task<'U>> (fun () ->
+    member inline _.Bind(task: Task<'T>, [<InlineIfLambda>] continuation: 'T -> RuntimeAsyncCode<'U>) =
+        fun () ->
             let result = AsyncHelpers.Await task
-            AsyncHelpers.Await(continuation result))
+            (continuation result)()
 
-    member _.TryFinally(body: unit -> Task<'T>, compensation: unit -> unit) =
-        StateMachineHelpers.__runtimeAsync<Task<'T>> (fun () ->
+    member inline _.TryFinally(
+        [<InlineIfLambda>] body: RuntimeAsyncCode<'T>,
+        compensation: unit -> unit
+    ) =
+        fun () ->
             try
-                AsyncHelpers.Await(body())
+                body()
             finally
-                compensation())
+                compensation()
 
-    member _.Using(resource: 'Resource, body: 'Resource -> Task<'T>) : Task<'T> =
-        StateMachineHelpers.__runtimeAsync<Task<'T>> (fun () ->
+    member inline _.Using(resource: 'Resource, [<InlineIfLambda>] body: 'Resource -> RuntimeAsyncCode<'T>) : RuntimeAsyncCode<'T> =
+        fun () ->
             try
-                AsyncHelpers.Await(body resource)
+                (body resource)()
             finally
                 match box resource with
                 | :? IAsyncDisposable as disposable ->
                     AsyncHelpers.Await(disposable.DisposeAsync())
-                | _ -> ())
+                | _ -> ()
 
 [<AutoOpen>]
 module RuntimeTask =

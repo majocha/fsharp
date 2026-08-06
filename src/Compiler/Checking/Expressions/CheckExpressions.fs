@@ -9017,29 +9017,16 @@ and TcApplicationThen (cenv: cenv) (overallTy: OverallTy) env tpenv mExprAndArg 
             | ValueSome v1, ValueSome v2 -> v1 === v2
             | _ -> false
 
-        let isSupportedRuntimeAsyncCarrier ty =
-            match stripTyEqns g ty with
-            | AppTy g (tcref, []) when tcref.IsILTycon ->
-                let fullName = tcref.CompiledRepresentationForNamedType.FullName
-                fullName = "System.Threading.Tasks.Task"
-                || fullName = "System.Threading.Tasks.ValueTask"
-            | AppTy g (tcref, [ _ ]) when tcref.IsILTycon ->
-                let fullName = tcref.CompiledRepresentationForNamedType.FullName
-                fullName = "System.Threading.Tasks.Task`1"
-                || fullName = "System.Threading.Tasks.ValueTask`1"
-            | _ ->
-                false
-
-        let intrinsic, carrierTy =
+        let intrinsic =
             match leftExpr with
             | ApplicableExpr(expr=Expr.Val (vref, flags, m))
-                when isRuntimeAsyncVref vref ->
-                Some(vref, flags, m), overallTy.Commit
-            | ApplicableExpr(expr=Expr.App (Expr.Val (vref, flags, m), _, [ carrierTy ], [], _))
-                when isRuntimeAsyncVref vref ->
-                Some(vref, flags, m), carrierTy
+                    when isRuntimeAsyncVref vref ->
+                    Some(vref, flags, m)
+            | ApplicableExpr(expr=Expr.App (Expr.Val (vref, flags, m), _, [ _ ], [], _))
+                    when isRuntimeAsyncVref vref ->
+                    Some(vref, flags, m)
             | _ ->
-                None, Unchecked.defaultof<_>
+                    None
 
         match intrinsic with
         | None ->
@@ -9047,71 +9034,34 @@ and TcApplicationThen (cenv: cenv) (overallTy: OverallTy) env tpenv mExprAndArg 
         | Some(vref, flags, m) ->
             checkLanguageFeatureAndRecover g.langVersion LanguageFeature.RuntimeAsync m
 
-            if not (isSupportedRuntimeAsyncCarrier carrierTy) then
-                errorR (Error(FSComp.SR.tcRuntimeAsyncInvalidReturnType(), m))
+            let _, intrinsicResultTy = stripFunTy g exprTy
+            let carrierTy = intrinsicResultTy
+
+            let bodyResultTy =
+                match stripTyEqns g carrierTy with
+                | AppTy g (_, [ resultTy ]) -> resultTy
+                | _ ->
+                    errorR (Error(FSComp.SR.tcRuntimeAsyncInvalidReturnType(), m))
+                    NewInferenceType g
 
             checkLanguageFeatureRuntimeAndRecover cenv.infoReader LanguageFeature.RuntimeAsync m
 
-            let bodyDomainTy = NewInferenceType g
-            let bodyResultTy = NewInferenceType g
-            let bodyTy = mkFunTy g bodyDomainTy bodyResultTy
-            let arg, tpenv =
-                TcExprFlex2 cenv bodyTy env false tpenv synArg
+            let arg, tpenv = TcExprFlex2 cenv bodyResultTy env false tpenv synArg
+            let marker =
+                Expr.App(Expr.Val(vref, flags, m), vref.Type, [ bodyResultTy ], [ arg ], mExprAndArg)
 
-            let isDeclarationMarker =
-                match arg with
-                | Expr.Lambda(_, _, _, [ v ], _, _, _) -> isUnitTy g v.Type
-                | _ -> false
-
-            if isDeclarationMarker then
-                let markerTy = mkFunTy g bodyTy carrierTy
-                let marker =
-                    Expr.App(Expr.Val(vref, flags, m), markerTy, [], [ arg ], mExprAndArg)
-
-                Some(TcDelayed cenv overallTy env tpenv mExprAndArg (MakeApplicableExprNoFlex cenv marker) carrierTy atomicFlag delayed)
-            else
-                let rec transformLambda expr =
-                    match expr with
-                    | Expr.Lambda(uniq, ctorThisValOpt, baseValOpt, vs, body, mLambda, _) ->
-                        let body, bodyTy =
-                            match body with
-                            | Expr.Lambda _ ->
-                                let body = transformLambda body
-                                body, tyOfExpr g body
-                            | _ ->
-                                let unitVal, _ = mkCompGenLocal mLambda "unitVar" g.unit_ty
-                                let unitLambda = mkLambda mLambda unitVal (body, tyOfExpr g body)
-                                let unitLambdaTy = tyOfExpr g unitLambda
-                                let markerTy = mkFunTy g unitLambdaTy carrierTy
-                                let marker =
-                                    Expr.App(
-                                        Expr.Val(vref, flags, m),
-                                        markerTy,
-                                        [],
-                                        [ unitLambda ],
-                                        mExprAndArg
-                                    )
-
-                                marker, carrierTy
-
-                        Expr.Lambda(uniq, ctorThisValOpt, baseValOpt, vs, body, mLambda, bodyTy)
-                    | _ ->
-                        error (InternalError("Expected a lambda in __runtimeAsync", mExprAndArg))
-
-                let transformed = transformLambda arg
-                let transformedTy = tyOfExpr g transformed
-                Some(
-                    TcDelayed
-                        cenv
-                        overallTy
-                        env
-                        tpenv
-                        mExprAndArg
-                        (MakeApplicableExprNoFlex cenv transformed)
-                        transformedTy
-                        atomicFlag
-                        delayed
-                )
+            Some(
+                TcDelayed
+                    cenv
+                    overallTy
+                    env
+                    tpenv
+                    mExprAndArg
+                    (MakeApplicableExprNoFlex cenv marker)
+                    carrierTy
+                    atomicFlag
+                    delayed
+            )
 
     // If the type of 'synArg' unifies as a function type, then this is a function application, otherwise
     // it is an error or a computation expression or indexer or delegate invoke

@@ -22,12 +22,8 @@ Runtime-async methods are CIL methods marked with
 `MethodImplOptions.Async` (`0x2000`). The runtime, rather than a compiler
 generated state machine and method builder, owns suspension and resumption.
 
-The supported return shapes are:
-
-* `System.Threading.Tasks.Task`
-* `System.Threading.Tasks.ValueTask`
-* `System.Threading.Tasks.Task<'T>`
-* `System.Threading.Tasks.ValueTask<'T>`
+The initial F# surface supports the generic return shape
+`System.Threading.Tasks.Task<'T>`. Other task-like shapes may be added later.
 
 For a non-generic return, the evaluation stack must be empty at `ret`. For a
 generic return, the result type must be on the stack at `ret`.
@@ -50,7 +46,7 @@ Runtime-async methods currently have important restrictions:
 * `tail.` and `localloc` are forbidden.
 * Suspension cannot occur inside exception-handling regions.
 * Byref, byref-like, and pinned locals cannot be preserved across suspension.
-* The method must have a supported `Task` or `ValueTask` return shape.
+* The method must have a supported `Task<'T>` return shape.
 * The method must be CIL and belong to an async-capable assembly.
 
 ## F# surface
@@ -63,124 +59,89 @@ function.
 The initial form is:
 
 ```fsharp
-let f =
-    __runtimeAsync<Task<_>> (fun x ->
+let f (x: int) : Task<int> =
+    __runtimeAsync (
         let y = AsyncHelpers.Await (getValue x)
         y + 1)
 ```
 
-`ValueTask` is selected by specifying the complete return shape:
+The intrinsic marks the final logical result of a `Task<'T>`-returning method.
+It is erased during code generation; the generated method returns `'T` at the
+runtime-async `ret` instruction.
 
 ```fsharp
-let f =
-    __runtimeAsync<ValueTask<_>> (fun x ->
-        let y = AsyncHelpers.Await (getValue x)
-        y + 1)
-```
-
-Multi-argument lambdas are supported. The intrinsic consumes the complete
-lambda argument spine and applies the carrier to the final result; it should
-not force the arguments into a tuple:
-
-```fsharp
-let addAsync =
-    __runtimeAsync<Task<_>> (fun (x: int) (y: int) ->
+let addAsync (x: int) (y: int) : Task<int> =
+    __runtimeAsync (
         let z = AsyncHelpers.Await (getAsync x)
         z + y)
-
-// int -> int -> Task<int>
 ```
 
-The compiler should preserve this shape where possible. A partially applied
-runtime-async function may need an ordinary synchronous closure, but the
-fully applied method that returns `Task` or `ValueTask` is the method marked
-runtime-async.
-
-For non-generic results, the corresponding forms are
-`__runtimeAsync<Task>` and `__runtimeAsync<ValueTask>`. The logical result of
-the lambda must be `unit`.
-
-There is no `let!` syntax in this initial design. The lambda body is an
-ordinary F# expression, and suspension points are explicit
-`AsyncHelpers` calls. There is no implicit awaiting of a task-returning
-expression:
+There is no implicit awaiting of a task-returning expression:
 
 ```fsharp
-__runtimeAsync<Task<_>> (fun () -> getValue ()) // Task<Task<int>>
+let f () : Task<Task<int>> =
+    __runtimeAsync (getValue ())
 ```
 
 Flattening is achieved by an explicit await:
 
 ```fsharp
-__runtimeAsync<Task<_>> (fun () ->
-    AsyncHelpers.Await (getValue ()))
+let f () : Task<int> =
+    __runtimeAsync (AsyncHelpers.Await (getValue ()))
 ```
 
-Builders can later implement `Bind` by lowering their await operation to the
-same runtime-async call pattern.
+Builders can implement `Bind` by lowering their await operation to the same
+runtime-async result pattern.
+
+The component-test builder uses the corresponding delayed representation:
+`RuntimeAsyncCode<'T>` is an alias for `unit -> 'T`. Its combinators are inline
+and compose these functions; only inline `Run` introduces `__runtimeAsync` and
+returns `Task<'T>`. This exercises the intended builder shape without making
+the builder part of the initial public F# surface.
 
 ## Return-type inference
 
-The intrinsic changes the *function return carrier*, not the logical result
-type of the lambda.
+The intrinsic changes the method return convention, not the logical result
+type of the expression.
 
 Conceptually:
 
 ```text
-lambda body:       'T
-runtimeAsync<Task>: Task<'T>
-runtimeAsync<ValueTask>: ValueTask<'T>
+expression:        'T
+runtimeAsync:      Task<'T>
 ```
 
-For a function argument:
+For a method:
 
 ```text
-('A -> 'T) becomes ('A -> Task<'T>)
+method result 'T becomes Task<'T>
 ```
 
-This is not an ordinary F# cast. Type checking should infer the lambda body
-as `T`, validate the selected carrier, and record a runtime-async marker for
+This is not an ordinary F# cast. Type checking should infer the expression as
+`T`, validate the `Task<'T>` return type, and record a runtime-async marker for
 later code generation.
 
-An expected type can select the carrier:
-
-```fsharp
-let f : int -> Task<int> =
-    __runtimeAsync (fun x ->
-        let y = AsyncHelpers.Await (getValue x)
-        y + 1)
-```
+The declared `Task<'T>` result supplies the carrier while the intrinsic's
+argument is checked as the logical `'T` result.
 
 For members, use the normal tupled argument group used for .NET methods:
 
 ```fsharp
 type C() =
     member this.Add(x: int, y: int) : Task<int> =
-        __runtimeAsync (fun () ->
+        __runtimeAsync (
             let z = AsyncHelpers.Await (getAsync x)
             z + y)
-```
-
-The member return annotation selects the carrier. The corresponding
-`ValueTask` form is:
-
-```fsharp
-member this.AddValue(x: int, y: int) : ValueTask<int> =
-    __runtimeAsync (fun () ->
-        let z = AsyncHelpers.Await (getAsync x)
-        z + y)
 ```
 
 Tupled member arguments are preferred over curried member syntax because they
 produce the expected .NET parameter list, overload behavior, reflection shape,
 and interop surface.
 
-When no expected type is available, an explicit type argument should be
-required. This avoids silently choosing `Task` when the caller intended
-`ValueTask`.
+The method return annotation supplies the `Task<'T>` carrier.
 
 The intrinsic should validate the complete carrier type before generic
-substitution. Only the four runtime-supported shapes are valid.
+substitution. Only `Task<'T>` is valid in this initial implementation.
 
 ## Compiler representation
 
@@ -191,7 +152,6 @@ method body:
 
 * top-level functions;
 * local functions and closures;
-* `FSharpFunc` implementations;
 * delegate methods;
 * instance and static members;
 * virtual and interface implementations;
@@ -203,18 +163,11 @@ normal wrapper call, allocate an F# state machine, or use
 
 There are two lowering contexts:
 
-* In a function-value context, `__runtimeAsync` produces a runtime-async
-  function value. Closure conversion and partial application may introduce
-  synchronous wrappers, but the final `Task`/`ValueTask`-returning method is
-  marked runtime-async.
-* In a direct function or member declaration body, `__runtimeAsync` is a body
-  marker. The compiler consumes it and marks the enclosing generated method,
-  avoiding a zero-argument closure that captures `this` and the method
-  arguments.
-
-The second form is intentionally declaration-context-sensitive. It gives
-members normal .NET signatures while retaining the intrinsic function form
-needed for lambdas and escaping function values.
+* In a direct function or member declaration body, `__runtimeAsync` is a
+  final-result marker. The compiler consumes it and marks the enclosing
+  generated method.
+* A value initializer that contains the marker needs a generated async helper,
+  because a module initializer cannot itself be runtime-async.
 
 Inlining needs an async-context boundary. A runtime-async body may be inlined
 into another runtime-async method, but it must not be expanded into an
@@ -226,10 +179,8 @@ boundary.
 
 The compiler should reject:
 
-* use of `__runtimeAsync` with a non-lambda form until existing function
-  values can be proven to have a suitable runtime-async body;
-* unsupported return carriers;
-* `AsyncHelpers` suspension calls outside a runtime-async method;
+* use of `__runtimeAsync` outside a `Task<'T>`-returning method or generated
+  helper;
 * suspension in exception-handling regions;
 * unsupported byref, byref-like, pinned-local, `tail.`, and `localloc`
   situations;
@@ -288,7 +239,7 @@ suspends and resumes. A metadata-only probe is not enough to prove JIT support.
 Compile source containing `__runtimeAsync` and verify:
 
 * the generated method has the `Async` method implementation flag;
-* the method returns the selected `Task` or `ValueTask` shape;
+* the method returns the selected `Task<'T>` shape;
 * no F# state-machine type or method builder is generated;
 * direct async calls are followed by the appropriate `AsyncHelpers.Await`;
 * closure, member, delegate, generic, and inline representations retain the
@@ -305,7 +256,7 @@ Cover at least:
 
 * an already-completed `Task`;
 * a genuinely suspended and resumed `Task`;
-* `ValueTask` and result-bearing variants;
+* result-bearing `Task` calls;
 * multiple suspension points;
 * captured locals and closure values;
 * exceptions and cancellation;
@@ -320,7 +271,7 @@ not with the SDK compiler used to build the test assembly.
 
 ## Implementation order
 
-1. Add the `__runtimeAsync` intrinsic and carrier-aware type checking.
+1. Add the `__runtimeAsync` intrinsic and `Task<'T>`-aware type checking.
 2. Add the internal typed-tree marker and preserve it through representation
    and inlining decisions.
 3. Emit the `Async` method flag and runtime-compatible return-stack shape.

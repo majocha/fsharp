@@ -11,161 +11,212 @@ open Microsoft.FSharp.Core.CompilerServices
 let private delayed value =
     Task.Delay(1).ContinueWith(fun (_: Task) -> value)
 
-let private sequenceTasks (first: Task<unit>) (second: unit -> Task<'T>) =
-    StateMachineHelpers.__runtimeAsync<Task<'T>> (fun () ->
-        AsyncHelpers.Await first
-        AsyncHelpers.Await(second()))
+type RuntimeAsyncCode<'T> = unit -> 'T
 
-let bindAwaiter
-    (getAwaiter: unit -> 'Awaiter)
-    (getResult: 'Awaiter -> 'T)
-    (continuation: 'T -> Task<'U>)
+let inline bindAwaiter
+    ([<InlineIfLambda>] getAwaiter: unit -> 'Awaiter)
+    ([<InlineIfLambda>] getResult: 'Awaiter -> 'T)
+    ([<InlineIfLambda>] continuation: 'T -> RuntimeAsyncCode<'U>)
     =
-    StateMachineHelpers.__runtimeAsync<Task<'U>> (fun () ->
+    fun () ->
         let awaiter = getAwaiter()
         AsyncHelpers.AwaitAwaiter awaiter
         let result = getResult awaiter
-        AsyncHelpers.Await(continuation result))
+        (continuation result)()
 
 type RuntimeTaskBuilder() =
-    member _.Delay(generator: unit -> Task<'T>) = generator
+    member inline _.Delay([<InlineIfLambda>] generator: unit -> RuntimeAsyncCode<'T>) =
+        fun () -> (generator())()
 
-    member _.Run(generator: unit -> Task<'T>) : Task<'T> =
-        StateMachineHelpers.__runtimeAsync<Task<'T>> (fun () -> AsyncHelpers.Await(generator()))
+    member inline _.Run([<InlineIfLambda>] code: RuntimeAsyncCode<'T>) : Task<'T> =
+        StateMachineHelpers.__runtimeAsync (code())
 
-    member _.Zero() : Task<unit> =
-        StateMachineHelpers.__runtimeAsync<Task<unit>> (fun () -> ())
+    member inline _.Zero() : RuntimeAsyncCode<unit> =
+        fun () -> ()
 
-    member _.Return(value: 'T) : Task<'T> =
-        StateMachineHelpers.__runtimeAsync<Task<'T>> (fun () -> value)
+    member inline _.Return(value: 'T) : RuntimeAsyncCode<'T> =
+        fun () -> value
 
-    member _.ReturnFrom(task: Task<'T>) : Task<'T> = task
+    member inline _.ReturnFrom(task: Task<'T>) : RuntimeAsyncCode<'T> =
+        fun () -> AsyncHelpers.Await task
 
-    member _.ReturnFrom(task: ValueTask<'T>) : Task<'T> =
-        StateMachineHelpers.__runtimeAsync<Task<'T>> (fun () -> AsyncHelpers.Await task)
+    member inline _.ReturnFrom(task: ValueTask<'T>) : RuntimeAsyncCode<'T> =
+        fun () -> AsyncHelpers.Await task
 
-    member _.ReturnFrom(computation: Async<'T>) : Task<'T> =
-        Async.StartAsTask computation
+    member inline _.ReturnFrom(computation: Async<'T>) : RuntimeAsyncCode<'T> =
+        fun () -> AsyncHelpers.Await(Async.StartAsTask computation)
 
-    member _.Bind(task: Task, continuation: unit -> Task<'U>) =
-        StateMachineHelpers.__runtimeAsync<Task<'U>> (fun () ->
-            AsyncHelpers.Await task
-            AsyncHelpers.Await(continuation()))
+    member inline _.Bind(task: Task, [<InlineIfLambda>] continuation: unit -> RuntimeAsyncCode<'U>) =
+        fun () ->
+                AsyncHelpers.Await task
+                (continuation())()
 
-    member _.Bind(task: Task<'T>, continuation: 'T -> Task<'U>) =
-        StateMachineHelpers.__runtimeAsync<Task<'U>> (fun () ->
-            let result = AsyncHelpers.Await task
-            AsyncHelpers.Await(continuation result))
+    member inline _.Bind(task: Task<'T>, [<InlineIfLambda>] continuation: 'T -> RuntimeAsyncCode<'U>) =
+        fun () ->
+                let result = AsyncHelpers.Await task
+                (continuation result)()
 
-    member _.Bind(task: ValueTask, continuation: unit -> Task<'U>) =
-        StateMachineHelpers.__runtimeAsync<Task<'U>> (fun () ->
-            AsyncHelpers.Await task
-            AsyncHelpers.Await(continuation()))
+    member inline _.Bind(code: RuntimeAsyncCode<'T>, [<InlineIfLambda>] continuation: 'T -> RuntimeAsyncCode<'U>) =
+        fun () ->
+                let result = code()
+                (continuation result)()
 
-    member _.Bind(task: ValueTask<'T>, continuation: 'T -> Task<'U>) =
-        StateMachineHelpers.__runtimeAsync<Task<'U>> (fun () ->
-            let result = AsyncHelpers.Await task
-            AsyncHelpers.Await(continuation result))
+    member inline _.Bind(task: ValueTask, [<InlineIfLambda>] continuation: unit -> RuntimeAsyncCode<'U>) =
+        fun () ->
+                AsyncHelpers.Await task
+                (continuation())()
 
-    member _.Bind(computation: Async<'T>, continuation: 'T -> Task<'U>) =
-        StateMachineHelpers.__runtimeAsync<Task<'U>> (fun () ->
-            let result = AsyncHelpers.Await(Async.StartAsTask computation)
-            AsyncHelpers.Await(continuation result))
+    member inline _.Bind(task: ValueTask<'T>, [<InlineIfLambda>] continuation: 'T -> RuntimeAsyncCode<'U>) =
+        fun () ->
+                let result = AsyncHelpers.Await task
+                (continuation result)()
 
-    member _.Combine(first: Task<unit>, second: unit -> Task<'T>) =
-        sequenceTasks first second
+    member inline _.Bind(computation: Async<'T>, [<InlineIfLambda>] continuation: 'T -> RuntimeAsyncCode<'U>) =
+        fun () ->
+                let result = AsyncHelpers.Await(Async.StartAsTask computation)
+                (continuation result)()
 
-    member _.TryWith(body: unit -> Task<'T>, handler: exn -> Task<'T>) =
-        StateMachineHelpers.__runtimeAsync<Task<'T>> (fun () ->
-            try
-                AsyncHelpers.Await(body())
-            with error ->
-                AsyncHelpers.Await(handler error))
+    member inline _.Combine(first: RuntimeAsyncCode<unit>, second: RuntimeAsyncCode<'T>) =
+        fun () ->
+                first()
+                second()
 
-    member _.TryFinally(body: unit -> Task<'T>, compensation: unit -> unit) =
-        StateMachineHelpers.__runtimeAsync<Task<'T>> (fun () ->
-            try
-                AsyncHelpers.Await(body())
-            finally
-                compensation())
+    member inline _.TryWith(
+        [<InlineIfLambda>] body: RuntimeAsyncCode<'T>,
+        [<InlineIfLambda>] handler: exn -> RuntimeAsyncCode<'T>
+    ) =
+        fun () ->
+                try
+                    body()
+                with error ->
+                    (handler error)()
 
-    member _.Using(resource: 'Resource, body: 'Resource -> Task<'T>) : Task<'T> =
-        StateMachineHelpers.__runtimeAsync<Task<'T>> (fun () ->
-            try
-                AsyncHelpers.Await(body resource)
-            finally
-                match box resource with
-                | :? IAsyncDisposable as disposable ->
-                    AsyncHelpers.Await(disposable.DisposeAsync())
-                | :? IDisposable as disposable ->
-                    disposable.Dispose()
-                | _ -> ())
+    member inline _.TryFinally([<InlineIfLambda>] body: RuntimeAsyncCode<'T>, compensation: unit -> unit) =
+        fun () ->
+                try
+                    body()
+                finally
+                    compensation()
 
-    member _.While(guard: unit -> bool, body: unit -> Task<unit>) : Task<unit> =
-        StateMachineHelpers.__runtimeAsync<Task<unit>> (fun () ->
+    member inline _.Using(resource: 'Resource, [<InlineIfLambda>] body: 'Resource -> RuntimeAsyncCode<'T>) : RuntimeAsyncCode<'T> =
+        fun () ->
+                try
+                    (body resource)()
+                finally
+                    match box resource with
+                    | :? IAsyncDisposable as disposable ->
+                        AsyncHelpers.Await(disposable.DisposeAsync())
+                    | :? IDisposable as disposable ->
+                        disposable.Dispose()
+                    | _ -> ()
+
+    member inline _.While(guard: unit -> bool, [<InlineIfLambda>] body: RuntimeAsyncCode<unit>) : RuntimeAsyncCode<unit> =
+        fun () ->
             while guard() do
-                AsyncHelpers.Await(body()))
+                body()
 
-    member _.For(sequence: seq<'T>, body: 'T -> Task<unit>) : Task<unit> =
-        StateMachineHelpers.__runtimeAsync<Task<unit>> (fun () ->
+    member inline _.For(sequence: seq<'T>, [<InlineIfLambda>] body: 'T -> RuntimeAsyncCode<unit>) : RuntimeAsyncCode<unit> =
+        fun () ->
             use enumerator = sequence.GetEnumerator()
 
             while enumerator.MoveNext() do
-                AsyncHelpers.Await(body enumerator.Current))
+                (body enumerator.Current)()
 
-    member _.MergeSources(left: Task<'T1>, right: Task<'T2>) =
-        StateMachineHelpers.__runtimeAsync<Task<'T1 * 'T2>> (fun () ->
+    member inline _.MergeSources(left: Task<'T1>, right: Task<'T2>) : RuntimeAsyncCode<struct ('T1 * 'T2)> =
+        fun () ->
             let leftResult = AsyncHelpers.Await left
             let rightResult = AsyncHelpers.Await right
-            leftResult, rightResult)
+            leftResult, rightResult
 
-    member _.MergeSources(left: ValueTask<'T1>, right: ValueTask<'T2>) =
-        StateMachineHelpers.__runtimeAsync<Task<'T1 * 'T2>> (fun () ->
+    member inline _.MergeSources(left: ValueTask<'T1>, right: ValueTask<'T2>) : RuntimeAsyncCode<struct ('T1 * 'T2)> =
+        fun () ->
             let leftResult = AsyncHelpers.Await left
             let rightResult = AsyncHelpers.Await right
-            leftResult, rightResult)
+            leftResult, rightResult
 
-    member _.MergeSources(left: Task<'T1>, right: ValueTask<'T2>) =
-        StateMachineHelpers.__runtimeAsync<Task<'T1 * 'T2>> (fun () ->
+    member inline _.MergeSources(left: Task<'T1>, right: ValueTask<'T2>) : RuntimeAsyncCode<struct ('T1 * 'T2)> =
+        fun () ->
             let leftResult = AsyncHelpers.Await left
             let rightResult = AsyncHelpers.Await right
-            leftResult, rightResult)
+            leftResult, rightResult
 
-    member _.MergeSources(left: ValueTask<'T1>, right: Task<'T2>) =
-        StateMachineHelpers.__runtimeAsync<Task<'T1 * 'T2>> (fun () ->
+    member inline _.MergeSources(left: ValueTask<'T1>, right: Task<'T2>) : RuntimeAsyncCode<struct ('T1 * 'T2)> =
+        fun () ->
             let leftResult = AsyncHelpers.Await left
             let rightResult = AsyncHelpers.Await right
-            leftResult, rightResult)
+            leftResult, rightResult
 
-    member _.MergeSources(left: Task<'T1>, right: Async<'T2>) =
-        StateMachineHelpers.__runtimeAsync<Task<'T1 * 'T2>> (fun () ->
-            let leftResult = AsyncHelpers.Await left
-            let rightResult = AsyncHelpers.Await(Async.StartAsTask right)
-            leftResult, rightResult)
-
-    member _.MergeSources(left: Async<'T1>, right: Task<'T2>) =
-        StateMachineHelpers.__runtimeAsync<Task<'T1 * 'T2>> (fun () ->
-            let leftResult = AsyncHelpers.Await(Async.StartAsTask left)
-            let rightResult = AsyncHelpers.Await right
-            leftResult, rightResult)
-
-    member _.MergeSources(left: Async<'T1>, right: Async<'T2>) =
-        StateMachineHelpers.__runtimeAsync<Task<'T1 * 'T2>> (fun () ->
-            let leftResult = AsyncHelpers.Await(Async.StartAsTask left)
-            let rightResult = AsyncHelpers.Await(Async.StartAsTask right)
-            leftResult, rightResult)
-
-    member _.MergeSources(left: Async<'T1>, right: ValueTask<'T2>) =
-        StateMachineHelpers.__runtimeAsync<Task<'T1 * 'T2>> (fun () ->
-            let leftResult = AsyncHelpers.Await(Async.StartAsTask left)
-            let rightResult = AsyncHelpers.Await right
-            leftResult, rightResult)
-
-    member _.MergeSources(left: ValueTask<'T1>, right: Async<'T2>) =
-        StateMachineHelpers.__runtimeAsync<Task<'T1 * 'T2>> (fun () ->
+    member inline _.MergeSources(left: Task<'T1>, right: Async<'T2>) : RuntimeAsyncCode<struct ('T1 * 'T2)> =
+        fun () ->
             let leftResult = AsyncHelpers.Await left
             let rightResult = AsyncHelpers.Await(Async.StartAsTask right)
-            leftResult, rightResult)
+            leftResult, rightResult
+
+    member inline _.MergeSources(left: Async<'T1>, right: Task<'T2>) : RuntimeAsyncCode<struct ('T1 * 'T2)> =
+        fun () ->
+            let leftResult = AsyncHelpers.Await(Async.StartAsTask left)
+            let rightResult = AsyncHelpers.Await right
+            leftResult, rightResult
+
+    member inline _.MergeSources(left: Async<'T1>, right: Async<'T2>) : RuntimeAsyncCode<struct ('T1 * 'T2)> =
+        fun () ->
+            let leftResult = AsyncHelpers.Await(Async.StartAsTask left)
+            let rightResult = AsyncHelpers.Await(Async.StartAsTask right)
+            leftResult, rightResult
+
+    member inline _.MergeSources(left: RuntimeAsyncCode<'T1>, right: Task<'T2>) : RuntimeAsyncCode<struct ('T1 * 'T2)> =
+        fun () ->
+            let leftResult = left()
+            let rightResult = AsyncHelpers.Await right
+            leftResult, rightResult
+
+    member inline _.MergeSources(left: RuntimeAsyncCode<'T1>, right: ValueTask<'T2>) : RuntimeAsyncCode<struct ('T1 * 'T2)> =
+        fun () ->
+            let leftResult = left()
+            let rightResult = AsyncHelpers.Await right
+            leftResult, rightResult
+
+    member inline _.MergeSources(left: RuntimeAsyncCode<'T1>, right: Async<'T2>) : RuntimeAsyncCode<struct ('T1 * 'T2)> =
+        fun () ->
+            let leftResult = left()
+            let rightResult = AsyncHelpers.Await(Async.StartAsTask right)
+            leftResult, rightResult
+
+    member inline _.MergeSources(left: RuntimeAsyncCode<'T1>, right: RuntimeAsyncCode<'T2>) : RuntimeAsyncCode<struct ('T1 * 'T2)> =
+        fun () ->
+            let leftResult = left()
+            let rightResult = right()
+            leftResult, rightResult
+
+    member inline _.MergeSources(left: Task<'T1>, right: RuntimeAsyncCode<'T2>) : RuntimeAsyncCode<struct ('T1 * 'T2)> =
+        fun () ->
+            let leftResult = AsyncHelpers.Await left
+            let rightResult = right()
+            leftResult, rightResult
+
+    member inline _.MergeSources(left: ValueTask<'T1>, right: RuntimeAsyncCode<'T2>) : RuntimeAsyncCode<struct ('T1 * 'T2)> =
+        fun () ->
+            let leftResult = AsyncHelpers.Await left
+            let rightResult = right()
+            leftResult, rightResult
+
+    member inline _.MergeSources(left: Async<'T1>, right: RuntimeAsyncCode<'T2>) : RuntimeAsyncCode<struct ('T1 * 'T2)> =
+        fun () ->
+            let leftResult = AsyncHelpers.Await(Async.StartAsTask left)
+            let rightResult = right()
+            leftResult, rightResult
+
+    member inline _.MergeSources(left: Async<'T1>, right: ValueTask<'T2>) : RuntimeAsyncCode<struct ('T1 * 'T2)> =
+        fun () ->
+            let leftResult = AsyncHelpers.Await(Async.StartAsTask left)
+            let rightResult = AsyncHelpers.Await right
+            leftResult, rightResult
+
+    member inline _.MergeSources(left: ValueTask<'T1>, right: Async<'T2>) : RuntimeAsyncCode<struct ('T1 * 'T2)> =
+        fun () ->
+            let leftResult = AsyncHelpers.Await left
+            let rightResult = AsyncHelpers.Await(Async.StartAsTask right)
+            leftResult, rightResult
 
 module RuntimeTaskAwaitableExtensions =
     type RuntimeTaskBuilder with
@@ -175,8 +226,8 @@ module RuntimeTaskAwaitableExtensions =
             and ^Awaiter :> ICriticalNotifyCompletion
             and ^Awaiter: (member get_IsCompleted: unit -> bool)
             and ^Awaiter: (member GetResult: unit -> 'T)>
-            (task: ^TaskLike, continuation: 'T -> Task<'U>)
-            : Task<'U> =
+            (task: ^TaskLike, [<InlineIfLambda>] continuation: 'T -> RuntimeAsyncCode<'U>)
+            : RuntimeAsyncCode<'U> =
             bindAwaiter
                 (fun () -> (^TaskLike: (member GetAwaiter: unit -> ^Awaiter) task))
                 (fun awaiter -> (^Awaiter: (member GetResult: unit -> 'T) awaiter))
