@@ -1,73 +1,25 @@
-module RuntimeTasksAsyncDisposalException
+// Minimal repro: suspending with AsyncHelpers.Await inside the *handler* of an
+// exception-handling region of a __runtimeAsync method. This is what `use` on an
+// IAsyncDisposable lowers to (the DisposeAsync await sits in the finally).
+//
+// Today this compiles cleanly but terminates the process at execution
+// (0xC0000409), so the component test compiles this file without running it.
+// Awaiting in the try *body* with a plain finally works; awaiting inside the
+// finally itself does not.
+module RuntimeAsyncAwaitInExceptionRegion
 
-open System
 open System.Runtime.CompilerServices
 open System.Threading.Tasks
-open Microsoft.FSharp.Control
 open Microsoft.FSharp.Core.CompilerServices
 
-let private delayed value =
-    Task.Delay(1).ContinueWith(fun (_: Task) -> value)
-
-type RuntimeTaskBuilder() =
-    member inline _.Delay([<InlineIfLambda>] generator: unit -> 'T) =
-        generator
-
-    member inline _.Run([<InlineIfLambda>] code: unit -> 'T) : Task<'T> =
-        StateMachineHelpers.__runtimeAsync (code())
-
-    member inline _.Return(value: 'T) = value
-
-    member inline _.Zero() = ()
-
-    member inline _.Bind(task: Task<'T>, [<InlineIfLambda>] continuation: 'T -> 'U) =
-        let result = AsyncHelpers.Await task
-        continuation result
-
-    member inline _.TryFinally(
-        [<InlineIfLambda>] body: unit -> 'T,
-        compensation: unit -> unit
-    ) =
+let run () : Task<int> =
+    StateMachineHelpers.__runtimeAsync (
         try
-            body()
+            1
         finally
-            compensation()
-
-    member inline _.Using(resource: 'Resource, [<InlineIfLambda>] body: 'Resource -> 'T) =
-        try
-            body resource
-        finally
-            match box resource with
-            | :? IAsyncDisposable as disposable ->
-                AsyncHelpers.Await(disposable.DisposeAsync())
-            | _ -> ()
-
-[<AutoOpen>]
-module RuntimeTask =
-    let runtimeTask = RuntimeTaskBuilder()
-
-let private runCase () =
-    let mutable disposed = 0
-
-    let computation =
-        runtimeTask {
-            use _resource =
-                { new IAsyncDisposable with
-                    member _.DisposeAsync() =
-                        ValueTask(
-                            delayed (disposed <- disposed + 1)
-                        ) }
-
-            failwith "body failure"
-        }
-
-    try
-        computation.GetAwaiter().GetResult() |> ignore
-    with _ ->
-        ()
-
-    disposed
+            AsyncHelpers.Await(Task.Delay(1))
+    )
 
 [<EntryPoint>]
 let main _ =
-    if runCase () = 1 then 0 else 1
+    if (run ()).GetAwaiter().GetResult() = 1 then 0 else 1

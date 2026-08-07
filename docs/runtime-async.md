@@ -43,10 +43,12 @@ call int32 AsyncHelpers::Await<int32>(Task<int32>)
 Known runtime restrictions (currently **not** diagnosed by the F# compiler):
 
 * `tail.` and `localloc` are forbidden.
-* Suspension cannot occur inside exception-handling regions. Today this
-  compiles and then crashes the process at execution (`0xC0000409` on
-  Windows); see the async-disposal component test, which is compile-only for
-  this reason.
+* suspension cannot occur inside exception-handling regions. Awaiting in a
+  `try` body now works on the current runtime; awaiting inside a `finally`
+  handler (which is what `use` on an `IAsyncDisposable` lowers to) compiles
+  and then terminates the process at execution (`0xC0000409`). See
+  `RuntimeTasksAsyncDisposalException.fs`, which is compile-only for this
+  reason.
 * Byref, byref-like, and pinned locals cannot be preserved across suspension.
 
 ## F# surface
@@ -179,19 +181,37 @@ Tests live in `tests/FSharp.Compiler.ComponentTests/Language/RuntimeAsync*`:
 
 ### Test builder
 
-`RuntimeTaskBuilder.fs` is a quasi-synchronous builder: `Delay` is the
-identity on `unit -> 'T`, so all combinators are plain inline functions over
-delayed code; only `Run` introduces `__runtimeAsync` and returns `Task<'T>`.
-`Bind` lowers directly to `AsyncHelpers.Await` (plus an SRTP awaiter-based
-overload using `AwaitAwaiter`). `Using` awaits `IAsyncDisposable` in the
-`finally` compensation, which is why disposal-while-suspended cases hit the
-EH-region restriction above.
+`RuntimeTaskBuilder.fs` is a quasi-synchronous builder aiming for feature
+parity with FSharp.Core's `task` builder: `Delay` is the identity on
+`unit -> 'T`, so all combinators are plain inline functions over delayed
+code; only `Run` introduces `__runtimeAsync` and returns `Task<'T>`.
+`Bind` lowers directly to `AsyncHelpers.Await` with SRTP fallbacks
+(`AwaitAwaiter`) for arbitrary task-likes, as do `ReturnFrom` and
+`MergeSources`. `MergeSources` awaits its sources sequentially, matching the
+task builder — concurrency comes from the sources being hot tasks.
+`Async<'T>` binds via `Async.StartImmediateAsTask`, matching `task {}`'s
+current-thread semantics.
 
-Execution coverage is deliberately limited to the runtime-safe subset
-(simple/nested/applicative binds, awaitables, `return!`, type inference).
-try/with, try/finally with awaits, `use!`, and awaits inside loops remain
-compile-only or untested until the runtime and compiler enforce their
-semantics.
+`RuntimeTasks.fs` ports the TaskBuilder test suite
+(`tests/FSharp.Core.UnitTests/.../Tasks.fs`) test-for-test with
+`task {` replaced by `runtimeTask {`. Tests that hit the known runtime-async
+restrictions or divergences are kept in the file with `knownFailing_` /
+`knownDivergent_` prefixes, compiled but not run:
+
+* suspension in `try/finally`, or in `try/with` in non-tail position
+  (forbidden by the runtime contract; crashes with `0xC0000409` or loses the
+  finally);
+* `use`/`use!` whose disposal awaits an `IAsyncDisposable` (the `Using`
+  compensation suspends in a `finally`);
+* tests requiring synchronous (hot) start of the body before the first
+  suspension — on the current runtime build the body is not observably run
+  before the returned `Task` is awaited;
+* `SynchronizationContext` capture: with a sync context installed, the task
+  completes without the body observably running.
+
+Two `task {}` inference behaviors are not matched by the overload set:
+element-type propagation through `Bind` without an annotation, and unannotated
+`return! failwith ...` (both need explicit annotations in the port).
 
 ## Not yet implemented
 

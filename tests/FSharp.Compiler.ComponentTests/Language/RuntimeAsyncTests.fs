@@ -151,13 +151,14 @@ let ``runtime async direct intrinsic fixture executes`` () =
     |> shouldSucceed
 
 [<Fact>]
-// Equivalent to TaskBuilder's testUsingAsyncDisposableExnAsync. Compilation succeeds,
-// but executing the fixture currently terminates the process with 0xC0000409.
-let ``runtime task async disposal exception compiles (runtime execution is failing)`` () =
+// Minimal repro: awaiting inside an exception-handling region. Compilation
+// succeeds, but executing the fixture currently terminates the process with
+// 0xC0000409 (suspension in EH regions is forbidden by the runtime contract).
+let ``runtime async suspension in exception region compiles (runtime execution is failing)`` () =
     Path.Combine(__SOURCE_DIRECTORY__, "RuntimeAsync", "RuntimeTasksAsyncDisposalException.fs")
     |> FsFromPath
     |> withLangVersionPreview
-    |> compile
+    |> compileExeAndRun
     |> shouldSucceed
 
 #else
