@@ -13,6 +13,8 @@ implemented, not an aspirational design. The .NET design is still evolving:
 
 * [Runtime-async specification](https://github.com/dotnet/runtime/blob/main/docs/design/specs/runtime-async.md)
 * [Runtime-async code-generation contract](https://github.com/dotnet/runtime/blob/main/docs/design/coreclr/botr/runtime-async-codegen.md)
+* [Roslyn runtime async design](https://github.com/dotnet/roslyn/blob/main/docs/compilers/CSharp/Runtime%20Async%20Design.md) —
+  how C# lowers `await` (including the exception-handling hoisting described below)
 
 The implementation targets functions, lambdas, and members returning
 `System.Threading.Tasks.Task<'T>`. A computation-expression builder exists in
@@ -45,10 +47,19 @@ Known runtime restrictions (currently **not** diagnosed by the F# compiler):
 * `tail.` and `localloc` are forbidden.
 * suspension cannot occur inside exception-handling regions. Awaiting in a
   `try` body now works on the current runtime; awaiting inside a `finally`
-  handler (which is what `use` on an `IAsyncDisposable` lowers to) compiles
-  and then terminates the process at execution (`0xC0000409`). See
-  `RuntimeTasksAsyncDisposalException.fs`, which is compile-only for this
-  reason.
+  handler compiles and then terminates the process at execution
+  (`0xC0000409`). See `RuntimeTasksAsyncDisposalException.fs`, which is
+  compile-only for this reason.
+
+  C# avoids this by rewriting EH-region awaits at lowering time (see the
+  Roslyn design doc): `try B finally { await x }` becomes
+  `try B catch-all { pend e }`, then `await x` outside the region, then
+  rethrow the pending exception. The test `RuntimeTaskBuilder.Using`
+  prototypes this pattern in F# source: it captures the body result/exception
+  in a `Choice`, runs `DisposeAsync` (possibly suspending) *outside* the
+  `try`, then restores a pending exception. This makes `use` on an
+  `IAsyncDisposable` work under runtime async (`testUsingAsyncDisposableSync`
+  executes).
 * Byref, byref-like, and pinned locals cannot be preserved across suspension.
 
 ## F# surface

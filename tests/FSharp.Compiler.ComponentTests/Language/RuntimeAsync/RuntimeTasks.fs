@@ -1068,7 +1068,7 @@ let knownFailing_testUsingSadPath () =
     t.Wait()
     require (not disposed) "disposed thing that never should've existed"
 
-let knownFailing_testUsingAsyncDisposableSync () =
+let testUsingAsyncDisposableSync () =
     for i in 1 .. 5 do
         let mutable disposed = 0
         let t =
@@ -1288,4 +1288,5 @@ let main _ =
     testAsyncsMixedWithTasks()
     testAsyncsMixedWithTasks_ShouldNotSwitchContext()
     testCustomAwaitable()
+    testUsingAsyncDisposableSync()
     0

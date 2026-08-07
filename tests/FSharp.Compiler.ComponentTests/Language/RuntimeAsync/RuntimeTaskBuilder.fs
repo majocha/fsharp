@@ -54,11 +54,32 @@ type RuntimeTaskBuilder() =
     member inline _.TryFinally([<InlineIfLambda>] body: unit -> 'T, compensation: unit -> unit) =
         try body() finally compensation()
     member inline _.Using(resource: 'Resource, [<InlineIfLambda>] body: 'Resource -> 'T) =
-        try body resource finally
-            match box resource with
-            | :? IAsyncDisposable as disposable -> AsyncHelpers.Await(disposable.DisposeAsync())
-            | :? IDisposable as disposable -> disposable.Dispose()
-            | _ -> ()
+        // Awaiting in a finally region is forbidden by the runtime-async contract.
+        // Hoist the DisposeAsync suspension out of the region: capture any exception
+        // from the body in a catch-all, run disposal (possibly suspending) outside
+        // the handler, then restore the pending exception. Mirrors the Roslyn
+        // runtime-async lowering for `await` in `finally`.
+        let mutable pendingException: exn = null
+
+        let result =
+            try
+                Choice1Of2(body resource)
+            with error ->
+                pendingException <- error
+                Choice2Of2()
+
+        match box resource with
+        | :? IAsyncDisposable as disposable -> AsyncHelpers.Await(disposable.DisposeAsync())
+        | :? IDisposable as disposable -> disposable.Dispose()
+        | _ -> ()
+
+        match pendingException with
+        | null -> ()
+        | error -> raise error
+
+        match result with
+        | Choice1Of2 value -> value
+        | Choice2Of2() -> Unchecked.defaultof<'T>
     member inline _.While(guard: unit -> bool, [<InlineIfLambda>] body: unit -> unit) =
         while guard() do body()
     member inline _.For(sequence: seq<'T>, [<InlineIfLambda>] body: 'T -> unit) =
