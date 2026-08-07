@@ -3127,18 +3127,19 @@ let ComputeDebugPointForBinding g bind =
         | _, (Expr.Lambda _ | Expr.TyLambda _) -> false, None
         | DebugPointAtBinding.Yes m, _ -> false, Some m
 
+let IsRuntimeAsyncVref (g: TcGlobals) (vref: ValRef) =
+    match vref.TryDeref, g.cgh__runtimeAsync_vref.TryDeref with
+    | ValueSome v1, ValueSome v2 -> v1 === v2
+    | _ -> false
+
 let rec TryUnwrapRuntimeAsyncExpr (g: TcGlobals) expr =
-    let isRuntimeAsyncVref (vref: ValRef) =
-        match vref.TryDeref, g.cgh__runtimeAsync_vref.TryDeref with
-        | ValueSome v1, ValueSome v2 -> v1 === v2
-        | _ -> false
 
     match expr with
     | Expr.DebugPoint(_, innerExpr) ->
         match TryUnwrapRuntimeAsyncExpr g innerExpr with
         | true, body -> true, body
         | false, _ -> false, expr
-    | Expr.App(Expr.Val(vref, _, _), _, [ _ ], [ body ], _) when isRuntimeAsyncVref vref -> true, body
+    | Expr.App(Expr.Val(vref, _, _), _, [ _ ], [ body ], _) when IsRuntimeAsyncVref g vref -> true, body
     | _ -> false, expr
 
 //-------------------------------------------------------------------------
@@ -3285,6 +3286,9 @@ and GenExprAux (cenv: cenv) (cgbuf: CodeGenBuffer) eenv expr (sequel: sequel) =
             // application of local type functions with type parameters = measure types and body = local value - inline the body
             GenExpr cenv cgbuf eenv v sequel
 
+        | Expr.App(Expr.Val(vref, _, _), _, [ _ ], [ _ ], _) when IsRuntimeAsyncVref g vref ->
+            GenRuntimeAsyncAsStartedTask cenv cgbuf eenv expr sequel
+
         | Expr.App(f, fty, tyargs, curriedArgs, m) -> GenApp cenv cgbuf eenv (f, fty, tyargs, curriedArgs, m) sequel
 
         | Expr.Val(v, _, m) -> GenGetVal cenv cgbuf eenv (v, m) sequel
@@ -3385,6 +3389,14 @@ and GenExprAux (cenv: cenv) (cgbuf: CodeGenBuffer) eenv expr (sequel: sequel) =
         | Expr.Link _ -> failwith "Unexpected reclink"
 
         | Expr.TyChoose(_, _, m) -> error (InternalError("Unexpected Expr.TyChoose", m))
+
+and GenRuntimeAsyncAsStartedTask cenv cgbuf eenv expr sequel =
+    let m = expr.Range
+    let unitVal, _ = mkLocal m "unit" cenv.g.unit_ty
+    let lambdaExpr = mkLambda m unitVal (expr, tyOfExpr cenv.g expr)
+    let lambdaTy = tyOfExpr cenv.g lambdaExpr
+    let application = mkApps cenv.g ((lambdaExpr, lambdaTy), [], [ mkUnit cenv.g m ], m)
+    GenExpr cenv cgbuf eenv application sequel
 
 and GenExprs cenv cgbuf eenv es =
     List.iter (fun e -> GenExpr cenv cgbuf eenv e Continue) es
