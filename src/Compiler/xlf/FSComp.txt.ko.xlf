@@ -1892,11 +1892,6 @@
         <target state="translated">다시 시작 가능한 코드 또는 다시 시작 가능한 상태 시스템을 사용하려면 /langversion:preview가 필요합니다.</target>
         <note />
       </trans-unit>
-      <trans-unit id="tcRuntimeAsyncInvalidReturnType">
-        <source>The __runtimeAsync intrinsic requires a return type of Task&lt;'T&gt;.</source>
-        <target state="new">The __runtimeAsync intrinsic requires a return type of Task&lt;'T&gt;.</target>
-        <note />
-      </trans-unit>
       <trans-unit id="tcSetterForInitOnlyPropertyCannotBeCalled1">
         <source>Cannot call '{0}' - a setter for init-only property, please use object initialization instead. See https://aka.ms/fsharp-assigning-values-to-properties-at-initialization</source>
         <target state="translated">init 전용 속성의 setter인 '{0}'을(를) 호출할 수 없습니다. 개체 초기화를 대신 사용하세요. https://aka.ms/fsharp-assigning-values-to-properties-at-initialization를 참조하세요.</target>

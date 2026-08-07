@@ -3128,9 +3128,7 @@ let ComputeDebugPointForBinding g bind =
         | DebugPointAtBinding.Yes m, _ -> false, Some m
 
 let IsRuntimeAsyncVref (g: TcGlobals) (vref: ValRef) =
-    match vref.TryDeref, g.cgh__runtimeAsync_vref.TryDeref with
-    | ValueSome v1, ValueSome v2 -> v1 === v2
-    | _ -> false
+    valRefEq g vref g.cgh__runtimeAsync_vref
 
 let rec TryUnwrapRuntimeAsyncExpr (g: TcGlobals) expr =
 
@@ -3390,6 +3388,13 @@ and GenExprAux (cenv: cenv) (cgbuf: CodeGenBuffer) eenv expr (sequel: sequel) =
 
         | Expr.TyChoose(_, _, m) -> error (InternalError("Unexpected Expr.TyChoose", m))
 
+// A __runtimeAsync marker that is not at the top of a method or closure body is lowered
+// as a "started task": the marked expression becomes the body of a fresh closure whose
+// Invoke method is the runtime-async method, and the closure is invoked immediately.
+// This relies on GenApp never beta-reducing a lambda application - it always emits a
+// closure value followed by an indirect call (the "worst case" path), which routes the
+// lambda through the closure generation that consumes the marker. If that invariant ever
+// changes, the marker expression would reach GenExprAux again and recurse without bound.
 and GenRuntimeAsyncAsStartedTask cenv cgbuf eenv expr sequel =
     let m = expr.Range
     let unitVal, _ = mkLocal m "unit" cenv.g.unit_ty

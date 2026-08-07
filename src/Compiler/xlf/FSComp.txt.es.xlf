@@ -1892,11 +1892,6 @@
         <target state="translated">El uso de código reanudable o de máquinas de estado reanudables requiere /langversion:preview</target>
         <note />
       </trans-unit>
-      <trans-unit id="tcRuntimeAsyncInvalidReturnType">
-        <source>The __runtimeAsync intrinsic requires a return type of Task&lt;'T&gt;.</source>
-        <target state="new">The __runtimeAsync intrinsic requires a return type of Task&lt;'T&gt;.</target>
-        <note />
-      </trans-unit>
       <trans-unit id="tcSetterForInitOnlyPropertyCannotBeCalled1">
         <source>Cannot call '{0}' - a setter for init-only property, please use object initialization instead. See https://aka.ms/fsharp-assigning-values-to-properties-at-initialization</source>
         <target state="translated">No se puede llamar a '{0}': un establecedor para una propiedad de solo inicialización. Use la inicialización del objeto en su lugar. Ver https://aka.ms/fsharp-assigning-values-to-properties-at-initialization</target>

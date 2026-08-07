@@ -78,87 +78,6 @@ type Calculator() =
 
 """
 
-let private runtimeTaskSource = """
-module RuntimeTaskTest
-
-open System.Threading.Tasks
-open System.Runtime.CompilerServices
-open Microsoft.FSharp.Core.CompilerServices
-
-let delayed value =
-    Task.Delay(1).ContinueWith(fun (_: Task) -> value)
-
-type RuntimeTaskBuilder() =
-    member inline _.Delay([<InlineIfLambda>] generator: unit -> 'T) =
-        generator
-
-    member inline _.Run([<InlineIfLambda>] code: unit -> 'T) : Task<'T> =
-        StateMachineHelpers.__runtimeAsync (code())
-
-    member inline _.Zero() = ()
-
-    member inline _.Return(value: 'T) = value
-
-    member inline _.Bind(task: Task, [<InlineIfLambda>] continuation: unit -> 'U) =
-        AsyncHelpers.Await task
-        continuation()
-
-    member inline _.Bind(task: Task<'T>, [<InlineIfLambda>] continuation: 'T -> 'U) =
-        let result = AsyncHelpers.Await task
-        continuation result
-
-    member inline _.Bind(
-        code: struct ('T1 * 'T2),
-        [<InlineIfLambda>] continuation: struct ('T1 * 'T2) -> 'U
-    ) =
-        continuation code
-
-    member inline _.Bind(
-        task: Task<struct ('T1 * 'T2)>,
-        [<InlineIfLambda>] continuation: ('T1 * 'T2) -> 'U
-    ) =
-        let struct (first, second) = AsyncHelpers.Await task
-        continuation (first, second)
-
-    member inline _.Combine(
-        [<InlineIfLambda>] first: unit -> unit,
-        [<InlineIfLambda>] continuation: unit -> 'T
-    ) =
-        first()
-        continuation()
-
-    member inline _.MergeSources(left: Task<'T1>, right: Task<'T2>) : struct ('T1 * 'T2) =
-        let leftResult = AsyncHelpers.Await left
-        let rightResult = AsyncHelpers.Await right
-        struct (leftResult, rightResult)
-
-[<AutoOpen>]
-module RuntimeTask =
-    let runtimeTask = RuntimeTaskBuilder()
-
-let compute x y =
-    runtimeTask {
-        do! Task.Delay(1)
-        let! left = delayed x
-        and! right = delayed y
-        return left + right
-    }
-
-type Calculator() =
-    member _.Add(x: int, y: int) : Task<int> =
-        StateMachineHelpers.__runtimeAsync (
-            AsyncHelpers.Await(Task.Delay(1))
-            x + y)
-
-[<EntryPoint>]
-let main _ =
-    let calculator = Calculator()
-    let builderResult = compute 20 22 |> fun task -> task.GetAwaiter().GetResult()
-    let memberResult = calculator.Add(20, 22).GetAwaiter().GetResult()
-
-    if builderResult = 42 && memberResult = 42 then 0 else 1
-"""
-
 [<Fact>]
 let ``runtime async requires preview language version`` () =
     FSharp """
@@ -214,16 +133,11 @@ let ``runtime async combines awaited chunks without delegates`` () =
     |> shouldSucceed
 
 [<Fact>]
-let ``runtime task builder compiles through runtime async`` () =
-    FSharp runtimeTaskSource
-    |> withLangVersionPreview
-    |> compile
-    |> shouldSucceed
-
-[<Fact>]
 let ``runtime task builder fixture executes through runtime async`` () =
-    Path.Combine(__SOURCE_DIRECTORY__, "RuntimeAsync", "RuntimeTasks.fs")
-    |> FsFromPath
+    FsFromPath (Path.Combine(__SOURCE_DIRECTORY__, "RuntimeAsync", "RuntimeTaskBuilder.fs"))
+    |> withAdditionalSourceFile (
+        SourceFromPath (Path.Combine(__SOURCE_DIRECTORY__, "RuntimeAsync", "RuntimeTasks.fs"))
+    )
     |> withLangVersionPreview
     |> compileExeAndRun
     |> shouldSucceed

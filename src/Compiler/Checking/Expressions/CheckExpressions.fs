@@ -8687,16 +8687,12 @@ and Propagate (cenv: cenv) (overallTy: OverallTy) (env: TcEnv) tpenv (expr: Appl
 
         | DelayedApp (atomicFlag, isSugar, synLeftExprOpt, synArg, mExprAndArg) :: delayedList' ->
             let denv = env.DisplayEnv
-            let isRuntimeAsyncVref (vref: ValRef) =
-                match vref.TryDeref, g.cgh__runtimeAsync_vref.TryDeref with
-                | ValueSome v1, ValueSome v2 -> v1 === v2
-                | _ -> false
 
             let isRuntimeAsync =
                 match expr.Expr with
                 | Expr.Val(vref, _, _)
                 | Expr.App(Expr.Val(vref, _, _), _, [ _ ], [], _)
-                    when isRuntimeAsyncVref vref -> true
+                    when valRefEq g vref g.cgh__runtimeAsync_vref -> true
                 | _ -> false
 
             match isRuntimeAsync, UnifyFunctionTypeUndoIfFailed cenv denv mExpr exprTy with
@@ -9012,18 +9008,13 @@ and TcApplicationThen (cenv: cenv) (overallTy: OverallTy) env tpenv mExprAndArg 
             None
 
     let tryTcRuntimeAsyncApplication () =
-        let isRuntimeAsyncVref (vref: ValRef) =
-            match vref.TryDeref, g.cgh__runtimeAsync_vref.TryDeref with
-            | ValueSome v1, ValueSome v2 -> v1 === v2
-            | _ -> false
-
         let intrinsic =
             match leftExpr with
             | ApplicableExpr(expr=Expr.Val (vref, flags, m))
-                    when isRuntimeAsyncVref vref ->
+                    when valRefEq g vref g.cgh__runtimeAsync_vref ->
                     Some(vref, flags, m)
             | ApplicableExpr(expr=Expr.App (Expr.Val (vref, flags, m), _, [ _ ], [], _))
-                    when isRuntimeAsyncVref vref ->
+                    when valRefEq g vref g.cgh__runtimeAsync_vref ->
                     Some(vref, flags, m)
             | _ ->
                     None
@@ -9034,15 +9025,13 @@ and TcApplicationThen (cenv: cenv) (overallTy: OverallTy) env tpenv mExprAndArg 
         | Some(vref, flags, m) ->
             checkLanguageFeatureAndRecover g.langVersion LanguageFeature.RuntimeAsync m
 
-            let _, intrinsicResultTy = stripFunTy g exprTy
-            let carrierTy = intrinsicResultTy
+            let _, carrierTy = stripFunTy g exprTy
 
+            // The intrinsic's signature is 'T -> Task<'T>, so the carrier is always Task<'T>.
             let bodyResultTy =
                 match stripTyEqns g carrierTy with
                 | AppTy g (_, [ resultTy ]) -> resultTy
-                | _ ->
-                    errorR (Error(FSComp.SR.tcRuntimeAsyncInvalidReturnType(), m))
-                    NewInferenceType g
+                | _ -> NewInferenceType g
 
             checkLanguageFeatureRuntimeAndRecover cenv.infoReader LanguageFeature.RuntimeAsync m
 

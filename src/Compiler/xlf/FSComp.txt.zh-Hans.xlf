@@ -1892,11 +1892,6 @@
         <target state="translated">使用可恢复代码或可恢复状态机需要 /langversion:preview</target>
         <note />
       </trans-unit>
-      <trans-unit id="tcRuntimeAsyncInvalidReturnType">
-        <source>The __runtimeAsync intrinsic requires a return type of Task&lt;'T&gt;.</source>
-        <target state="new">The __runtimeAsync intrinsic requires a return type of Task&lt;'T&gt;.</target>
-        <note />
-      </trans-unit>
       <trans-unit id="tcSetterForInitOnlyPropertyCannotBeCalled1">
         <source>Cannot call '{0}' - a setter for init-only property, please use object initialization instead. See https://aka.ms/fsharp-assigning-values-to-properties-at-initialization</source>
         <target state="translated">无法调用 "{0}"，它是仅限 init 属性的资源库，请改用对象初始化。请参阅 https://aka.ms/fsharp-assigning-values-to-properties-at-initialization</target>

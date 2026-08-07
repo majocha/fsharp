@@ -1892,11 +1892,6 @@
         <target state="translated">使用可繼續的程式碼或可繼續的狀態機器需要 /langversion:preview</target>
         <note />
       </trans-unit>
-      <trans-unit id="tcRuntimeAsyncInvalidReturnType">
-        <source>The __runtimeAsync intrinsic requires a return type of Task&lt;'T&gt;.</source>
-        <target state="new">The __runtimeAsync intrinsic requires a return type of Task&lt;'T&gt;.</target>
-        <note />
-      </trans-unit>
       <trans-unit id="tcSetterForInitOnlyPropertyCannotBeCalled1">
         <source>Cannot call '{0}' - a setter for init-only property, please use object initialization instead. See https://aka.ms/fsharp-assigning-values-to-properties-at-initialization</source>
         <target state="translated">無法呼叫 '{0}' - 僅初始化屬性的 setter，請改為使用物件初始化。請參閱 https://aka.ms/fsharp-assigning-values-to-properties-at-initialization</target>

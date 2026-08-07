@@ -7,14 +7,17 @@ index: 375
 
 # Runtime async
 
-This document describes the initial design for F# support for the .NET
-runtime-async feature. The .NET design is still evolving:
+This document describes the current proof-of-concept implementation of F#
+support for the .NET runtime-async feature. It describes the code as
+implemented, not an aspirational design. The .NET design is still evolving:
 
 * [Runtime-async specification](https://github.com/dotnet/runtime/blob/main/docs/design/specs/runtime-async.md)
 * [Runtime-async code-generation contract](https://github.com/dotnet/runtime/blob/main/docs/design/coreclr/botr/runtime-async-codegen.md)
 
-The first implementation targets functions, lambdas, members, and generated
-methods. Computation-expression builders are deliberately deferred.
+The implementation targets functions, lambdas, and members returning
+`System.Threading.Tasks.Task<'T>`. A computation-expression builder exists in
+the component tests and works for a subset of the surface, but is not part of
+FSharp.Core.
 
 ## Runtime contract
 
@@ -22,261 +25,180 @@ Runtime-async methods are CIL methods marked with
 `MethodImplOptions.Async` (`0x2000`). The runtime, rather than a compiler
 generated state machine and method builder, owns suspension and resumption.
 
-The initial F# surface supports the generic return shape
-`System.Threading.Tasks.Task<'T>`. Other task-like shapes may be added later.
+Only the generic return shape `System.Threading.Tasks.Task<'T>` is supported.
+Non-generic `Task` and `ValueTask`/`ValueTask<'T>` returns are not.
 
-For a non-generic return, the evaluation stack must be empty at `ret`. For a
-generic return, the result type must be on the stack at `ret`.
-
-Suspension is explicit. It is performed by calls to the appropriate
-`System.Runtime.CompilerServices.AsyncHelpers` method:
+Suspension is explicit, via `System.Runtime.CompilerServices.AsyncHelpers`:
 
 * `Await` for `Task`, `ValueTask`, and configured awaitables
-* `AwaitAwaiter` or `UnsafeAwaitAwaiter` for awaiters
+* `AwaitAwaiter` for awaiters (used by the test builder's SRTP `Bind`)
 
-The runtime specification recommends preserving the adjacent IL sequence:
+The compiler emits the adjacent IL sequence the runtime specification expects:
 
 ```il
 call Task<int32> SomeAsyncMethod(...)
 call int32 AsyncHelpers::Await<int32>(Task<int32>)
 ```
 
-Runtime-async methods currently have important restrictions:
+Known runtime restrictions (currently **not** diagnosed by the F# compiler):
 
 * `tail.` and `localloc` are forbidden.
-* Suspension cannot occur inside exception-handling regions.
+* Suspension cannot occur inside exception-handling regions. Today this
+  compiles and then crashes the process at execution (`0xC0000409` on
+  Windows); see the async-disposal component test, which is compile-only for
+  this reason.
 * Byref, byref-like, and pinned locals cannot be preserved across suspension.
-* The method must have a supported `Task<'T>` return shape.
-* The method must be CIL and belong to an async-capable assembly.
 
 ## F# surface
 
-The source-level marker is the compiler intrinsic `__runtimeAsync`. The
-leading underscores make the low-level nature explicit and avoid collisions
-with user code. It is not an attribute and is not an ordinary runtime
-function.
-
-The initial form is:
+The source-level marker is the compiler intrinsic
+`Microsoft.FSharp.Core.CompilerServices.StateMachineHelpers.__runtimeAsync`,
+declared in `resumable.fsi` alongside the other compiler intrinsics:
 
 ```fsharp
-let f (x: int) : Task<int> =
+val __runtimeAsync<'T> : 'T -> System.Threading.Tasks.Task<'T>
+```
+
+Its FSharp.Core implementation throws; the compiler consumes every
+occurrence before code generation, so the body is never executed. It is
+marked `NoInlining` so a missed consumption does not silently fold into a
+caller.
+
+The feature is gated on `langversion:preview`
+(`LanguageFeature.RuntimeAsync`) and on the target reference assemblies
+exposing `MethodImplOptions.Async` (see "Runtime capability check" below).
+Without the language version the checker reports error 3350; without runtime
+support it reports 3351.
+
+Typical forms:
+
+```fsharp
+let add (x: int) (y: int) : Task<int> =
     __runtimeAsync (
-        let y = AsyncHelpers.Await (getValue x)
-        y + 1)
-```
+        let first = AsyncHelpers.Await (getTask x)
+        first + y)
 
-The intrinsic marks the final logical result of a `Task<'T>`-returning method.
-It is erased during code generation; the generated method returns `'T` at the
-runtime-async `ret` instruction.
-
-```fsharp
-let addAsync (x: int) (y: int) : Task<int> =
-    __runtimeAsync (
-        let z = AsyncHelpers.Await (getAsync x)
-        z + y)
-```
-
-There is no implicit awaiting of a task-returning expression:
-
-```fsharp
-let f () : Task<Task<int>> =
-    __runtimeAsync (getValue ())
-```
-
-Flattening is achieved by an explicit await:
-
-```fsharp
-let f () : Task<int> =
-    __runtimeAsync (AsyncHelpers.Await (getValue ()))
-```
-
-Builders can implement `Bind` by lowering their await operation to the same
-runtime-async result pattern.
-
-The component-test builder uses the corresponding delayed representation:
-`RuntimeAsyncCode<'T>` is an alias for `unit -> 'T`. Its combinators are inline
-and compose these functions; only inline `Run` introduces `__runtimeAsync` and
-returns `Task<'T>`. This exercises the intended builder shape without making
-the builder part of the initial public F# surface.
-
-## Return-type inference
-
-The intrinsic changes the method return convention, not the logical result
-type of the expression.
-
-Conceptually:
-
-```text
-expression:        'T
-runtimeAsync:      Task<'T>
-```
-
-For a method:
-
-```text
-method result 'T becomes Task<'T>
-```
-
-This is not an ordinary F# cast. Type checking should infer the expression as
-`T`, validate the `Task<'T>` return type, and record a runtime-async marker for
-later code generation.
-
-The declared `Task<'T>` result supplies the carrier while the intrinsic's
-argument is checked as the logical `'T` result.
-
-For members, use the normal tupled argument group used for .NET methods:
-
-```fsharp
 type C() =
-    member this.Add(x: int, y: int) : Task<int> =
+    member _.Add(x: int, y: int) : Task<int> =
         __runtimeAsync (
-            let z = AsyncHelpers.Await (getAsync x)
-            z + y)
+            AsyncHelpers.Await (getTask x) + y)
+
+// Let-bound value (not a function): also supported.
+let answer : Task<int> = __runtimeAsync 42
 ```
 
-Tupled member arguments are preferred over curried member syntax because they
-produce the expected .NET parameter list, overload behavior, reflection shape,
-and interop surface.
+There is no implicit awaiting: the argument of `__runtimeAsync` is checked
+as the logical `'T` result, and flattening requires an explicit
+`AsyncHelpers.Await`.
 
-The method return annotation supplies the `Task<'T>` carrier.
+## Type checking
 
-The intrinsic should validate the complete carrier type before generic
-substitution. Only `Task<'T>` is valid in this initial implementation.
+`__runtimeAsync` is an ordinary generic value in the typed tree; no new
+expression node or `Val` flag is added. Type checking special-cases its
+application in two places in `CheckExpressions.fs`:
 
-## Compiler representation
+* `Propagate` skips function-type propagation for the intrinsic so the
+  argument is not checked against a function domain.
+* `TcApplicationThen` (`tryTcRuntimeAsyncApplication`) recognises the
+  intrinsic (possibly type-applied), gates the language feature and runtime
+  capability, extracts the result type `'T` from the intrinsic's own
+  instantiated signature `'T -> Task<'T>`, and checks the argument against
+  `'T` with `TcExprFlex2`. The result type of the application is `Task<'T>`,
+  which unifies with the declared return type of the enclosing binding in
+  the usual way. A non-`Task<'T>` declared return type therefore fails with
+  the ordinary FS0001 type-mismatch error.
 
-The typed tree and subsequent representation decisions need an internal
-runtime-async marker distinct from legacy `Async<'T>` and resumable state
-machines. The marker must survive the transformations that can produce a
-method body:
+User code that defines its own `__runtimeAsync` is unaffected: the intrinsic
+is only recognised when the `ValRef` resolves (via `valRefEq`) to the
+FSharp.Core declaration.
 
-* top-level functions;
-* local functions and closures;
-* delegate methods;
-* instance and static members;
-* virtual and interface implementations;
-* generic and inline functions.
+## Optimization
 
-`__runtimeAsync` should be consumed during lowering. It must not become a
-normal wrapper call, allocate an F# state machine, or use
-`AsyncTaskMethodBuilder`/`AsyncValueTaskMethodBuilder`.
+`Optimizer.fs` preserves the marker application as-is, optimizing only its
+argument. The marked expression is forced to `HasEffect = true` and
+`UnknownValue`, so the optimizer never inlines, duplicates, or discards it.
+The marker therefore survives optimization as an ordinary `Expr.App` node;
+nothing else in the typed tree records that a method is runtime-async.
 
-There are two lowering contexts:
+## Code generation
 
-* In a direct function or member declaration body, `__runtimeAsync` is a
-  final-result marker. The compiler consumes it and marks the enclosing
-  generated method.
-* A value initializer that contains the marker needs a generated async helper,
-  because a module initializer cannot itself be runtime-async.
+`IlxGen.fs` recognises the marker in three placements
+(`TryUnwrapRuntimeAsyncExpr`, which strips `DebugPoint` wrappers):
 
-Inlining needs an async-context boundary. A runtime-async body may be inlined
-into another runtime-async method, but it must not be expanded into an
-ordinary synchronous method if doing so introduces `AsyncHelpers` suspension
-calls. Calls that are not safely inlined retain their runtime-async method
-boundary.
+1. **Method body** (`GenMethodForBinding`): the marker is unwrapped from the
+   top of the method lambda body; the generated `ILMethodDef` gets
+   `.WithAsync(true)`, which sets impl attribute bit `0x2000`
+   (`MethodImplOptions.Async`, written as a literal because older reference
+   assemblies do not define the enum member). `NoInlining` is forced on the
+   method.
+2. **Closure body** (`GenClosureAsLocalTypeFunction` and
+   `GenClosureAsFirstClassFunction`): the same unwrapping marks the closure
+   `Invoke` method's IL body (`ILMethodBody.IsRuntimeAsync`).
+   `EraseClosures.convIlxClosureDef` copies that flag onto the emitted
+   method, again with `NoInlining`.
+3. **Any other expression position** (`GenRuntimeAsyncAsStartedTask`), e.g.
+   a `let`-bound value initializer: the marker application is wrapped in a
+   fresh `fun () -> ...` lambda that is immediately applied to `unit` and
+   regenerated. The lambda flows through the closure path (2), producing a
+   generated runtime-async helper method whose call starts the task. This
+   relies on `GenApp` never beta-reducing a lambda application (it always
+   emits a closure plus an indirect call); see the comment at
+   `GenRuntimeAsyncAsStartedTask`.
 
-## Type checking and diagnostics
+A marker that ends up wrapped in anything other than `DebugPoint` at the top
+of a method or closure body is not detected there, but still reaches the
+catch-all case (3), so compilation stays correct — the cost is an extra
+nested runtime-async helper method rather than marking the enclosing method
+directly.
 
-The compiler should reject:
+## Runtime capability check
 
-* use of `__runtimeAsync` outside a `Task<'T>`-returning method or generated
-  helper;
-* suspension in exception-handling regions;
-* unsupported byref, byref-like, pinned-local, `tail.`, and `localloc`
-  situations;
-* compilation when the referenced runtime libraries do not expose
-  `MethodImplOptions.Async` and `AsyncHelpers`.
+`InfoReader` gates `LanguageFeature.RuntimeAsync` on the target reference
+assemblies: it looks up the `Async` field on
+`System.Runtime.CompilerServices.MethodImplOptions`. This is a metadata-only
+probe of the *reference* assemblies; it does not prove the *executing* host
+JIT supports runtime-async. Compiling against new reference assemblies and
+running on an older runtime is not a supported configuration.
 
-The compiler already probes target-runtime metadata through `InfoReader`.
-Runtime-async support uses the `MethodImplOptions.Async` field exposed by
-.NET 11, together with the `AsyncHelpers` API used by suspension points, rather
-than hard-coding an SDK or runtime version.
+## Test infrastructure
 
-## Runtime and SDK compatibility
+Tests live in `tests/FSharp.Compiler.ComponentTests/Language/RuntimeAsync*`:
 
-On .NET 11, projects must opt in to Runtime Async with
-`<Features>runtime-async=on</Features>`. This is separate from F# preview
-language support; `EnablePreviewFeatures` is not required by .NET 11 for the
-runtime feature itself.
+* The component test project sets `<Features>runtime-async=on</Features>`
+  (the .NET runtime opt-in), as does the project template in
+  `FSharp.Test.Utilities` used by `compileExeAndRun`.
+* Type-check tests assert the preview gate (3350) and the unsupported-runtime
+  gate (3351, on non-.NET-Core targets).
+* IL tests verify direct `AsyncHelpers.Await` calls appear without
+  intervening delegates.
+* Execution tests (`RuntimeAsyncBasic.fs`, `RuntimeTasks.fs` with the shared
+  `RuntimeTaskBuilder.fs`) run with `compileExeAndRun`, so they compile with
+  the compiler under test and execute on the host runtime.
+* `RuntimeTasksAsyncDisposalException.fs` documents the known
+  EH-region-suspension crash: it is compiled but not executed.
 
-The SDK selected by `global.json` is not sufficient to establish runtime-async
-support. Three versions can differ:
+### Test builder
 
-1. The SDK used to build the F# compiler and tests.
-2. The reference assemblies used while compiling generated F# code.
-3. The CoreCLR or NativeAOT host and JIT that execute that code.
+`RuntimeTaskBuilder.fs` is a quasi-synchronous builder: `Delay` is the
+identity on `unit -> 'T`, so all combinators are plain inline functions over
+delayed code; only `Run` introduces `__runtimeAsync` and returns `Task<'T>`.
+`Bind` lowers directly to `AsyncHelpers.Await` (plus an SRTP awaiter-based
+overload using `AwaitAwaiter`). `Using` awaits `IAsyncDisposable` in the
+`finally` compensation, which is why disposal-while-suspended cases hit the
+EH-region restriction above.
 
-All three must be compatible for behavioral tests. In particular, compiling
-against new reference assemblies and executing on an older host must not be
-treated as a supported configuration.
+Execution coverage is deliberately limited to the runtime-safe subset
+(simple/nested/applicative binds, awaitables, `return!`, type inference).
+try/with, try/finally with awaits, `use!`, and awaits inside loops remain
+compile-only or untested until the runtime and compiler enforce their
+semantics.
 
-The runtime implementation is changing over time. The current runtime sources
-contain `MethodImplOptions.Async` and `AsyncHelpers`, but the `AsyncHelpers`
-implementation is target-specific and unsupported targets may contain throwing
-stubs. The runtime sources also contain internal test/build hooks such as
-`RuntimeAsyncMethodGenerationAttribute`; those hooks are not the F# contract
-unless the runtime team explicitly makes them one.
+## Not yet implemented
 
-Build and test infrastructure must therefore:
-
-* pin or identify the runtime commit used for runtime-async execution tests;
-* use the matching reference assemblies when compiling those tests;
-* run a capability probe before behavioral tests;
-* avoid assuming that the repository's selected SDK implies JIT support;
-* keep compile-only and runtime-execution tests separate;
-* skip or produce a deliberate diagnostic on unsupported hosts;
-* track changes in runtime build switches and enablement requirements rather
-  than embedding version checks in the F# compiler.
-
-The capability probe should verify the actual execution environment, including
-`MethodImplOptions.Async`, `AsyncHelpers`, and a minimal marked method that
-suspends and resumes. A metadata-only probe is not enough to prove JIT support.
-
-## Test plan
-
-### Compiler and IL tests
-
-Compile source containing `__runtimeAsync` and verify:
-
-* the generated method has the `Async` method implementation flag;
-* the method returns the selected `Task<'T>` shape;
-* no F# state-machine type or method builder is generated;
-* direct async calls are followed by the appropriate `AsyncHelpers.Await`;
-* closure, member, delegate, generic, and inline representations retain the
-  marker;
-* invalid carriers and restricted constructs produce diagnostics.
-
-These tests can run as compile-only or IL-verification tests, but they must not
-be interpreted as proof that the output executes on the current host runtime.
-
-### Runtime tests
-
-Run generated assemblies only on a compatible CoreCLR or NativeAOT runtime.
-Cover at least:
-
-* an already-completed `Task`;
-* a genuinely suspended and resumed `Task`;
-* result-bearing `Task` calls;
-* multiple suspension points;
-* captured locals and closure values;
-* exceptions and cancellation;
-* execution and synchronization context behavior;
-* nested runtime-async calls;
-* direct calls from synchronous methods.
-
-Runtime tests should follow the runtime repository's capability-gated pattern
-and record enough SDK/runtime information to reproduce failures. Keep these
-tests in compiler component tests so they compile with the compiler under test,
-not with the SDK compiler used to build the test assembly.
-
-## Implementation order
-
-1. Add the `__runtimeAsync` intrinsic and `Task<'T>`-aware type checking.
-2. Add the internal typed-tree marker and preserve it through representation
-   and inlining decisions.
-3. Emit the `Async` method flag and runtime-compatible return-stack shape.
-4. Emit and validate direct `AsyncHelpers` calls.
-5. Add member, closure, delegate, generic, and inline handling.
-6. Add compile-only, IL-verification, and capability-gated runtime tests.
-7. Add builder support later by lowering `Bind` to the established
-   runtime-async suspension representation.
+* Diagnostics for suspension in exception-handling regions, byref/byref-like
+  or pinned locals across suspension, `tail.`, and `localloc`.
+* Non-generic `Task` and `ValueTask`/`ValueTask<'T>` return shapes.
+* Any FSharp.Core builder (the test builder is test-only).
+* Compile-time enforcement that the marker was actually consumed before
+  code generation (a missed marker throws only when its FSharp.Core stub is
+  reached at run time, or produces invalid IL as described above).
