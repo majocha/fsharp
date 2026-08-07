@@ -10262,10 +10262,9 @@ and GenMethodForBinding
                 .WithPInvoke(hasDllImport)
                 .WithPreserveSig(hasPreserveSigImplFlag || hasPreserveSigNamedArg)
                 .WithSynchronized(hasSynchronizedImplFlag)
-                .WithNoInlining(hasNoInliningFlag)
                 .WithAggressiveInlining(hasAggressiveInliningImplFlag)
                 .WithAsync(isRuntimeAsync)
-                .WithNoInlining(isRuntimeAsync)
+                .WithNoInlining(hasNoInliningFlag || isRuntimeAsync)
                 .With(isEntryPoint = isExplicitEntryPoint, securityDecls = secDecls)
 
         let mdef =
