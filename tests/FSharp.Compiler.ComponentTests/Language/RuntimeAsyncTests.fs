@@ -36,30 +36,27 @@ open System.Threading.Tasks
 open Microsoft.FSharp.Core.CompilerServices
 open System.Runtime.CompilerServices
 
-type RuntimeAsyncCode<'T> = unit -> 'T
-
 type RuntimeTaskBuilder() =
-    member inline _.Delay([<InlineIfLambda>] generator: unit -> RuntimeAsyncCode<'T>) =
-        fun () -> (generator())()
+    member inline _.Delay([<InlineIfLambda>] generator: unit -> 'T) =
+        generator
 
-    member inline _.Run([<InlineIfLambda>] code: RuntimeAsyncCode<'T>) : Task<'T> =
+    member inline _.Run([<InlineIfLambda>] code: unit -> 'T) : Task<'T> =
         StateMachineHelpers.__runtimeAsync (code())
 
-    member inline _.Zero() : RuntimeAsyncCode<unit> =
-        fun () -> ()
+    member inline _.Zero() = ()
 
-    member inline _.Return(value: 'T) : RuntimeAsyncCode<'T> =
-        fun () -> value
+    member inline _.Return(value: 'T) = value
 
-    member inline _.Bind(task: Task, [<InlineIfLambda>] continuation: unit -> RuntimeAsyncCode<'U>) =
-        fun () ->
-            AsyncHelpers.Await task
-            (continuation())()
+    member inline _.Bind(task: Task, [<InlineIfLambda>] continuation: unit -> 'U) =
+        AsyncHelpers.Await task
+        continuation()
 
-    member inline _.Combine(first: RuntimeAsyncCode<unit>, second: RuntimeAsyncCode<'T>) =
-        fun () ->
-            first()
-            second()
+    member inline _.Combine(
+        [<InlineIfLambda>] first: unit -> unit,
+        [<InlineIfLambda>] second: unit -> 'T
+    ) =
+        first()
+        second()
 
 [<AutoOpen>]
 module RuntimeTask =
@@ -91,54 +88,49 @@ open Microsoft.FSharp.Core.CompilerServices
 let delayed value =
     Task.Delay(1).ContinueWith(fun (_: Task) -> value)
 
-type RuntimeAsyncCode<'T> = unit -> 'T
-
 type RuntimeTaskBuilder() =
-    member inline _.Delay([<InlineIfLambda>] generator: unit -> RuntimeAsyncCode<'T>) =
-        fun () -> (generator())()
+    member inline _.Delay([<InlineIfLambda>] generator: unit -> 'T) =
+        generator
 
-    member inline _.Run([<InlineIfLambda>] code: RuntimeAsyncCode<'T>) : Task<'T> =
+    member inline _.Run([<InlineIfLambda>] code: unit -> 'T) : Task<'T> =
         StateMachineHelpers.__runtimeAsync (code())
 
-    member inline _.Zero() : RuntimeAsyncCode<unit> =
-        fun () -> ()
+    member inline _.Zero() = ()
 
-    member inline _.Return(value: 'T) : RuntimeAsyncCode<'T> =
-        fun () -> value
+    member inline _.Return(value: 'T) = value
 
-    member inline _.Bind(task: Task, [<InlineIfLambda>] continuation: unit -> RuntimeAsyncCode<'U>) =
-        fun () ->
-            AsyncHelpers.Await task
-            (continuation())()
+    member inline _.Bind(task: Task, [<InlineIfLambda>] continuation: unit -> 'U) =
+        AsyncHelpers.Await task
+        continuation()
 
-    member inline _.Bind(task: Task<'T>, [<InlineIfLambda>] continuation: 'T -> RuntimeAsyncCode<'U>) =
-        fun () ->
-            let result = AsyncHelpers.Await task
-            (continuation result)()
+    member inline _.Bind(task: Task<'T>, [<InlineIfLambda>] continuation: 'T -> 'U) =
+        let result = AsyncHelpers.Await task
+        continuation result
 
-    member inline _.Bind(code: RuntimeAsyncCode<'T>, [<InlineIfLambda>] continuation: 'T -> RuntimeAsyncCode<'U>) =
-        fun () ->
-            let result = code()
-            (continuation result)()
+    member inline _.Bind(
+        code: struct ('T1 * 'T2),
+        [<InlineIfLambda>] continuation: struct ('T1 * 'T2) -> 'U
+    ) =
+        continuation code
 
     member inline _.Bind(
         task: Task<struct ('T1 * 'T2)>,
-        [<InlineIfLambda>] continuation: ('T1 * 'T2) -> RuntimeAsyncCode<'U>
+        [<InlineIfLambda>] continuation: ('T1 * 'T2) -> 'U
     ) =
-        fun () ->
-            let struct (first, second) = AsyncHelpers.Await task
-            (continuation (first, second))()
+        let struct (first, second) = AsyncHelpers.Await task
+        continuation (first, second)
 
-    member inline _.Combine(first: RuntimeAsyncCode<unit>, continuation: RuntimeAsyncCode<'T>) =
-        fun () ->
-            first()
-            continuation()
+    member inline _.Combine(
+        [<InlineIfLambda>] first: unit -> unit,
+        [<InlineIfLambda>] continuation: unit -> 'T
+    ) =
+        first()
+        continuation()
 
-    member inline _.MergeSources(left: Task<'T1>, right: Task<'T2>) : RuntimeAsyncCode<struct ('T1 * 'T2)> =
-        fun () ->
-            let leftResult = AsyncHelpers.Await left
-            let rightResult = AsyncHelpers.Await right
-            struct (leftResult, rightResult)
+    member inline _.MergeSources(left: Task<'T1>, right: Task<'T2>) : struct ('T1 * 'T2) =
+        let leftResult = AsyncHelpers.Await left
+        let rightResult = AsyncHelpers.Await right
+        struct (leftResult, rightResult)
 
 [<AutoOpen>]
 module RuntimeTask =
@@ -229,16 +221,24 @@ let ``runtime task builder compiles through runtime async`` () =
     |> shouldSucceed
 
 [<Fact>]
-let ``runtime task builder fixture compiles through runtime async`` () =
+let ``runtime task builder fixture executes through runtime async`` () =
     Path.Combine(__SOURCE_DIRECTORY__, "RuntimeAsync", "RuntimeTasks.fs")
     |> FsFromPath
     |> withLangVersionPreview
-    |> compile
+    |> compileExeAndRun
     |> shouldSucceed
 
+[<Fact>]
+let ``runtime async direct intrinsic fixture executes`` () =
+    Path.Combine(__SOURCE_DIRECTORY__, "RuntimeAsync", "RuntimeAsyncBasic.fs")
+    |> FsFromPath
+    |> withLangVersionPreview
+    |> compileExeAndRun
+    |> shouldSucceed
+
+[<Fact>]
 // Equivalent to TaskBuilder's testUsingAsyncDisposableExnAsync. Compilation succeeds,
 // but executing the fixture currently terminates the process with 0xC0000409.
-[<Fact>]
 let ``runtime task async disposal exception compiles (runtime execution is failing)`` () =
     Path.Combine(__SOURCE_DIRECTORY__, "RuntimeAsync", "RuntimeTasksAsyncDisposalException.fs")
     |> FsFromPath
