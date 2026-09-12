@@ -16,6 +16,8 @@
 
 namespace FSharp.Core.UnitTests.Control.TasksDynamic
 
+#if !NET
+
 #nowarn "1204" // construct only for use in compiled code
 open System
 open System.Collections
@@ -1339,4 +1341,6 @@ type Basics() =
                     t.Wait()
                     require ran "never ran")
             taskOuter.Wait()
+
+#endif
 

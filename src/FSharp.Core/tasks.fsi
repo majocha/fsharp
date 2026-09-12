@@ -11,6 +11,89 @@ open Microsoft.FSharp.Core
 open Microsoft.FSharp.Core.CompilerServices
 open Microsoft.FSharp.Collections
 
+#if NET
+
+module InternalHelpers =
+
+    /// A structure that looks like an Awaiter
+    type Awaiter<'Awaiter, 'TResult
+        when 'Awaiter :> ICriticalNotifyCompletion
+        and 'Awaiter: (member get_IsCompleted: unit -> bool)
+        and 'Awaiter: (member GetResult: unit -> 'TResult)> = 'Awaiter
+
+    type Awaitable<'Awaitable, 'Awaiter, 'TResult when 'Awaitable: (member GetAwaiter: unit -> Awaiter<'Awaiter, 'TResult>)> = 'Awaitable
+
+    module Awaiter =
+        val inline isCompleted: awaiter: Awaiter<'Awaiter, 'TResult> -> bool
+        val inline getResult: awaiter: Awaiter<'Awaiter, 'TResult> -> 'TResult
+        val inline onCompleted: awaiter: Awaiter<'Awaiter, 'TResult> -> continuation: Action -> unit
+        val inline unsafeOnCompleted: awaiter: Awaiter<'Awaiter, 'TResult> -> continuation: Action -> unit
+
+    module Awaitable =
+        val inline getAwaiter: awaitable: Awaitable<'Awaitable, 'Awaiter, 'TResult> -> Awaiter<'Awaiter, 'TResult>
+
+    module AsyncHelpers =
+        val inline awaitTaskUnit: task: Task -> unit
+        val inline awaitValueTaskUnit: task: ValueTask -> unit
+        val inline awaitTask: task: Task<'T> -> 'T
+        val inline awaitValueTask: task: ValueTask<'T> -> 'T
+        val inline awaitAsync: computation: Async<'T> -> 'T
+        val inline awaitAwaitable: awaitable: Awaitable<'Awaitable, 'Awaiter, 'TResult> -> 'TResult
+
+open InternalHelpers
+
+[<Sealed>]
+type RuntimeTaskBuilder =
+    member inline ReturnFrom: task: Task<'T> -> 'T
+    member inline ReturnFrom: task: Task -> unit
+    member inline ReturnFrom: task: ValueTask<'T> -> 'T
+    member inline ReturnFrom: task: ValueTask -> unit
+    member inline ReturnFrom: computation: Async<'T> -> 'T
+    member inline Bind: task: Task * continuation: (unit -> 'U) -> 'U
+    member inline Bind: task: Task<'T> * continuation: ('T -> 'U) -> 'U
+    member inline Bind: code: struct ('T1 * 'T2) * continuation: (struct ('T1 * 'T2) -> 'U) -> 'U
+    member inline Bind: task: ValueTask * continuation: (unit -> 'U) -> 'U
+    member inline Bind: task: ValueTask<'T> * continuation: ('T -> 'U) -> 'U
+    member inline Bind: computation: Async<'T> * continuation: ('T -> 'U) -> 'U
+
+    member inline Delay: generator: (unit -> 'T) -> (unit -> 'T)
+    member inline Run: code: (unit -> 'T) -> Task<'T>
+    member inline Zero: unit -> unit
+    member inline Return: value: 'T -> 'T
+
+    member inline Combine: first: (unit -> unit) * second: (unit -> 'T) -> 'T
+    member inline TryWith: body: (unit -> 'T) * handler: (exn -> 'T) -> 'T
+    member inline TryFinally: body: (unit -> 'T) * compensation: (unit -> unit) -> 'T
+    member inline Using: resource: 'Resource * body: ('Resource -> 'T) -> 'T
+    member inline While: guard: (unit -> bool) * body: (unit -> unit) -> unit
+    member inline For: sequence: seq<'T> * body: ('T -> unit) -> unit
+    member inline MergeSources: left: Task<'T1> * right: Task<'T2> -> struct ('T1 * 'T2)
+    member inline MergeSources: left: ValueTask<'T1> * right: ValueTask<'T2> -> struct ('T1 * 'T2)
+    member inline MergeSources: left: Task<'T1> * right: ValueTask<'T2> -> struct ('T1 * 'T2)
+    member inline MergeSources: left: ValueTask<'T1> * right: Task<'T2> -> struct ('T1 * 'T2)
+    member inline MergeSources: left: Task<'T1> * right: Async<'T2> -> struct ('T1 * 'T2)
+    member inline MergeSources: left: Async<'T1> * right: Task<'T2> -> struct ('T1 * 'T2)
+    member inline MergeSources: left: Async<'T1> * right: Async<'T2> -> struct ('T1 * 'T2)
+    member inline MergeSources: left: Async<'T1> * right: ValueTask<'T2> -> struct ('T1 * 'T2)
+    member inline MergeSources: left: ValueTask<'T1> * right: Async<'T2> -> struct ('T1 * 'T2)
+    member inline MergeSources: left: Task<'T1> * right: struct ('T2 * 'T3) -> struct ('T1 * struct ('T2 * 'T3))
+    member inline MergeSources: left: ValueTask<'T1> * right: struct ('T2 * 'T3) -> struct ('T1 * struct ('T2 * 'T3))
+    member inline MergeSources: left: Async<'T1> * right: struct ('T2 * 'T3) -> struct ('T1 * struct ('T2 * 'T3))
+    member inline MergeSources: left: struct ('T1 * 'T2) * right: Task<'T3> -> struct (struct ('T1 * 'T2) * 'T3)
+    member inline MergeSources: left: struct ('T1 * 'T2) * right: ValueTask<'T3> -> struct (struct ('T1 * 'T2) * 'T3)
+    member inline MergeSources: left: struct ('T1 * 'T2) * right: Async<'T3> -> struct (struct ('T1 * 'T2) * 'T3)
+
+module RuntimeTaskAwaitableExtensions =
+    type RuntimeTaskBuilder with
+        member inline ReturnFrom: taskLike: Awaitable<'Awaitable, 'Awaiter, 'TResult> -> 'TResult
+
+[<AutoOpen>]
+module RuntimeTask =
+    val task: RuntimeTaskBuilder
+    val backgroundTask: RuntimeTaskBuilder
+
+#else
+
 /// <summary>
 /// The extra data stored in ResumableStateMachine for tasks
 /// </summary>
@@ -854,4 +937,6 @@ module ValueTask =
     /// </example>
     [<CompiledName("OfTask")>]
     val inline ofTask: task: Task<'T> -> ValueTask<'T>
+#endif
+
 #endif
