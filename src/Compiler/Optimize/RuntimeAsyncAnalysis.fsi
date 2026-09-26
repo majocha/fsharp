@@ -13,18 +13,10 @@ type RuntimeAsyncAnalyzer =
     member ContainsFragment: expr: Expr -> bool
     member ContainsSuspension: expr: Expr -> bool
 
-val ShouldForceRuntimeAsyncInline:
-    analyzer: RuntimeAsyncAnalyzer -> runtimeAsyncContext: bool -> vref: ValRef -> inlineBody: Expr option -> bool
+val ShouldForceRuntimeAsyncInline: analyzer: RuntimeAsyncAnalyzer -> vref: ValRef -> inlineBody: Expr option -> bool
 
 val ShouldForceRuntimeAsyncApplication:
-    analyzer: RuntimeAsyncAnalyzer ->
-    runtimeAsyncContext: bool ->
-    vref: ValRef ->
-    inlineBody: Expr option ->
-    args: Expr list ->
-        bool
-
-val InlineRuntimeAsyncLambdaArgument: g: TcGlobals -> isRuntimeAsyncFragment: (Expr -> bool) -> expr: Expr -> Expr
+    analyzer: RuntimeAsyncAnalyzer -> vref: ValRef -> inlineBody: Expr option -> args: Expr list -> bool
 
 val GetRuntimeAsyncNonPreservableUses: g: TcGlobals -> expr: Expr -> Val list
 

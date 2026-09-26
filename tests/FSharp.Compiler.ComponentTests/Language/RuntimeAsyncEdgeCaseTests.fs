@@ -99,6 +99,124 @@ let ``runtime async edge cases execute through the CE builder`` (optimize: bool)
     |> compileExeAndRun
     |> shouldSucceed
 
+[<Theory>]
+[<InlineData(false, false)>]
+[<InlineData(false, true)>]
+[<InlineData(true, false)>]
+[<InlineData(true, true)>]
+let ``Issue 20577 preserves conditional fold callback state`` (optimize: bool, useList: bool) =
+    let source = """
+module ConditionalFold
+
+open System.Collections.Generic
+open System.Threading.Tasks
+open RuntimeTaskBuilder.RuntimeTask
+
+let run deduplicate (ready: Task<int>) =
+    runtimeTask {
+        let! initial = ready
+        return
+#if LIST
+            List.fold
+#else
+            Array.fold
+#endif
+                (if deduplicate then
+                     let seen = HashSet<int>()
+                     fun total item -> if seen.Add item then total + item else total
+                 else
+                     fun total item -> total + item)
+                initial
+#if LIST
+                [ 1; 1; 2 ]
+#else
+                [| 1; 1; 2 |]
+#endif
+    }
+
+[<EntryPoint>]
+let main _ =
+    for deduplicate in [ true; false ] do
+        let gate = TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously)
+        let work = run deduplicate gate.Task
+        if work.IsCompleted then failwith "Expected suspension"
+        gate.SetResult 0
+        let expected = if deduplicate then 3 else 4
+        let actual = work.GetAwaiter().GetResult()
+        if actual <> expected then failwith $"Expected {expected}, got {actual}"
+    0
+"""
+
+    FSharp source
+    |> withLangVersionPreview
+    |> withFSharpCoreShippedNet
+    |> withOptimization optimize
+    |> withOptions (if useList then [ "--define:LIST" ] else [])
+    |> withReferences [
+        FsFromPath builderPath
+        |> withName "RuntimeTaskLibrary"
+        |> withLangVersionPreview
+        |> withFSharpCoreShippedNet
+        |> withOptimization true
+    ]
+    |> compileExeAndRun
+    |> shouldSucceed
+
+[<Theory>]
+[<InlineData(false, false)>]
+[<InlineData(false, true)>]
+[<InlineData(true, false)>]
+[<InlineData(true, true)>]
+let ``Issue 20577 rejects a stateful conditional suspending fold callback`` (optimize: bool, useList: bool) =
+    FSharp """
+module ConditionalSuspendingFold
+open System.Collections.Generic
+open System.Threading.Tasks
+open System.Runtime.CompilerServices
+open RuntimeTaskBuilder.RuntimeTask
+
+let mutable constructions = 0
+
+let run choose (ready: Task<int>) (gate: Task<int>) =
+    runtimeTask {
+        let! initial = ready
+        return
+#if LIST
+            List.fold
+#else
+            Array.fold
+#endif
+                (if choose then
+                     constructions <- constructions + 1
+                     let seen = HashSet<int>()
+                     fun total item ->
+                         let offset = AsyncHelpers.Await gate
+                         if seen.Add item then total + item + offset else total
+                 else
+                     fun total item -> total + item)
+                initial
+#if LIST
+                [ 1; 2 ]
+#else
+                [| 1; 2 |]
+#endif
+    }
+"""
+    |> withLangVersionPreview
+    |> withFSharpCoreShippedNet
+    |> withOptimization optimize
+    |> withOptions (if useList then [ "--define:LIST" ] else [])
+    |> withReferences [
+        FsFromPath builderPath
+        |> withName "RuntimeTaskLibrary"
+        |> withLangVersionPreview
+        |> withFSharpCoreShippedNet
+        |> withOptimization true
+    ]
+    |> compile
+    |> shouldFail
+    |> withErrorCode 3918
+
 // ============================ emitted IL (codegen contract) ============================
 // Each fact pins the whole method body captured from the PR's fsc, so dotnet/runtime reviewers get
 // the exact lowering to check against docs/runtime-async.md. ILChecker normalizes both sides

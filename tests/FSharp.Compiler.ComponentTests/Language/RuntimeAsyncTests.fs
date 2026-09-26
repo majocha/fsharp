@@ -502,8 +502,10 @@ let main _ =
     |> compileExeAndRun
     |> shouldSucceed
 
-[<Fact>]
-let ``runtime async fuses suspension in inline returned closures`` () =
+[<InlineData(false)>]
+[<InlineData(true)>]
+[<Theory>]
+let ``runtime async fuses suspension in inline returned closures`` (optimize: bool) =
     FSharp """
 module RuntimeAsyncInlineReturnedClosureTest
 
@@ -549,6 +551,90 @@ let main _ =
 """
     |> withLangVersionPreview
     |> withFSharpCoreShippedNet
+    |> withOptimization optimize
+    |> compileExeAndRun
+    |> shouldSucceed
+
+[<InlineData(false)>]
+[<InlineData(true)>]
+[<Theory>]
+let ``runtime async inlines a conditional await in a builder`` (optimize: bool) =
+    FSharp """
+module RuntimeAsyncConditionalBuilder
+
+open System.Threading
+open System.Threading.Tasks
+open System.Runtime.CompilerServices
+open Microsoft.FSharp.Core.CompilerServices
+
+type Code<'T> = CancellationToken -> 'T
+
+type Builder() =
+    member inline _.Delay([<InlineIfLambda>] generator: unit -> Code<'T>) : Code<'T> =
+        fun ct -> generator() ct
+
+    member inline _.Zero() : Code<unit> =
+        fun _ -> ()
+
+    member inline _.Return(value: 'T) : Code<'T> =
+        fun _ -> value
+
+    member inline _.Bind(task: Task<unit>, [<InlineIfLambda>] continuation: unit -> Code<'T>) : Code<'T> =
+        fun ct -> continuation (AsyncHelpers.Await task) ct
+
+    member inline _.Combine([<InlineIfLambda>] first: Code<unit>, [<InlineIfLambda>] second: Code<'T>) : Code<'T> =
+        fun ct ->
+            ct.ThrowIfCancellationRequested()
+            first ct
+            second ct
+
+    member inline _.Run([<InlineIfLambda>] code: Code<'T>) : Task<'T> =
+        StateMachineHelpers.__runtimeAsyncReturn (code CancellationToken.None)
+
+let builder = Builder()
+let release = TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
+let mutable captures = 0
+let capture() =
+    captures <- captures + 1
+    release.Task
+
+let mapping value = builder {
+    if value = 1 then do! capture()
+    return value
+}
+
+let mappingMany value = builder {
+    if value = 1 then do! capture()
+    if value = 2 then do! capture()
+    if value = 3 then do! capture()
+    if value = 4 then do! capture()
+    return value
+}
+
+let mappingMatch value = builder {
+    match value with
+    | 1 -> do! capture()
+    | 2 -> do! capture()
+    | _ -> ()
+    return value
+}
+
+[<EntryPoint>]
+let main _ =
+    if (mappingMany 0).Result <> 0 || captures <> 0 then failwith "Unexpected capture"
+    let pending = mapping 1
+    let other = mappingMany 2
+    let third = mappingMatch 1
+    if pending.IsCompleted || other.IsCompleted || third.IsCompleted || captures <> 3 then
+        failwith "Expected three suspensions and three captures"
+    release.SetResult(())
+    if pending.GetAwaiter().GetResult() = 1 && other.GetAwaiter().GetResult() = 2
+       && third.GetAwaiter().GetResult() = 1 && (mappingMatch 0).Result = 0
+       && (mapping 2).Result = 2 && captures = 3 then 0 else 1
+"""
+    |> withLangVersionPreview
+    |> withFSharpCoreShippedNet
+    |> withOptimization optimize
     |> compileExeAndRun
     |> shouldSucceed
 
@@ -888,6 +974,43 @@ let main _ =
     |> compileExeAndRun
     |> shouldSucceed
 
+[<InlineData(false)>]
+[<InlineData(true)>]
+[<Theory>]
+let ``runtime async evaluates curried arguments before function bodies`` (optimize: bool) =
+    FSharp """
+module RuntimeAsyncCurriedArgumentExceptionTest
+
+open System
+open System.Threading.Tasks
+open Microsoft.FSharp.Core.CompilerServices
+
+let inline apply f x y = f x y
+
+let run () : Task<int> =
+    StateMachineHelpers.__runtimeAsyncReturn (
+        apply
+            (fun x ->
+                failwith "body"
+                fun y -> x + y)
+            1
+            (snd (Unchecked.defaultof<string * int>)))
+
+[<EntryPoint>]
+let main _ =
+    try
+        run().GetAwaiter().GetResult() |> ignore
+        1
+    with
+    | :? NullReferenceException -> 0
+    | _ -> 1
+"""
+    |> withLangVersionPreview
+    |> withFSharpCoreShippedNet
+    |> withOptimization optimize
+    |> compileExeAndRun
+    |> shouldSucceed
+
 [<Fact>]
 let ``runtime async rejects synchronized methods`` () =
     FSharp """
@@ -929,6 +1052,34 @@ let ``runtime async specializes nested inline suspensions without optimization``
     |> withNoOptimize
     |> compile
     |> verifyILContains [ "AsyncHelpers::Await<int32>(class [runtime]System.Threading.Tasks.Task`1<!!0>)" ]
+
+[<InlineData(false)>]
+[<InlineData(true)>]
+[<Theory>]
+let ``runtime async inlines known task builder continuation`` (optimize: bool) =
+    FsFromPath (Path.Combine(__SOURCE_DIRECTORY__, "RuntimeAsync", "RuntimeTaskBuilder.fs"))
+    |> withAdditionalSourceFile (
+        FsSourceWithFileName "KnownContinuation.fs" """
+module KnownContinuation
+open System.Threading.Tasks
+open RuntimeTaskBuilder.RuntimeTask
+
+let run (gate: Task<int>) =
+    runtimeTask {
+        let! value = gate
+        return value + 1
+    }
+
+[<EntryPoint>]
+let main _ =
+    if (run (Task.FromResult 41)).Result = 42 then 0 else 1
+"""
+    )
+    |> withLangVersionPreview
+    |> withFSharpCoreShippedNet
+    |> withOptimization optimize
+    |> compileExeAndRun
+    |> shouldSucceed
 
 [<InlineData(false)>]
 [<InlineData(true)>]
@@ -1175,8 +1326,8 @@ let main _ =
 
 [<InlineData(false)>]
 [<InlineData(true)>]
-[<Theory(Skip="not fixed yet")>]
-let ``runtime async evaluates conditional callback construction once`` (optimize: bool) =
+[<Theory>]
+let ``runtime async rejects a conditional suspending callback`` (optimize: bool) =
     FSharp """
 module RuntimeAsyncConditionalCallbackConstructionTest
 
@@ -1217,6 +1368,111 @@ let main _ =
     |> withLangVersionPreview
     |> withFSharpCoreShippedNet
     |> withOptimization optimize
+    |> compile
+    |> shouldFail
+    |> withErrorCode 3918
+
+[<InlineData(false)>]
+[<InlineData(true)>]
+[<Theory>]
+let ``runtime async rejects conditional suspending callback through inline forwarding`` (optimize: bool) =
+    FSharp """
+module RuntimeAsyncForwardedCallbackTest
+
+open System.Threading.Tasks
+open System.Runtime.CompilerServices
+open Microsoft.FSharp.Core.CompilerServices
+
+let events = ResizeArray<string>()
+let note value = events.Add value
+
+let inline forward ([<InlineIfLambda>] callback: unit -> int) = callback
+
+let inline twice ([<InlineIfLambda>] callback: unit -> int) =
+    StateMachineHelpers.__runtimeAsyncReturn (
+        let selected = forward callback
+        selected() + selected())
+
+let run (gate: Task<int>) =
+    twice (
+        if gate.IsCompleted then fun () -> 0
+        else
+            note "construct"
+            fun () ->
+                note "invoke"
+                AsyncHelpers.Await gate)
+
+[<EntryPoint>]
+let main _ =
+    let gate = TaskCompletionSource<int>()
+    let work = run gate.Task
+    gate.SetResult 21
+    let result = work.GetAwaiter().GetResult()
+    if result = 42 && events.ToArray() = [| "construct"; "invoke"; "invoke" |] then 0 else 1
+"""
+    |> withLangVersionPreview
+    |> withFSharpCoreShippedNet
+    |> withOptimization optimize
+    |> compile
+    |> shouldFail
+    |> withErrorCode 3918
+
+[<InlineData(false, false)>]
+[<InlineData(false, true)>]
+[<InlineData(true, false)>]
+[<InlineData(true, true)>]
+[<Theory>]
+let ``runtime async evaluates opaque callback construction and cleanup once`` (optimize: bool, useHandler: bool) =
+    FSharp """
+module RuntimeAsyncOpaqueCallbackTest
+
+open System.Threading.Tasks
+open System.Runtime.CompilerServices
+open Microsoft.FSharp.Core.CompilerServices
+
+let events = ResizeArray<string>()
+let note value = events.Add value
+
+let construct useHandler =
+    try
+        try
+            if useHandler then failwith "choose handler"
+            note "construct"
+            fun () ->
+                note "invoke"
+                21
+        with _ ->
+            note "handler"
+            fun () ->
+                note "invoke"
+                21
+    finally
+        note "cleanup"
+
+let inline twice (gate: Task) ([<InlineIfLambda>] callback: unit -> int) =
+    StateMachineHelpers.__runtimeAsyncReturn (
+        AsyncHelpers.Await gate
+        callback() + callback())
+
+[<EntryPoint>]
+let main _ =
+    let useHandler =
+#if HANDLER
+        true
+#else
+        false
+#endif
+    let gate = TaskCompletionSource<unit>()
+    let work = twice gate.Task (construct useHandler)
+    gate.SetResult(())
+    let result = work.GetAwaiter().GetResult()
+    let chosen = if useHandler then "handler" else "construct"
+    if result = 42 && events.ToArray() = [| chosen; "cleanup"; "invoke"; "invoke" |] then 0 else 1
+"""
+    |> withLangVersionPreview
+    |> withFSharpCoreShippedNet
+    |> withOptimization optimize
+    |> withOptions (if useHandler then [ "--define:HANDLER" ] else [])
     |> compileExeAndRun
     |> shouldSucceed
 

@@ -1875,6 +1875,19 @@ let rec CallableExprMayHaveFrameLocalAllocation g expr exprTy =
         let _, _, body, _ = stripTopLambda (expr, exprTy)
         ExprMayHaveFrameLocalAllocation body
 
+let rec CanMovePastForEvaluationOrder allowLambda expr =
+    match stripDebugPoints expr with
+    | Expr.Const _ -> true
+    | Expr.Lambda _
+    | Expr.TyLambda _ -> allowLambda
+    | Expr.Val(vref, _, _) ->
+        not vref.IsMutable && not vref.IsTypeFunction &&
+        (match vref.ValReprInfo with
+         | None -> true
+         | Some info -> info.NumCurriedArgs > 0)
+    | Expr.App(f, _, _, [], _) -> CanMovePastForEvaluationOrder allowLambda f
+    | _ -> false
+
 let TryEliminateBinding cenv env bind e2 _m =
     let g = cenv.g
 
@@ -1910,18 +1923,6 @@ let TryEliminateBinding cenv env bind e2 _m =
               | _ -> None
 
         let (DebugPoints(e2, recreate0)) = e2
-        // Effect-free projections can still throw before the source has been evaluated.
-        let rec canMovePast expr =
-            match stripDebugPoints expr with
-            | Expr.Const _ -> true
-            | Expr.Val(vref, _, _) ->
-                not vref.IsMutable && not vref.IsTypeFunction &&
-                (match vref.ValReprInfo with
-                 | None -> true
-                 | Some info -> info.NumCurriedArgs > 0)
-            | Expr.App(f, _, _, [], _) -> canMovePast f
-            | _ -> false
-
         let rec inlineAwaitInput insideAwait expr =
             cenv.stackGuard.Guard(fun () ->
                 let (DebugPoints(expr, recreate)) = expr
@@ -1948,7 +1949,7 @@ let TryEliminateBinding cenv env bind e2 _m =
             | arg :: rest ->
                 match inlineAwaitInput insideAwait arg with
                 | Some arg when IsUniqueUse vspec1 (List.rev prefix @ rest) -> Some(List.rev prefix @ (arg :: rest))
-                | _ when canMovePast arg -> inlineAwaitArgs insideAwait (arg :: prefix) rest
+                | _ when CanMovePastForEvaluationOrder false arg -> inlineAwaitArgs insideAwait (arg :: prefix) rest
                 | _ -> None
             | [] -> None
 
@@ -2728,6 +2729,52 @@ let EtaExpandUnderAppliedValBinding g expr =
     | EtaFloatableValLet g (bind, body, m, etaExpanded) -> floatEtaCaptures bind body m etaExpanded
     | _ -> expr
 
+let FloatInlineIfLambdaCaptures expr =
+    match expr with
+    | Expr.Let(bind, body, m, _) when bind.Var.InlineIfLambda ->
+        let (DebugPoints(rhs, recreate)) = bind.Expr
+        match rhs with
+        | Expr.Let(capture, callback, mCapture, _) ->
+            let capture = TBind(capture.Var, recreate capture.Expr, capture.DebugPoint)
+            mkLetBind mCapture capture (mkLet bind.DebugPoint m bind.Var callback body)
+        | _ -> expr
+    | _ -> expr
+
+let DistributeConditionalInlineIfLambda g (bind: Binding) body m =
+    let (DebugPoints(bindExpr, recreate)) = bind.Expr
+
+    match bindExpr with
+    | Expr.Match(spMatch, mExpr, dtree, targets, dflt, _) when
+        bind.Var.InlineIfLambda
+        && targets.Length > 0
+        && (RuntimeAsyncAnalyzer(g)).ContainsSuspension bindExpr
+        ->
+        let usesCallback expr =
+            (freeInExpr (CollectLocalsWithStackGuard()) expr).FreeLocals.Contains bind.Var
+
+        let rec splitContinuation expr =
+            match expr with
+            | Expr.Sequential(first, rest, flag, mSeq) when usesCallback rest ->
+                splitContinuation rest
+                |> Option.map (fun (prefix, suffix) ->
+                    Expr.Sequential(first, prefix, flag, mSeq), suffix)
+            | Expr.Sequential(first, rest, flag, mSeq) when usesCallback first ->
+                Some(first, fun replacement -> Expr.Sequential(replacement, rest, flag, mSeq))
+            | Expr.Let(next, rest, mLet, _) when usesCallback next.Expr && not (usesCallback rest) ->
+                Some(next.Expr, fun replacement -> mkLet next.DebugPoint mLet next.Var replacement rest)
+            | _ -> None
+
+        splitContinuation body
+        |> Option.map (fun (prefix, suffix) ->
+            let targetsR =
+                targets
+                |> Array.mapi (fun i (TTarget(vs, callback, flags)) ->
+                    let branch = mkLetBind m (TBind(bind.Var, callback, bind.DebugPoint)) prefix
+                    TTarget(vs, (if i = 0 then branch else copyExpr g CloneAll branch), flags))
+
+            suffix (recreate (Expr.Match(spMatch, mExpr, dtree, targetsR, dflt, tyOfExpr g prefix))))
+    | _ -> None
+
 /// Optimize/analyze an expression
 let rec OptimizeExpr cenv (env: IncrementalOptimizationEnv) expr =
     cenv.stackGuard.Guard(fun () ->
@@ -3279,7 +3326,11 @@ and OptimizeLinearExpr cenv env expr contf =
     // complete inference types.
     let expr = DetectAndOptimizeForEachExpression g OptimizeAllForExpressions expr
     let expr = if cenv.settings.ExpandStructuralValues() then ExpandStructuralBinding cenv expr else expr
-    let expr = if cenv.settings.alwaysInline then EtaExpandUnderAppliedValBinding g expr else expr
+    let expr =
+        if cenv.settings.alwaysInline then
+            expr |> EtaExpandUnderAppliedValBinding g |> FloatInlineIfLambdaCaptures
+        else
+            expr
     let expr = stripExpr expr
 
     // Matching on 'match __resumableEntry() with ...` is really a first-class language construct which we
@@ -3327,32 +3378,41 @@ and OptimizeLinearExpr cenv env expr contf =
       let (bindR, bindingInfo), env = OptimizeBinding cenv false env bind
 
       OptimizeLinearExpr cenv env body (contf << (fun (bodyR, bodyInfo) ->
-        // PERF: This call to ValueIsUsedOrHasEffect/freeInExpr amounts to 9% of all optimization time.
-        // Is it quadratic or quasi-quadratic?
-        if ValueIsUsedOrHasEffect cenv (fun () -> (freeInExpr (CollectLocalsWithStackGuard()) bodyR).FreeLocals) (bindR, bindingInfo) then
-            // Eliminate let bindings on the way back up
-            let exprR, adjust = TryEliminateLet cenv env bindR bodyR m
-            exprR,
-            { TotalSize = bindingInfo.TotalSize + bodyInfo.TotalSize + adjust
-              FunctionSize = bindingInfo.FunctionSize + bodyInfo.FunctionSize + adjust
-              HasEffect=bindingInfo.HasEffect || bodyInfo.HasEffect
-              MightMakeCriticalTailcall = bodyInfo.MightMakeCriticalTailcall // discard tailcall info from binding - not in tailcall position
-              Info = UnknownValue }
-        else
-            // On the way back up: Trim out any optimization info that involves escaping values on the way back up
-            let evalueR = AbstractExprInfoByVars cenv ([bindR.Var], []) bodyInfo.Info
+        let distributed =
+            if env.runtimeAsyncContext && cenv.settings.alwaysInline then
+                DistributeConditionalInlineIfLambda g bindR bodyR m
+            else
+                None
 
-            // Preserve the debug points for eliminated bindings that have debug points.
-            let bodyR =
-                match bindR.DebugPoint with
-                | DebugPointAtBinding.Yes m -> mkDebugPoint m bodyR
-                | _ -> bodyR
-            bodyR,
-            { TotalSize = bindingInfo.TotalSize + bodyInfo.TotalSize - localVarSize // eliminated a local var
-              FunctionSize = bindingInfo.FunctionSize + bodyInfo.FunctionSize - localVarSize (* eliminated a local var *)
-              HasEffect=bindingInfo.HasEffect || bodyInfo.HasEffect
-              MightMakeCriticalTailcall = bodyInfo.MightMakeCriticalTailcall // discard tailcall info from binding - not in tailcall position
-              Info = evalueR } ))
+        match distributed with
+        | Some exprR -> OptimizeExpr cenv env exprR
+        | None ->
+            // PERF: This call to ValueIsUsedOrHasEffect/freeInExpr amounts to 9% of all optimization time.
+            // Is it quadratic or quasi-quadratic?
+            if ValueIsUsedOrHasEffect cenv (fun () -> (freeInExpr (CollectLocalsWithStackGuard()) bodyR).FreeLocals) (bindR, bindingInfo) then
+                // Eliminate let bindings on the way back up
+                let exprR, adjust = TryEliminateLet cenv env bindR bodyR m
+                exprR,
+                { TotalSize = bindingInfo.TotalSize + bodyInfo.TotalSize + adjust
+                  FunctionSize = bindingInfo.FunctionSize + bodyInfo.FunctionSize + adjust
+                  HasEffect=bindingInfo.HasEffect || bodyInfo.HasEffect
+                  MightMakeCriticalTailcall = bodyInfo.MightMakeCriticalTailcall // discard tailcall info from binding - not in tailcall position
+                  Info = UnknownValue }
+            else
+                // On the way back up: Trim out any optimization info that involves escaping values on the way back up
+                let evalueR = AbstractExprInfoByVars cenv ([bindR.Var], []) bodyInfo.Info
+
+                // Preserve the debug points for eliminated bindings that have debug points.
+                let bodyR =
+                    match bindR.DebugPoint with
+                    | DebugPointAtBinding.Yes m -> mkDebugPoint m bodyR
+                    | _ -> bodyR
+                bodyR,
+                { TotalSize = bindingInfo.TotalSize + bodyInfo.TotalSize - localVarSize // eliminated a local var
+                  FunctionSize = bindingInfo.FunctionSize + bodyInfo.FunctionSize - localVarSize (* eliminated a local var *)
+                  HasEffect=bindingInfo.HasEffect || bodyInfo.HasEffect
+                  MightMakeCriticalTailcall = bodyInfo.MightMakeCriticalTailcall // discard tailcall info from binding - not in tailcall position
+                  Info = evalueR } ))
 
     | LinearMatchExpr (spMatch, mExpr, dtree, tg1, e2, m, ty) ->
          let dtreeR, dinfo = OptimizeDecisionTree cenv env m dtree
@@ -3934,20 +3994,22 @@ and TryInlineApplication cenv env finfo (valExpr: Expr) (tyargs: TType list, arg
         | None -> false
 
     let reoptimizeRuntimeAsync reduced =
-        let reduced = InlineRuntimeAsyncLambdaArgument g containsRuntimeAsyncFragment reduced
-
-        let reduced =
-            if containsRuntimeAsyncFragment reduced then
-                fst (OptimizeExpr cenv { env with runtimeAsyncContext = true } reduced)
-            else
-                reduced
-
-        InlineRuntimeAsyncLambdaArgument g containsRuntimeAsyncFragment reduced
+        if containsRuntimeAsyncFragment reduced then
+            let cenv =
+                { cenv with
+                    settings =
+                        { cenv.settings with
+                            localOptUser = Some true
+                            crossAssemblyOptimizationUser = Some true
+                            alwaysInline = true } }
+            fst (OptimizeExpr cenv { env with runtimeAsyncContext = true } reduced)
+        else
+            reduced
 
     let mustInlineRuntimeAsync =
         match runtimeAsyncAnalyzer, stripExpr valExpr with
         | Some analyzer, Expr.Val(vref, _, _) ->
-            ShouldForceRuntimeAsyncApplication analyzer env.runtimeAsyncContext vref inlineBody args
+            ShouldForceRuntimeAsyncApplication analyzer vref inlineBody args
         | _ -> false
 
     match cenv.settings.alwaysInline, stripExpr valExpr with
@@ -4007,7 +4069,7 @@ and TryInlineApplication cenv env finfo (valExpr: Expr) (tyargs: TType list, arg
 
         match lambdaInfo with
         | Some(CurriedLambdaValue(origLambdaId, _, _, origLambda, origLambdaTy)) ->
-            let f2R = CopyExprForInlining cenv true origLambda m
+            let f2R = CopyExprForInlining cenv (not mustInlineRuntimeAsync || vref.InlineIfLambda) origLambda m
             let specLambda = MakeApplicationAndBetaReduce g (f2R, origLambdaTy, [tyargs], [], m)
             let specLambdaTy = tyOfExpr g specLambda
 
@@ -4069,12 +4131,6 @@ and TryInlineApplication cenv env finfo (valExpr: Expr) (tyargs: TType list, arg
                                 dontInline = Map.add origLambdaId [] argEnv.dontInline
                                 debugInlineCallSite = Some m }
                             specLambda
-                    specLambdaR
-
-            let specLambdaR =
-                if mustInlineRuntimeAsync then
-                    remarkExpr m specLambdaR
-                else
                     specLambdaR
 
             // Abstract the specialized lambda over its free typars so IlxGen emits a static
@@ -4406,7 +4462,13 @@ and OptimizeApplication cenv env (f0, f0ty, tyargs, args, m) =
         // Run before beta reduction removes the flagged formals.
         let newf0 = AdaptOpaqueOptimizedClosureArgs g newf0 f0ty arginfos m
         // beta reducing
-        let reducedExpr = MakeApplicationAndBetaReduce g (newf0, f0ty, [tyargs], newArgs, m)
+        let reducedExpr =
+            match newf0, newArgs with
+            | Expr.Lambda _, first :: (_ :: _ as rest) when List.forall (CanMovePastForEvaluationOrder true) rest ->
+                let firstApplication = MakeApplicationAndBetaReduce g (newf0, f0ty, [tyargs], [first], m)
+                MakeApplicationAndBetaReduce g (firstApplication, tyOfExpr g firstApplication, [], rest, m)
+            | _ ->
+                MakeApplicationAndBetaReduce g (newf0, f0ty, [tyargs], newArgs, m)
         let newExpr = reducedExpr |> remake
 
         match newf0, reducedExpr with

@@ -140,29 +140,42 @@ the optimizer never inlines, duplicates, or discards it. The marker therefore
 survives optimization as an ordinary `Expr.App` node; nothing else in the
 typed tree records that a method is runtime-async.
 
-Inline values whose bodies contain a return marker or an `AsyncHelpers`
-suspension are recursively specialized at their call sites, including when
-optimization is disabled. The analysis follows inline and local values with a
-cycle guard, and `InlineIfLambda` arguments are forced through when the caller
-is already in a runtime-async context. The optimizer follows nested inline
-calls and does not create a generated helper method for the specialized
-suspension fragment, keeping every suspension in the eventual runtime-async
-method.
+The runtime-async analysis forces inlining of known fragment calls when a
+suspension must move into a runtime-async method, including under
+`--optimize-`. The actual inlining uses the ordinary optimizer: arguments
+are bound once with `let`, and applications of statically known lambdas are
+beta-reduced. Local and cross-assembly optimizations needed for known
+fragments run even when general optimization is disabled. Known callback
+captures can be floated out of `[<InlineIfLambda>]` bindings so their
+construction is evaluated once while their invocation is inlined. Curried
+applications are reduced in stages only when moving the remaining arguments
+past the first application cannot reorder exceptions or effects.
+When a conditional selects a known suspending callback, the optimizer can
+specialize the callback's invocation in each branch while sharing the
+continuation after its last use. Branch-specific construction still occurs
+once, before any intervening effects such as cancellation checks.
+Inline calls can be followed transitively, with a cycle guard; this does
+not permit copying a callback's construction into each of its uses.
 
-After specialization, lambda arguments are substituted and their applications
-are beta-reduced before and after runtime-async reoptimization. This includes
-debug-point-wrapped lambdas, compiler-generated `let` wrappers, curried
-applications, and multi-argument lambdas.
-That step is required for computation-expression shapes where `Bind` returns a
-closure containing `Await`, and later `Combine`/`Delay` calls apply that closure.
+An effectful conditional folder passed to `Array.fold` or `List.fold` stays
+bound and retains its state across iterations. If the folder suspends, its
+runtime-selected `Invoke` cannot be inlined and compilation reports FS3918.
+Likewise, returning a callback from an inline builder does not by itself
+make subsequent calls through that callback statically known. Known
+callback chains can be inlined, but a runtime-selected callback retained
+across other operations cannot be assumed inlinable.
+For example, an inline builder's `Combine` can select a suspending callback
+with an `if` and invoke it after a cancellation check when the invocation
+can be specialized without duplicating the subsequent computation. A
+callback stored in an opaque runtime value remains unsupported even when
+`Combine` and `Run` are inline.
+Statically known sequence recipes are also exposed at
+`__runtimeAsyncSequence`.
 
 When runtime-async specialization is forced in a debug build, the builder
 combinator is copied with its definition-site debug ranges remarked before
-arguments are substituted. User continuation arguments keep their own ranges,
-so `let!`, `do!`, `yield`, and other
-computation-expression statements remain associated with the source that
-authored them without exposing the implementation ranges of `Run`, `Bind`,
-`Combine`, or `Yield`.
+arguments are bound. User continuation arguments keep their own source ranges,
+including their `do!` and `yield` sequence points.
 
 Dead branches eliminated by optimization do not reach code generation and do
 not produce a suspension-outside-runtime-async diagnostic.
@@ -215,9 +228,8 @@ directly.
 The compiler emits ordinary Portable PDB sequence points for runtime-async
 methods. It does not emit `StateMachineMethod` or async state-machine stepping
 records because runtime-async methods have no compiler-generated `MoveNext`
-method. Forced inlining therefore preserves user computation-expression
-sequence points in the generated runtime-async method while remapping the
-inlined builder implementation ranges.
+method. Forced inlining preserves user computation-expression sequence points
+in the generated runtime-async method while remapping inlined builder ranges.
 
 Suspension, continuation mapping, and reconstruction of logical async call
 stacks are owned by the runtime and debugger through the `Async` method
@@ -269,19 +281,19 @@ type RuntimeTaskBuilder() =
 values. `MergeSources` awaits its already-started sources sequentially.
 `Async<'T>` can be adapted with `Async.StartImmediateAsTask`.
 
-An async-sequence builder can use the same pattern to produce
-`IAsyncEnumerable<'T>`. Its `Run` creates a producer that is started when
-`GetAsyncEnumerator` is called. A `ManualResetValueTaskSourceCore` handshake
-makes enumeration pull-driven: `yield` publishes one item and waits for the
-next `MoveNextAsync` request. `yield!` and `for` can consume synchronous or
-asynchronous enumerables, and nested async enumerables receive the caller's
+The callback-returning `AsyncSeqBuilder` fixture uses the same pattern to
+produce `IAsyncEnumerable<'T>`. Its `Run` creates a producer that is started
+when `GetAsyncEnumerator` is called. A `ManualResetValueTaskSourceCore`
+handshake makes enumeration pull-driven: `yield` publishes one item and waits
+for the next `MoveNextAsync` request. `yield!` and `for` can consume synchronous
+or asynchronous enumerables, and nested async enumerables receive the caller's
 cancellation token. A single active `MoveNextAsync` is enforced. A builder may
 also hand off directly between compatible producers for `YieldFromFinal`,
 avoiding a second enumeration handshake.
 
 These builders are examples rather than FSharp.Core APIs. Applications can
 define their own inline builders over the same intrinsics, subject to the
-runtime-async restrictions and inline-fragment rules described above.
+runtime-async restrictions and inline-fragment rules above.
 
 ### Direct async-sequence proposal
 
