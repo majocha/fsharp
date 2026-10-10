@@ -1511,7 +1511,7 @@ $ code --diff {outFile} {expectedFile}
     | VerifyDocuments of string list
     | VerifySequencePointsInSameMethod of lines: Line list
     | VerifyNoDebuggerHiddenOnMethodWithLine of line: Line
-    | VerifyRuntimeAsyncMethodSequencePointsInSource of sourceFileName: string * startLine: int * endLine: int
+    | VerifyRuntimeAsyncMethodSequencePointsInSource of sourceFileName: string * startLine: int * endLine: int * methodCount: int
     | Dummy of unit
 
     let private verifyPdbFormat (reader: MetadataReader) compilationType =
@@ -1616,6 +1616,7 @@ $ code --diff {outFile} {expectedFile}
         (sourceFileName: string)
         (startLine: int)
         (endLine: int)
+        (methodCount: int)
         =
         use peStream = File.OpenRead(assemblyPath)
         use peReader = new PEReader(peStream)
@@ -1647,35 +1648,35 @@ $ code --diff {outFile} {expectedFile}
                 else
                     None)
 
-        if methods.Length <> 1 then
+        if methods.Length <> methodCount then
             let names = methods |> List.map (fun (typeName, methodName, _) -> $"{typeName}.{methodName}")
-            failwith $"Expected exactly one runtime-async method with a point in {sourceFileName}:{startLine}-{endLine}, found {methods.Length}: {names}"
+            failwith $"Expected {methodCount} runtime-async methods with a point in {sourceFileName}:{startLine}-{endLine}, found {methods.Length}: {names}"
 
-        let typeName, methodName, points = methods.Head
+        for typeName, methodName, points in methods do
 
-        let invalidPoints =
-            points
-            |> List.filter (fun point ->
-                let document = pdbReader.GetDocument point.Document
-                let documentName = pdbReader.GetString document.Name
-
-                not (
-                    String.Equals(Path.GetFileName(documentName), sourceFileName, StringComparison.OrdinalIgnoreCase)
-                    && point.StartLine >= startLine
-                    && point.EndLine <= endLine
-                ))
-
-        if not invalidPoints.IsEmpty then
-            let actual =
-                invalidPoints
-                |> List.map (fun point ->
+            let invalidPoints =
+                points
+                |> List.filter (fun point ->
                     let document = pdbReader.GetDocument point.Document
                     let documentName = pdbReader.GetString document.Name
-                    $"{Path.GetFileName(documentName)}:{point.StartLine},{point.StartColumn}-{point.EndLine},{point.EndColumn}")
-                |> String.concat "; "
 
-            failwith
-                $"Runtime-async method {typeName}.{methodName} has sequence points outside {sourceFileName}:{startLine}-{endLine}: {actual}"
+                    not (
+                        String.Equals(Path.GetFileName(documentName), sourceFileName, StringComparison.OrdinalIgnoreCase)
+                        && point.StartLine >= startLine
+                        && point.EndLine <= endLine
+                    ))
+
+            if not invalidPoints.IsEmpty then
+                let actual =
+                    invalidPoints
+                    |> List.map (fun point ->
+                        let document = pdbReader.GetDocument point.Document
+                        let documentName = pdbReader.GetString document.Name
+                        $"{Path.GetFileName(documentName)}:{point.StartLine},{point.StartColumn}-{point.EndLine},{point.EndColumn}")
+                    |> String.concat "; "
+
+                failwith
+                    $"Runtime-async method {typeName}.{methodName} has sequence points outside {sourceFileName}:{startLine}-{endLine}: {actual}"
 
     let private verifySequencePoints (reader: MetadataReader) expectedSequencePoints =
         let sequencePoints =
@@ -1847,13 +1848,14 @@ $ code --diff {outFile} {expectedFile}
                 verifySequencePointsInSameMethod (optOutputPath |> Option.defaultValue "") reader lines
             | VerifyNoDebuggerHiddenOnMethodWithLine line ->
                 verifyNoDebuggerHiddenOnMethodWithLine (optOutputPath |> Option.defaultValue "") reader line
-            | VerifyRuntimeAsyncMethodSequencePointsInSource(sourceFileName, startLine, endLine) ->
+            | VerifyRuntimeAsyncMethodSequencePointsInSource(sourceFileName, startLine, endLine, methodCount) ->
                 verifyRuntimeAsyncMethodSequencePointsInSource
                     (optOutputPath |> Option.defaultValue "")
                     reader
                     sourceFileName
                     startLine
                     endLine
+                    methodCount
             | _ -> failwith $"Unknown verification option: {option.ToString()}"
 
     module private Il =

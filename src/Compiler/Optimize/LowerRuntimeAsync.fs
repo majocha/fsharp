@@ -3,6 +3,7 @@
 module internal FSharp.Compiler.LowerRuntimeAsync
 
 open System.Collections.Concurrent
+open System.Collections.Generic
 
 open Internal.Utilities.Collections
 open Internal.Utilities.Library
@@ -26,6 +27,19 @@ open FSharp.Compiler.TypedTreeBasics
 open FSharp.Compiler.TypedTreeOps
 open FSharp.Compiler.TypeRelations
 
+let private isSequenceCodeCall (g: TcGlobals) expr =
+    match expr with
+    | Expr.Val(vref, _, _) ->
+        valRefEq g vref g.seq_vref
+        || valRefEq g vref g.seq_delay_vref
+        || valRefEq g vref g.seq_append_vref
+        || valRefEq g vref g.seq_generated_vref
+        || valRefEq g vref g.seq_finally_vref
+        || valRefEq g vref g.seq_using_vref
+        || valRefEq g vref g.seq_collect_vref
+        || valRefEq g vref g.seq_map_vref
+    | _ -> false
+
 let private isQuotationUsing (v: Val) expr =
     match expr with
     | Expr.Quote(body, _, _, _, _) ->
@@ -36,49 +50,80 @@ let private isQuotationUsing (v: Val) expr =
             body
     | _ -> false
 
-let private tryCallbackInvocation (g: TcGlobals) (callback: Val) isDelegate expression =
-    match expression with
-    | Expr.App(Expr.Val(vref, _, _), _, [], [ arg ], m) when not isDelegate && valEq callback vref.Deref -> ValueSome(struct (arg, m))
-    | DelegateInvokeExpr g (_, _, _, Expr.Val(vref, _, _), arg, m) when isDelegate && valEq callback vref.Deref ->
-        ValueSome(struct (arg, m))
-    | _ -> ValueNone
+let private canRewriteFunctionUses g isFragment inSequence callback continuation =
+    let visiting = HashSet<Stamp>()
+    let stackGuard = StackGuard("CheckRuntimeAsyncFragmentUses")
 
-let private canRewriteCallbackUses g callback isDelegate continuation =
-    let folder =
-        { ExprFolder0 with
-            exprIntercept =
-                fun recurse noIntercept valid expression ->
-                    if not valid then
-                        false
-                    else
-                        match tryCallbackInvocation g callback isDelegate expression with
-                        | ValueSome(struct (arg, _)) -> recurse true arg
-                        | ValueNone ->
-                            match expression with
-                            | Expr.Val(vref, _, _) when valEq callback vref.Deref -> false
-                            | Expr.Quote(_, dataCell, _, _, _) ->
-                                if isQuotationUsing callback expression then
-                                    false
-                                else
-                                    match dataCell.Value with
-                                    | Some((_, _, args, _), (_, _, legacyArgs, _)) ->
-                                        List.fold recurse (List.fold recurse true args) legacyArgs
-                                    | None -> true
-                            | _ -> noIntercept true expression
-        }
+    let rec check inSequence (callback: Val) continuation =
+        stackGuard.Guard(fun () ->
+            if not (visiting.Add callback.Stamp) then
+                true
+            else
+                let usesCallback expr =
+                    ExistsExpr
+                        (function
+                        | Expr.Val(vref, _, _) -> valEq callback vref.Deref
+                        | _ -> false)
+                        expr
 
-    FoldExpr folder true continuation
+                let checkBinding inSequence continuation (TBind(v, rhs, _)) =
+                    not (
+                        (isFunTy g (snd (tryDestForallTy g v.Type)) || isFSharpDelegateTy g v.Type)
+                        && isFragment v.Stamp
+                        && not (valEq v callback)
+                        && usesCallback rhs
+                    )
+                    || check inSequence v continuation
 
-let rec private tryDelegateSignature g expr =
-    match expr with
-    | NewDelegateExpr g (_, [ parameter ], body, _, _) -> Some(parameter.Type, tyOfExpr g body)
-    | Expr.DebugPoint(_, rest)
-    | Expr.Sequential(_, rest, NormalSeq, _)
-    | Expr.Let(_, rest, _, _) -> tryDelegateSignature g rest
-    | Expr.Match(_, _, _, targets, _, _) when targets.Length > 0 ->
-        let (TTarget(_, body, _)) = targets[0]
-        tryDelegateSignature g body
-    | _ -> None
+                let rec scan inSequence continuation =
+                    FoldExpr
+                        { ExprFolder0 with
+                            exprIntercept =
+                                fun recurse descend valid expr ->
+                                    if not valid then
+                                        false
+                                    else
+                                        match expr with
+                                        | Expr.App(_, _, _, [ recipe ], _) when (TryGetRuntimeAsyncSequence g expr).IsSome ->
+                                            scan true recipe
+                                        | DelegateInvokeExpr g (_, _, _, Expr.Val(vref, _, _), arg, _) when valEq callback vref.Deref ->
+                                            recurse true arg
+                                        | Expr.App(Expr.Val(vref, _, _), _, _, args, _) when valEq callback vref.Deref && not args.IsEmpty ->
+                                            List.fold recurse true args
+                                        | Expr.Let(TBind(alias, Expr.Val(vref, _, _), _), body, _, _) when valEq callback vref.Deref ->
+                                            check inSequence alias body && recurse true body
+                                        | Expr.Let(binding, body, _, _) -> checkBinding inSequence body binding && descend true expr
+                                        | Expr.LetRec(bindings, _, _, _) ->
+                                            List.forall (checkBinding inSequence expr) bindings && descend true expr
+                                        | Expr.App(f, _, _, args, _) when inSequence && isSequenceCodeCall g f ->
+                                            List.fold recurse true args
+                                        | Expr.App(f, _, _, args, _) ->
+                                            recurse true f
+                                            && List.forall
+                                                (fun arg ->
+                                                    match stripDebugPoints arg with
+                                                    | Expr.Lambda(_, _, _, _, body, _, _)
+                                                    | NewDelegateExpr g (_, _, body, _, _) when usesCallback body ->
+                                                        (TryGetRuntimeAsyncReturn g body).IsSome && recurse true body
+                                                    | _ -> recurse true arg)
+                                                args
+                                        | Expr.Val(vref, _, _) when valEq callback vref.Deref -> false
+                                        | Expr.Quote(_, dataCell, _, _, _) ->
+                                            not (isQuotationUsing callback expr)
+                                            && match dataCell.Value with
+                                               | Some((_, _, args, _), (_, _, legacyArgs, _)) ->
+                                                   List.fold recurse (List.fold recurse true args) legacyArgs
+                                               | None -> true
+                                        | _ -> descend true expr
+                        }
+                        true
+                        continuation
+
+                let valid = scan inSequence continuation
+                visiting.Remove callback.Stamp |> ignore
+                valid)
+
+    check inSequence callback continuation
 
 let private awaitFragment (g: TcGlobals) amap resultTy invocation m =
     let awaiterTy = mkWoNullAppTy g.runtimeAsyncFragmentAwaiter_tcref [ resultTy ]
@@ -122,100 +167,6 @@ let private awaitFragment (g: TcGlobals) amap resultTy invocation m =
     let result = callAwaiterMember "GetResult"
     mkCompGenLet m awaiter createAwaiter (mkCompGenSequential m suspend result)
 
-let private outlineCallback (g: TcGlobals) amap optimizeExpr (analyzer: RuntimeAsyncAnalyzer) runtimeAsyncContext expr =
-    let stackGuard = StackGuard("OutlineRuntimeAsyncCallback")
-    let freeVarOptions = CollectLocalsWithStackGuard()
-
-    let rec outlineBranches resultTy expr =
-        stackGuard.Guard(fun () ->
-            match expr with
-            | Expr.Lambda(_, None, None, [ parameter ], body, m, _)
-            | NewDelegateExpr g (_, [ parameter ], body, m, _) ->
-                let helper = g.cgh__runtimeAsyncOutline_vref
-                let callback = mkLambda m parameter (body, resultTy)
-
-                primMkApp (exprForValRef m helper, helper.Type) [ parameter.Type; resultTy ] [ callback ] m
-                |> optimizeExpr true
-                |> Some
-            | Expr.DebugPoint(point, body) ->
-                outlineBranches resultTy body
-                |> Option.map (fun body -> Expr.DebugPoint(point, body))
-            | Expr.Sequential(first, rest, NormalSeq, m) ->
-                outlineBranches resultTy rest
-                |> Option.map (fun rest -> Expr.Sequential(first, rest, NormalSeq, m))
-            | Expr.Let(binding, rest, m, _) -> outlineBranches resultTy rest |> Option.map (mkLetBind m binding)
-            | Expr.Match(point, matchRange, tree, targets, m, _) ->
-                TryMapRuntimeAsyncMatchTargets g (point, matchRange, tree, targets, m) (fun _ -> outlineBranches resultTy)
-            | _ -> None)
-
-    let rec outline expr =
-        stackGuard.Guard(fun () ->
-            match expr with
-            | Expr.Let(TBind(callback, construction, point), continuation, m, _) when
-                callback.InlineIfLambda && analyzer.ContainsSuspension construction
-                ->
-                let keep construction =
-                    mkLetBind m (TBind(callback, construction, point)) (outline continuation)
-
-                let shape =
-                    match tryDestFunTy g callback.Type with
-                    | ValueSome(argTy, resultTy) -> Some(argTy, resultTy, false)
-                    | ValueNone when isFSharpDelegateTy g callback.Type ->
-                        tryDelegateSignature g construction
-                        |> Option.map (fun (argTy, resultTy) -> argTy, resultTy, true)
-                    | _ -> None
-
-                match shape with
-                | Some(argTy, resultTy, isDelegate) when
-                    (runtimeAsyncContext || (TryGetRuntimeAsyncReturn g continuation).IsSome)
-                    && not (isByrefLikeTy g m argTy || isByrefLikeTy g m resultTy)
-                    ->
-                    let canCapture =
-                        (freeInExpr freeVarOptions construction).FreeLocals
-                        |> Zset.forall (fun v -> not v.IsPinning && not (isByrefTy g v.Type || isByrefLikeTy g m v.Type))
-
-                    if
-                        not canCapture
-                        || not (canRewriteCallbackUses g callback isDelegate continuation)
-                    then
-                        keep construction
-                    else
-                        let construction = outline construction
-
-                        match outlineBranches resultTy construction with
-                        | None -> keep construction
-                        | Some construction ->
-                            let callbackTy = tyOfExpr g construction
-                            let outlined, outlinedExpr = mkCompGenLocal m "runtimeAsyncFragment" callbackTy
-
-                            let continuation =
-                                RewriteExpr
-                                    {
-                                        PreIntercept =
-                                            Some(fun rewrite expression ->
-                                                match tryCallbackInvocation g callback isDelegate expression with
-                                                | ValueSome(struct (arg, callRange)) ->
-                                                    let invocation =
-                                                        mkApps g ((outlinedExpr, callbackTy), [], [ rewrite arg ], callRange)
-
-                                                    Some(awaitFragment g amap resultTy invocation callRange)
-                                                | ValueNone -> None)
-                                        PreInterceptBinding = None
-                                        PostTransform = (fun _ -> None)
-                                        RewriteQuotations = false
-                                        StackGuard = stackGuard
-                                    }
-                                    continuation
-
-                            mkLet point m outlined construction (outline continuation)
-                | _ -> keep construction
-            | Expr.Let(binding, continuation, m, _) -> mkLetBind m binding (outline continuation)
-            | Expr.DebugPoint(point, body) -> Expr.DebugPoint(point, outline body)
-            | Expr.Sequential(first, rest, NormalSeq, m) -> Expr.Sequential(first, outline rest, NormalSeq, m)
-            | _ -> expr)
-
-    outline expr
-
 let private isRuntimeAsyncEntry g expr =
     (TryGetRuntimeAsyncReturn g expr).IsSome
     || (TryGetRuntimeAsyncSequence g expr).IsSome
@@ -233,59 +184,444 @@ let private containsRuntimeAsyncEntry g implFile =
 
     FoldImplFile folder false implFile
 
-/// `inContext` follows runtime-async bodies and sequence recipes, but not ordinary object-expression methods.
-let private outlineCallbacks g amap optimizeExpr implFile =
-    let analyzer = RuntimeAsyncAnalyzer g
-    let stackGuard = StackGuard("OutlineRuntimeAsyncCallbacks")
+let private outlineApplications (g: TcGlobals) amap optimizeExpr implFile =
+    let stackGuard = StackGuard("OutlineRuntimeAsyncApplications")
 
-    let rec leadsToRuntimeAsyncReturn expr =
+    let isStateMachine expr =
+        isReturnsResumableCodeTy g (tyOfExpr g expr)
+        || match expr with
+           | Expr.App(Expr.Val(vref, _, _), _, _, _, _) -> valRefEq g vref g.cgh__stateMachine_vref
+           | _ -> false
+
+    let containsFragment isFragment expr =
+        FoldExpr
+            { ExprFolder0 with
+                exprIntercept =
+                    fun _ descend found expr ->
+                        if found then
+                            true
+                        elif isRuntimeAsyncEntry g expr || isStateMachine expr then
+                            false
+                        else
+                            match expr with
+                            | Expr.Val(vref, _, _) when isFragment vref.Stamp -> true
+                            | _ -> IsRuntimeAsyncSuspensionExpr g expr || descend false expr
+            }
+            false
+            expr
+
+    let definitions = Dictionary<Stamp, Expr>()
+
+    FoldImplFile
+        { ExprFolder0 with
+            exprIntercept =
+                fun _ descend () expr ->
+                    match expr with
+                    | Expr.Let(TBind(v, construction, _), _, _, _) -> definitions[v.Stamp] <- construction
+                    | Expr.LetRec(bindings, _, _, _) ->
+                        for TBind(v, construction, _) in bindings do
+                            definitions[v.Stamp] <- construction
+                    | _ -> ()
+
+                    descend () expr
+        }
+        ()
+        implFile
+
+    let fragments = HashSet<Stamp>()
+    let mutable changed = true
+
+    while changed do
+        changed <- false
+
+        for KeyValue(stamp, construction) in definitions do
+            let refersToFragment = containsFragment fragments.Contains construction
+
+            if refersToFragment && fragments.Add stamp then
+                changed <- true
+
+    let called = HashSet<Stamp>()
+
+    let rec visitCalls expr =
+        stackGuard.Guard(fun () -> visitCallsCore expr)
+
+    and visitCallsCore expr =
+        FoldExpr
+            { ExprFolder0 with
+                exprIntercept =
+                    fun _ descend () expr ->
+                        match expr with
+                        | _ when isStateMachine expr -> ()
+                        | Expr.Op((TOp.While _ | TOp.IntegerForLoop _ | TOp.TryFinally _ | TOp.TryWith _), _, args, _) ->
+                            for arg in args do
+                                match arg with
+                                | Expr.Lambda(_, _, _, _, body, _, _) -> visitCalls body
+                                | _ -> visitCalls arg
+                        | DelegateInvokeExpr g (_, _, _, receiver, arg, _) ->
+                            visitCallable receiver
+                            visitCalls arg
+                        | Expr.App(f, _, _, args, _) when not args.IsEmpty ->
+                            visitCallable f
+
+                            for arg in args do
+                                visitCalls arg
+                        | Expr.Lambda _
+                        | Expr.TyLambda _
+                        | Expr.Obj _
+                        | Expr.Quote _ -> ()
+                        | _ -> descend () expr
+            }
+            ()
+            expr
+
+    and visitCallable expr =
+        stackGuard.Guard(fun () -> visitCallableCore expr)
+
+    and visitCallableCore expr =
+        FoldExpr
+            { ExprFolder0 with
+                exprIntercept =
+                    fun _ descend () expr ->
+                        match expr with
+                        | _ when isRuntimeAsyncEntry g expr || isStateMachine expr -> ()
+                        | Expr.Val(vref, _, _) when fragments.Contains vref.Stamp && called.Add vref.Stamp ->
+                            visitCallable definitions[vref.Stamp]
+                        | Expr.Lambda(_, _, _, _, body, _, _)
+                        | Expr.TyLambda(_, _, body, _, _) -> visitCallable body
+                        | NewDelegateExpr g (_, _, body, _, _) -> visitCallable body
+                        | Expr.Quote _ -> ()
+                        | _ -> descend () expr
+            }
+            ()
+            expr
+
+    FoldImplFile
+        { ExprFolder0 with
+            exprIntercept =
+                fun _ descend () expr ->
+                    match TryGetRuntimeAsyncReturn g expr, TryGetRuntimeAsyncSequence g expr with
+                    | Some info, _ -> visitCalls info.Body
+                    | _, Some(recipe, _) -> visitCallable recipe
+                    | _ -> ()
+
+                    descend () expr
+        }
+        ()
+        implFile
+
+    let outlinedType argTy resultTy m =
+        let helper = g.cgh__runtimeAsyncOutline_vref
+
+        let template =
+            primMkApp (exprForValRef m helper, helper.Type) [ argTy; resultTy ] [] m
+
+        match tryDestFunTy g (tyOfExpr g template) with
+        | ValueSome(_, result) -> result
+        | ValueNone -> error (InternalError("runtime-async outlining template is not a function", m))
+
+    let fragmentTaskRef, fragmentResultRef =
+        let m = g.cgh__runtimeAsyncOutline_vref.Range
+
+        match stripTyEqns g (rangeOfFunTy g (outlinedType g.unit_ty g.unit_ty m)) with
+        | AppTy g (taskRef, [ AppTy g (resultRef, [ _ ]) ]) -> taskRef, resultRef
+        | _ -> error (InternalError("runtime-async outlining template has an unexpected result type", m))
+
+    let isFunction ty =
+        isFunTy g (snd (tryDestForallTy g ty)) || isFSharpDelegateTy g ty
+
+    let fragmentResultType ty =
+        match stripTyEqns g ty with
+        | AppTy g (taskRef, [ AppTy g (resultRef, [ resultTy ]) ]) when
+            tyconRefEq g taskRef fragmentTaskRef && tyconRefEq g resultRef fragmentResultRef
+            ->
+            resultTy
+        | _ -> ty
+
+    let canOutline expr parameters body m =
+        let unsafeType ty = isByrefTy g ty || isByrefLikeTy g m ty
+        let captures = (freeInExpr (CollectLocalsWithStackGuard()) expr).FreeLocals
+
+        not (
+            List.exists (fun (v: Val) -> unsafeType v.Type) parameters
+            || unsafeType (tyOfExpr g body)
+            || Zset.exists (fun (v: Val) -> v.IsFixed || v.IsPinning || unsafeType v.Type) captures
+            || ExistsExpr
+                (function
+                | Expr.Let(TBind(v, _, _), _, _, _) -> v.IsFixed || v.IsPinning
+                | _ -> false)
+                body
+        )
+
+    let outlineLambda parameters body m =
+        let resultTy = tyOfExpr g body
+        let callback = mkMultiLambda m parameters (body, resultTy)
+        let argTy = mkLambdaArgTy m (List.map (fun (v: Val) -> v.Type) parameters)
+        let helper = g.cgh__runtimeAsyncOutline_vref
+
+        primMkApp (exprForValRef m helper, helper.Type) [ argTy; resultTy ] [ callback ] m
+        |> optimizeExpr true
+
+    let rec adaptCallable expectedTy expr =
+        stackGuard.Guard(fun () -> adaptCallableCore expectedTy expr)
+
+    and adaptCallableCore expectedTy expr =
+        let ty = tyOfExpr g expr
+
+        if typeEquiv g ty expectedTy then
+            expr
+        else
+            let m = expr.Range
+            let saved, savedExpr = mkCompGenLocal m "runtimeAsyncCallable" ty
+
+            let parameters, invocation =
+                match tryDestFunTy g ty with
+                | ValueSome(argTy, _) ->
+                    let parameter, argument = mkCompGenLocal m "argument" argTy
+                    [ parameter ], mkApps g ((savedExpr, ty), [], [ argument ], m)
+                | ValueNone when isFSharpDelegateTy g ty ->
+                    let (SigOfFunctionForDelegate(invoke, argTys, _, _)) =
+                        GetSigOfFunctionForDelegate (InfoReader(g, amap)) ty m AccessorDomain.AccessibleFromEverywhere
+
+                    let parameters, arguments =
+                        argTys |> List.map (mkCompGenLocal m "argument") |> List.unzip
+
+                    let parameters =
+                        if parameters.IsEmpty then
+                            [ fst (mkCompGenLocal m "argument" g.unit_ty) ]
+                        else
+                            parameters
+
+                    parameters, MakeMethInfoCall amap m invoke [] (savedExpr :: arguments) None
+                | _ -> error (InternalError("runtime-async branch result is not callable", m))
+
+            let resultTy = fragmentResultType (rangeOfFunTy g expectedTy)
+            let body = adaptCallable resultTy invocation
+            mkCompGenLet m saved expr (outlineLambda parameters body m)
+
+    let rec shape shapes expr =
+        stackGuard.Guard(fun () -> shapeCore shapes expr)
+
+    and shapeCore shapes expr =
         match expr with
-        | Expr.Let(_, rest, _, _)
-        | Expr.DebugPoint(_, rest)
-        | Expr.Sequential(_, rest, NormalSeq, _) -> leadsToRuntimeAsyncReturn rest
-        | _ -> (TryGetRuntimeAsyncReturn g expr).IsSome
+        | Expr.Val(vref, _, _) -> Map.tryFind vref.Stamp shapes |> Option.defaultValue vref.Type
+        | Expr.TyLambda(_, typars, body, _, _) -> mkForallTy typars (shape shapes body)
+        | Expr.Lambda(_, None, None, parameters, body, m, _)
+        | NewDelegateExpr g (_, parameters, body, m, _) when canOutline expr parameters body m ->
+            let argTy = mkLambdaArgTy m (List.map (fun (v: Val) -> v.Type) parameters)
+            outlinedType argTy (shape shapes body) m
+        | Expr.Let(TBind(v, construction, _), body, _, _) ->
+            let shapes =
+                if isFunction v.Type && canRewriteFunctionUses g fragments.Contains false v body then
+                    Map.add v.Stamp (shape shapes construction) shapes
+                else
+                    shapes
 
-    let rec rewriter inContext =
+            shape shapes body
+        | Expr.LetRec(_, body, _, _)
+        | Expr.DebugPoint(_, body)
+        | Expr.Sequential(_, body, NormalSeq, _) -> shape shapes body
+        | DelegateInvokeExpr g (_, _, _, receiver, _, _) ->
+            let ty = shape shapes receiver
+
+            if typeEquiv g ty (tyOfExpr g receiver) then
+                tyOfExpr g expr
+            else
+                fragmentResultType (rangeOfFunTy g ty)
+        | Expr.App(f, fty, tyargs, args, _) ->
+            let ty = shape shapes f
+
+            if typeEquiv g ty fty then
+                tyOfExpr g expr
+            else
+                (applyTyArgs g ty tyargs, args)
+                ||> List.fold (fun ty _ -> fragmentResultType (rangeOfFunTy g ty))
+        | Expr.Match(_, _, _, targets, _, ty) ->
+            targets
+            |> Array.map (fun target -> shape shapes target.TargetExpression)
+            |> Array.tryFind (fun targetTy -> not (typeEquiv g targetTy ty))
+            |> Option.defaultValue ty
+        | _ -> tyOfExpr g expr
+
+    let rec rewrite inContext callable inSequence replacements expr =
+        let env =
+            {
+                PreIntercept = Some(intercept inContext callable inSequence replacements)
+                PreInterceptBinding = None
+                PostTransform = (fun _ -> None)
+                RewriteQuotations = false
+                StackGuard = stackGuard
+            }
+
+        RewriteExpr env expr
+
+    and intercept inContext callable inSequence replacements _ expr =
+        let rewriteBody = rewrite inContext false inSequence replacements
+
+        let containsFragment =
+            containsFragment (fun stamp -> Map.containsKey stamp replacements)
+
+        match expr with
+        | _ when inContext && isStateMachine expr -> Some(rewrite false false false replacements expr)
+        | Expr.App(f, fty, tyargs, [ body ], m) when (TryGetRuntimeAsyncReturn g expr).IsSome ->
+            RestoreRuntimeAsyncPinning body
+            Some(Expr.App(f, fty, tyargs, [ rewrite true false false replacements body ], m))
+        | Expr.App(f, fty, tyargs, [ recipe ], m) when (TryGetRuntimeAsyncSequence g expr).IsSome ->
+            Some(Expr.App(f, fty, tyargs, [ rewrite true false true replacements recipe ], m))
+        | Expr.Val(vref, flags, m) ->
+            Map.tryFind vref.Stamp replacements
+            |> Option.map (fun v -> Expr.Val(mkLocalValRef v, flags, m))
+        | Expr.Op((TOp.While _ | TOp.IntegerForLoop _ | TOp.TryFinally _ | TOp.TryWith _) as op, tyargs, args, m) when inContext ->
+            let args =
+                args
+                |> List.map (function
+                    | Expr.Lambda(stamp, ctor, self, parameters, body, range, _) ->
+                        let body = rewriteBody body
+                        Expr.Lambda(stamp, ctor, self, parameters, body, range, tyOfExpr g body)
+                    | arg -> rewriteBody arg)
+
+            Some(Expr.Op(op, tyargs, args, m))
+        | Expr.Op(op, tyargs, args, m) when inContext -> Some(Expr.Op(op, tyargs, List.map rewriteBody args, m))
+        | Expr.Sequential(first, rest, NormalSeq, m) when inContext ->
+            Some(Expr.Sequential(rewriteBody first, rewrite inContext callable inSequence replacements rest, NormalSeq, m))
+        | Expr.TyLambda(stamp, typars, body, m, _) when inContext && callable ->
+            let body = rewrite true true false replacements body
+            Some(Expr.TyLambda(stamp, typars, body, m, tyOfExpr g body))
+        | Expr.Lambda(_, None, None, parameters, body, m, _)
+        | NewDelegateExpr g (_, parameters, body, m, _) when inContext && callable ->
+            if not (canOutline expr parameters body m) then
+                Some expr
+            else
+                let body = rewrite true (isFunction (tyOfExpr g body)) false replacements body
+                Some(outlineLambda parameters body m)
+        | Expr.Lambda(stamp, ctor, self, parameters, body, m, _) when inSequence ->
+            let body = rewriteBody body
+            Some(Expr.Lambda(stamp, ctor, self, parameters, body, m, tyOfExpr g body))
+        | Expr.Lambda _ when inContext -> Some(rewrite false false false replacements expr)
+        | Expr.App(f, fty, tyargs, args, m) when inSequence && isSequenceCodeCall g f ->
+            Some(Expr.App(f, fty, tyargs, List.map rewriteBody args, m))
+        | DelegateInvokeExpr g (invoke, fty, tyargs, receiver, arg, m) when inContext ->
+            let outlined = rewrite true (containsFragment receiver) false replacements receiver
+            let arg = rewrite inContext false false replacements arg
+
+            if typeEquiv g (tyOfExpr g outlined) (tyOfExpr g receiver) then
+                Some(Expr.App(invoke, fty, tyargs, [ outlined; arg ], m))
+            else
+                let invocation = mkApps g ((outlined, tyOfExpr g outlined), [], [ arg ], m)
+                Some(awaitFragment g amap (fragmentResultType (tyOfExpr g invocation)) invocation m)
+        | Expr.App(f, fty, tyargs, args, m) when inContext && not args.IsEmpty ->
+            let f = rewrite true (containsFragment f) false replacements f
+            let args = List.map (rewrite inContext false false replacements) args
+
+            let rec apply f args =
+                match args with
+                | [] -> f
+                | arg :: rest ->
+                    let invocation = mkApps g ((f, tyOfExpr g f), [], [ arg ], m)
+                    let ty = tyOfExpr g invocation
+                    let resultTy = fragmentResultType ty
+
+                    let result =
+                        if typeEquiv g ty resultTy then
+                            invocation
+                        else
+                            awaitFragment g amap resultTy invocation m
+
+                    apply result rest
+
+            if typeEquiv g (tyOfExpr g f) fty then
+                Some(Expr.App(f, fty, tyargs, args, m))
+            else
+                let f = primMkApp (f, tyOfExpr g f) tyargs [] m
+                Some(apply f args)
+        | Expr.Let(TBind(v, construction, point), body, m, _) when inContext || called.Contains v.Stamp ->
+            let candidate =
+                isFunction v.Type
+                && not v.IsMutable
+                && (containsFragment construction || called.Contains v.Stamp)
+                && canRewriteFunctionUses g fragments.Contains inSequence v body
+
+            let construction =
+                rewrite (inContext || candidate) candidate false replacements construction
+
+            let ty = tyOfExpr g construction
+
+            if not candidate || typeEquiv g ty v.Type then
+                Some(mkLetBind m (TBind(v, construction, point)) (rewrite inContext callable inSequence replacements body))
+            else
+                let replacement, _ = mkLocal m v.LogicalName ty
+
+                Some(
+                    mkLet
+                        point
+                        m
+                        replacement
+                        construction
+                        (rewrite inContext callable inSequence (Map.add v.Stamp replacement replacements) body)
+                )
+        | Expr.LetRec(bindings, body, m, _) when
+            inContext
+            || List.exists (fun (TBind(v, _, _)) -> called.Contains v.Stamp) bindings
+            ->
+            let uses = mkLetRecBinds m bindings body
+
+            let replacements =
+                (replacements, bindings)
+                ||> List.fold (fun replacements (TBind(v, construction, _)) ->
+                    if
+                        (containsFragment construction || called.Contains v.Stamp)
+                        && isFunction v.Type
+                        && canRewriteFunctionUses g fragments.Contains inSequence v uses
+                    then
+                        let replacement, _ = mkLocal m v.LogicalName v.Type
+                        Map.add v.Stamp replacement replacements
+                    else
+                        replacements)
+
+            let mutable changed = true
+
+            while changed do
+                changed <- false
+
+                for TBind(v, construction, _) in bindings do
+                    match Map.tryFind v.Stamp replacements with
+                    | Some replacement ->
+                        let ty = shape (Map.map (fun _ (v: Val) -> v.Type) replacements) construction
+
+                        if not (typeEquiv g ty replacement.Type) then
+                            replacement.SetType ty
+                            changed <- true
+                    | None -> ()
+
+            let bindings =
+                bindings
+                |> List.map (fun (TBind(v, construction, point)) ->
+                    let replacement = Map.tryFind v.Stamp replacements
+                    TBind(defaultArg replacement v, rewrite true replacement.IsSome false replacements construction, point))
+
+            Some(mkLetRecBinds m bindings (rewrite inContext callable inSequence replacements body))
+        | Expr.Match(point, matchRange, _, targets, m, _) when inContext && callable ->
+            let tree =
+                match rewriteBody expr with
+                | Expr.Match(_, _, tree, _, _, _) -> tree
+                | _ -> error (InternalError("runtime-async match rewriting changed the expression shape", m))
+
+            let expectedTy = shape (Map.map (fun _ (v: Val) -> v.Type) replacements) expr
+
+            TryMapRuntimeAsyncMatchTargets g (point, matchRange, tree, targets, m) (fun _ body ->
+                Some(rewrite true true false replacements body |> adaptCallable expectedTy))
+        | Expr.Obj _ when inContext -> Some(rewrite false false false replacements expr)
+        | Expr.Quote _ -> Some expr
+        | _ -> None
+
+    RewriteImplFile
         {
-            PreIntercept = Some(intercept inContext)
+            PreIntercept = Some(intercept false false false Map.empty)
             PreInterceptBinding = None
-            PostTransform = postTransform inContext
+            PostTransform = (fun _ -> None)
             RewriteQuotations = false
             StackGuard = stackGuard
         }
-
-    and rewrite inContext expr = RewriteExpr (rewriter inContext) expr
-
-    and intercept inContext _ expr =
-        match expr with
-        | Expr.App(f, fty, tyargs, [ body ], m) when (TryGetRuntimeAsyncReturn g expr).IsSome ->
-            Some(Expr.App(f, fty, tyargs, [ rewrite true body ], m))
-        | Expr.App(f, fty, tyargs, [ recipe ], m) when (TryGetRuntimeAsyncSequence g expr).IsSome ->
-            Some(Expr.App(f, fty, tyargs, [ rewrite true recipe ], m))
-        | Expr.Let(TBind(callback, construction, point), continuation, m, _) when
-            not inContext
-            && callback.InlineIfLambda
-            && leadsToRuntimeAsyncReturn continuation
-            ->
-            Some(mkLetBind m (TBind(callback, rewrite true construction, point)) (rewrite false continuation))
-        | DelegateInvokeExpr g (invokeRef, invokeTy, tyargs, receiver, arg, m) when inContext && analyzer.ContainsSuspension receiver ->
-            let callback, callbackExpr =
-                mkCompGenLocal m "runtimeAsyncDelegate" (tyOfExpr g receiver)
-
-            callback.SetInlineIfLambda()
-            let invoke = Expr.App(invokeRef, invokeTy, tyargs, [ callbackExpr; arg ], m)
-            Some(rewrite inContext (mkCompGenLet m callback receiver invoke))
-        | NewDelegateExpr g _ -> None
-        | Expr.Obj _ when inContext -> Some(rewrite false expr)
-        | _ -> None
-
-    and postTransform inContext expr =
-        match expr with
-        | Expr.Let(TBind(callback, construction, _), _, _, _) when callback.InlineIfLambda && analyzer.ContainsSuspension construction ->
-            Some(outlineCallback g amap optimizeExpr analyzer inContext expr)
-        | _ -> None
-
-    RewriteImplFile (rewriter false) implFile
+        implFile
 
 /// Prepares each runtime-async body once its final shape is known, innermost first.
 let private prepareBodies g (reportedRanges: ConcurrentDictionary<range, unit>) implFile =
@@ -316,7 +652,7 @@ let TransformImplFile (g: TcGlobals) amap optimizeExpr reportedRanges (implFile:
         // Bodies inlined from an assembly compiled with the feature are still prepared.
         let implFile =
             if g.langVersion.SupportsFeature LanguageFeature.RuntimeAsync then
-                outlineCallbacks g amap optimizeExpr implFile
+                outlineApplications g amap optimizeExpr implFile
             else
                 implFile
 

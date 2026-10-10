@@ -2714,38 +2714,6 @@ let EtaExpandUnderAppliedValBinding g expr =
     | EtaFloatableValLet g (bind, body, m, etaExpanded) -> floatEtaCaptures bind body m etaExpanded
     | _ -> expr
 
-/// `let p = (let c = e in fun x -> ...)`  ~>  `let c = e in let p = fun x -> ...`, p an [<InlineIfLambda>]
-/// binding, so the lambda or delegate becomes a `CurriedLambdaValue` the optimizer can inline. The captures
-/// are evaluated at the same point and are not in scope in the body.
-let FloatInlineIfLambdaCaptures g expr =
-    let rec isFloatable rhs =
-        match rhs with
-        | Expr.Let(_, rest, _, _)
-        | Expr.Sequential(_, rest, NormalSeq, _) -> isFloatable rest
-        | _ ->
-            match stripDebugPoints rhs with
-            | Expr.Lambda _
-            | Expr.TyLambda _
-            | NewDelegateExpr g _ -> true
-            | _ -> false
-
-    match expr with
-    | Expr.Let(bind, body, m, _) when
-        bind.Var.InlineIfLambda
-        && (match bind.Expr with
-            | Expr.Let _
-            | Expr.Sequential(_, _, NormalSeq, _) -> isFloatable bind.Expr
-            | _ -> false)
-        ->
-        let rec rebind rhs =
-            match rhs with
-            | Expr.Let(capture, rest, mLet, _) -> mkLetBind mLet capture (rebind rest)
-            | Expr.Sequential(first, rest, NormalSeq, mSeq) -> Expr.Sequential(first, rebind rest, NormalSeq, mSeq)
-            | rhs -> mkLet bind.DebugPoint m bind.Var rhs body
-
-        rebind bind.Expr
-    | _ -> expr
-
 /// Optimize/analyze an expression
 let rec OptimizeExpr cenv (env: IncrementalOptimizationEnv) expr =
     cenv.stackGuard.Guard(fun () ->
@@ -3293,7 +3261,6 @@ and OptimizeLinearExpr cenv env expr contf =
     let expr = DetectAndOptimizeForEachExpression g OptimizeAllForExpressions expr
     let expr = if cenv.settings.ExpandStructuralValues() then ExpandStructuralBinding cenv expr else expr
     let expr = if cenv.settings.alwaysInline then EtaExpandUnderAppliedValBinding g expr else expr
-    let expr = if env.runtimeAsyncContext && cenv.settings.alwaysInline then FloatInlineIfLambdaCaptures g expr else expr
     let expr = stripExpr expr
 
     // Matching on 'match __resumableEntry() with ...` is really a first-class language construct which we
@@ -3922,11 +3889,7 @@ and TryInlineApplication cenv env finfo (valExpr: Expr) (tyargs: TType list, arg
                             alwaysInline = true
                             localOptUser = Some true } }
             let result = fst (OptimizeExpr cenv { env with runtimeAsyncContext = true } reduced)
-            match runtimeAsyncAnalyzer with
-            | Some analyzer ->
-                let result = ReduceRuntimeAsyncReturnedClosureApplications g analyzer result
-                if preserveCallSite then PreserveRuntimeAsyncCallSiteDebugPoint g m result else result
-            | None -> result
+            if preserveCallSite then PreserveRuntimeAsyncCallSiteDebugPoint g m result else result
         else
             reduced
 

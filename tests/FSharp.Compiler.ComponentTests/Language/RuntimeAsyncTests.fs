@@ -83,6 +83,164 @@ type Calculator() =
 """
 
 #if NETCOREAPP
+    [<Theory>]
+    [<InlineData(false, false)>]
+    [<InlineData(true, false)>]
+    [<InlineData(false, true)>]
+    [<InlineData(true, true)>]
+    let ``runtime async outlines independently marked children inside ordinary tasks`` (optimize: bool, imported: bool) =
+        let configure = withLangVersionPreview >> withFSharpCoreShippedNet >> withOptimization optimize
+        let fragmentSource = """
+open System.Threading.Tasks
+open System.Runtime.CompilerServices
+open Microsoft.FSharp.Core.CompilerServices.StateMachineHelpers
+
+let inline consume (gate: Task<int>) choose =
+    let callback =
+        if choose then
+            fun () ->
+                let awaiter = gate.GetAwaiter()
+                if not awaiter.IsCompleted then AsyncHelpers.UnsafeAwaitAwaiter awaiter
+                awaiter.GetResult() + 1
+        else fun () -> 42
+    __runtimeAsyncReturn (callback ())
+"""
+        let declarations, references =
+            if imported then
+                let library =
+                    FSharp ("module NestedRuntimeAsyncLibrary\n" + fragmentSource)
+                    |> asLibrary
+                    |> withName "NestedRuntimeAsyncLibrary"
+                    |> configure
+                "open NestedRuntimeAsyncLibrary", [library]
+            else
+                fragmentSource, []
+        FSharp $"""
+module NestedRuntimeAsyncHost
+open System
+open System.Threading.Tasks
+open System.Runtime.CompilerServices
+open Microsoft.FSharp.Core.CompilerServices.StateMachineHelpers
+{declarations}
+
+let run gate choose = task {{
+    do! Task.Yield()
+    return! consume gate choose
+}}
+
+let nested gate choose =
+    __runtimeAsyncReturn (AsyncHelpers.Await (run gate choose))
+
+[<EntryPoint>]
+let main _ =
+    for execute in [run; nested] do
+        for choose in [true; false] do
+            for mode in ["completed"; "pending"; "faulted"] do
+                let gate = TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously)
+                if mode = "completed" then gate.SetResult 41
+                let work = execute gate.Task choose
+                if mode = "faulted" then gate.SetException(InvalidOperationException("fragment"))
+                elif mode = "pending" then gate.SetResult 41
+                try
+                    let value = work.WaitAsync(TimeSpan.FromSeconds 10.).GetAwaiter().GetResult()
+                    if value <> 42 || (choose && mode = "faulted") then failwith "Wrong result"
+                with :? InvalidOperationException as error when error.Message = "fragment" && choose && mode = "faulted" -> ()
+    0
+"""
+        |> configure
+        |> withReferences references
+        |> compileExeAndRun
+        |> shouldSucceed
+
+    [<Theory>]
+    [<InlineData(false, false)>]
+    [<InlineData(true, false)>]
+    [<InlineData(false, true)>]
+    [<InlineData(true, true)>]
+    let ``runtime async outlines delegates within sequence recipe scaffolding`` (optimize: bool, imported: bool) =
+        let configure = withLangVersionPreview >> withFSharpCoreShippedNet >> withOptimization optimize
+        let fragmentSource = """
+open System.Threading.Tasks
+open System.Runtime.CompilerServices
+open Microsoft.FSharp.Core.CompilerServices.StateMachineHelpers
+type Started = delegate of unit -> int
+
+let inline make (gate: Task<int>) choose (events: ResizeArray<string>) =
+    __runtimeAsyncSequence(fun () -> seq {
+        let callback =
+            if choose then
+                Started(fun () ->
+                    events.Add "start"
+                    let value = AsyncHelpers.Await gate
+                    events.Add "finish"
+                    value)
+            else Started(fun () -> 41)
+        try
+            for offset in [1; 2] do
+                let mutable once = true
+                while once do
+                    once <- false
+                    yield callback.Invoke() + offset
+        finally
+            events.Add "dispose"
+    })
+"""
+        let declarations, references =
+            if imported then
+                let library =
+                    FSharp ("module SequenceFragmentLibrary\n" + fragmentSource)
+                    |> asLibrary
+                    |> withName "SequenceFragmentLibrary"
+                    |> configure
+                "open SequenceFragmentLibrary", [library]
+            else
+                fragmentSource, []
+        FSharp $"""
+module SequenceFragmentHost
+open System
+open System.Threading.Tasks
+{declarations}
+
+let run gate choose events = task {{
+    let source = make gate choose events
+    let enumerator = source.GetAsyncEnumerator()
+    let! first = enumerator.MoveNextAsync()
+    if not first || enumerator.Current <> 42 then failwith "Wrong first element"
+    let! second = enumerator.MoveNextAsync()
+    if not second || enumerator.Current <> 43 then failwith "Wrong second element"
+    let! ended = enumerator.MoveNextAsync()
+    if ended then failwith "Unexpected element"
+    do! enumerator.DisposeAsync()
+}}
+
+[<EntryPoint>]
+let main _ =
+    for choose in [true; false] do
+        for mode in ["completed"; "pending"; "faulted"] do
+            let events = ResizeArray<string>()
+            let gate = TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously)
+            if mode = "completed" then gate.SetResult 41
+            let work = run gate.Task choose events
+            if choose && mode <> "completed" && (work.IsCompleted || Seq.toList events <> ["start"]) then
+                failwith "Effects crossed suspension"
+            if mode = "faulted" then gate.SetException(InvalidOperationException("fragment"))
+            elif mode = "pending" then gate.SetResult 41
+            try
+                work.WaitAsync(TimeSpan.FromSeconds 10.).GetAwaiter().GetResult()
+                if choose && mode = "faulted" then failwith "Missing failure"
+            with :? InvalidOperationException as error when error.Message = "fragment" && choose && mode = "faulted" -> ()
+            let expected =
+                if not choose then ["dispose"]
+                elif mode = "faulted" then ["start"; "dispose"]
+                else ["start"; "finish"; "start"; "finish"; "dispose"]
+            if Seq.toList events <> expected then failwith "Lost effects or disposal"
+    0
+"""
+        |> configure
+        |> withReferences references
+        |> compileExeAndRun
+        |> shouldSucceed
+
     let private nestedTaskSource = """module NestedTask
 
 open System.Threading.Tasks
@@ -137,7 +295,7 @@ let run (ready: Task<int>) : Task<int> =
             | true, "local" -> [10, 21, 25]
             | true, _ -> [9, 21, 25]
             | false, "direct" -> [10, 25, 49]
-            | false, "local" -> [9, 52, 108; 11, 25, 41]
+            | false, "local" -> [11, 25, 41]
             | false, "imported" -> [10, 25, 54]
             | false, "unit" -> [10, 13, 37]
             | _ -> failwith $"Unexpected shape: {shape}"
@@ -1241,7 +1399,7 @@ let main _ =
         |> shouldSucceed
 
     [<Fact>]
-    let ``runtime async fuses suspension in inline returned closures`` () =
+    let ``runtime async outlines suspension in inline returned closures`` () =
         FSharp """
 module RuntimeAsyncInlineReturnedClosureTest
 
@@ -1291,11 +1449,233 @@ let main _ =
         |> shouldSucceed
 
     [<Theory>]
+    [<InlineData(false, "aliases")>]
+    [<InlineData(true, "aliases")>]
+    [<InlineData(false, "mutual")>]
+    [<InlineData(true, "mutual")>]
+    [<InlineData(false, "returned")>]
+    [<InlineData(true, "returned")>]
+    [<InlineData(false, "delegate")>]
+    [<InlineData(true, "delegate")>]
+    [<InlineData(false, "tuple")>]
+    [<InlineData(true, "tuple")>]
+    [<InlineData(false, "generic")>]
+    [<InlineData(true, "generic")>]
+    [<InlineData(false, "guard")>]
+    [<InlineData(true, "guard")>]
+    let ``runtime async outlines transitive local call chains`` (optimize: bool, shape: string) =
+        let helpers, call =
+            match shape with
+            | "aliases" -> ("""
+    let alias = leaf
+    let alias2 = alias
+    let rec middle depth x =
+        if depth = 0 then alias2 x else middle (depth - 1) x
+""", "middle (argument \"depth\" 4) (argument \"value\" 1)")
+            | "mutual" -> ("""
+    let rec first depth x =
+        if depth = 0 then leaf x else second (depth - 1) x
+    and second depth x = first depth x
+""", "first (argument \"depth\" 4) (argument \"value\" 1)")
+            | "returned" -> ("""
+    let rec make depth =
+        if depth = 0 then fun x -> leaf x else make (depth - 1)
+""", "(make (argument \"depth\" 4)) (argument \"value\" 1)")
+            | "delegate" -> ("""
+    let rec make depth =
+        if depth = 0 then Started(fun x -> leaf x) else make (depth - 1)
+""", "(make (argument \"depth\" 4)).Invoke(argument \"value\" 1)")
+            | "tuple" -> ("""
+    let rec middle (depth, x) =
+        if depth = 0 then leaf x else middle (depth - 1, x)
+""", "middle (argument \"depth\" 4, argument \"value\" 1)")
+            | "generic" -> ("""
+    let rec identity (ready: Task<'T>) depth =
+        if depth = 0 then AsyncHelpers.Await ready else identity ready (depth - 1)
+    let middle depth x =
+        if identity (Task.FromResult "answer") depth <> "answer" then failwith "Generic result changed"
+        let value = identity gate depth
+        leaf (x + value - value)
+""", "middle (argument \"depth\" 4) (argument \"value\" 1)")
+            | "guard" -> ("""
+    let rec make depth =
+        if depth > 0 then make (depth - 1)
+        else
+            match leaf 0 with
+            | value when value = 41 -> fun x -> value + x
+            | _ -> fun _ -> 0
+""", "(make (argument \"depth\" 4)) (argument \"value\" 1)")
+            | _ -> failwith $"Unexpected shape: {shape}"
+
+        let expectedEvents =
+            if shape = "guard" then
+                """if mode = "faulted" then ["construct"; "depth"; "start"; "finish"; last]
+            else ["construct"; "depth"; "start"; "finish"; "value"; last]"""
+            else
+                """["construct"; "depth"; "value"; "start"; "finish"; last]"""
+
+        FSharp $"""
+module TransitiveRuntimeAsync
+open System
+open System.Collections.Generic
+open System.Threading
+open System.Threading.Tasks
+open System.Runtime.CompilerServices
+open Microsoft.FSharp.Core.CompilerServices
+
+type Started<'T> = delegate of int -> 'T
+let ambient = AsyncLocal<int>()
+
+[<NoCompilerInlining>]
+let run (events: ResizeArray<string>) (gate: Task<int>) =
+    let mutable local = 0
+    let argument name value = events.Add name; value
+    let rec leaf amount =
+        if amount < 0 then leaf (-amount)
+        else
+            events.Add "start"
+            local <- local + 1
+            let value = AsyncHelpers.Await gate
+            ambient.Value <- ambient.Value + 1
+            local <- local + 1
+            events.Add "finish"
+            if value < 0 then invalidOp "fragment"
+            value + amount
+{helpers}
+    events.Add "construct"
+    StateMachineHelpers.__runtimeAsyncReturn (
+        try
+            let value = {call}
+            if local <> 2 || ambient.Value <> 11 then failwith "Lost mutation or context"
+            events.Add "parent"
+            value
+        with :? InvalidOperationException as error when error.Message = "fragment" ->
+            if local <> 2 || ambient.Value <> 11 then failwith "Lost fault context"
+            events.Add "caught"
+            -1)
+
+[<EntryPoint>]
+let main _ =
+    for mode in ["completed"; "pending"; "faulted"] do
+        ambient.Value <- 10
+        let events = ResizeArray<string>()
+        let gate = TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously)
+        if mode = "completed" then gate.SetResult 41
+        let work = run events gate.Task
+        if mode <> "completed" then
+            if work.IsCompleted || events.Count <> {if shape = "generic" || shape = "guard" then 3 else 4} then
+                failwith "Effects moved across suspension"
+            gate.SetResult(if mode = "faulted" then -1 else 41)
+        let actual = work.WaitAsync(TimeSpan.FromSeconds 10.).GetAwaiter().GetResult()
+        let expected = if mode = "faulted" then -1 else 42
+        if actual <> expected || ambient.Value <> 10 then failwith "Result changed or context leaked"
+        let last = if mode = "faulted" then "caught" else "parent"
+        let expectedEvents =
+            {expectedEvents}
+        if Seq.toList events <> expectedEvents then
+            failwithf "Effect order changed: %%A" events
+    0
+"""
+        |> withLangVersionPreview
+        |> withFSharpCoreShippedNet
+        |> withOptimization optimize
+        |> compileExeAndRun
+        |> shouldSucceed
+
+    [<Theory>]
     [<InlineData(false, false)>]
     [<InlineData(true, false)>]
     [<InlineData(false, true)>]
     [<InlineData(true, true)>]
-    let ``runtime async fuses returned closures across recursive bindings`` (optimize: bool, nestedRuntimeAsync: bool) =
+    let ``runtime async rejects fragment calls escaping through ordinary closures`` (optimize: bool, anonymous: bool) =
+        let escape =
+            if anonymous then "retain (fun () -> leaf 0)"
+            else "let escaped = fun () -> leaf 0\n    retain escaped"
+        let result =
+            FSharp $"""
+module EscapingRuntimeAsyncFragment
+open System.Threading.Tasks
+open System.Runtime.CompilerServices
+open Microsoft.FSharp.Core.CompilerServices
+let mutable retained = fun () -> 0
+
+[<NoCompilerInlining>]
+let retain callback = retained <- callback
+
+let execute (gate: Task<int>) =
+    let rec leaf depth =
+        if depth = 0 then AsyncHelpers.Await gate else leaf (depth - 1)
+    {escape}
+    StateMachineHelpers.__runtimeAsyncReturn (leaf 0)
+"""
+            |> withLangVersionPreview
+            |> withFSharpCoreShippedNet
+            |> withOptimization optimize
+            |> compile
+            |> shouldFail
+            |> withErrorCode 3918
+        for diagnostic in result.Output.Diagnostics do
+            Assert.Equal(Error 3918, diagnostic.Error)
+
+    [<Theory>]
+    [<InlineData(false, false)>]
+    [<InlineData(true, false)>]
+    [<InlineData(false, true)>]
+    [<InlineData(true, true)>]
+    let ``runtime async merges returned fragments with opaque pure callables`` (optimize: bool, isDelegate: bool) =
+        let pureCallable, fragment, calls =
+            if isDelegate then
+                "Started(fun x -> x + 41)", "Started(fun x -> AsyncHelpers.Await gate + x)", "callback.Invoke(1) + callback.Invoke(2)"
+            else
+                "(fun x -> x + 41)", "(fun x -> AsyncHelpers.Await gate + x)", "callback 1 + callback 2"
+        FSharp $"""
+module MixedRuntimeAsyncCallables
+open System
+open System.Threading.Tasks
+open System.Runtime.CompilerServices
+open Microsoft.FSharp.Core.CompilerServices
+type Started<'T> = delegate of int -> 'T
+let mutable constructions = 0
+
+[<NoCompilerInlining>]
+let pureFactory () =
+    constructions <- constructions + 1
+    {pureCallable}
+
+let execute (gate: Task<int>) choose =
+    let rec make depth =
+        if depth > 0 then make (depth - 1)
+        elif choose then {fragment}
+        else pureFactory ()
+    StateMachineHelpers.__runtimeAsyncReturn (
+        let callback = make 2
+        {calls})
+
+[<EntryPoint>]
+let main _ =
+    for choose in [true; false] do
+        constructions <- 0
+        let gate = TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously)
+        let work = execute gate.Task choose
+        if work.IsCompleted = choose then failwith "Completion changed"
+        if constructions <> (if choose then 0 else 1) then failwith "Construction moved or duplicated"
+        gate.SetResult 41
+        if work.WaitAsync(TimeSpan.FromSeconds 10.).GetAwaiter().GetResult() <> 85 then failwith "Result changed"
+        if constructions <> (if choose then 0 else 1) then failwith "Invocation repeated construction"
+    0
+"""
+        |> withLangVersionPreview
+        |> withFSharpCoreShippedNet
+        |> withOptimization optimize
+        |> compileExeAndRun
+        |> shouldSucceed
+
+    [<Theory>]
+    [<InlineData(false, false)>]
+    [<InlineData(true, false)>]
+    [<InlineData(false, true)>]
+    [<InlineData(true, true)>]
+    let ``runtime async outlines returned closures across recursive bindings`` (optimize: bool, nestedRuntimeAsync: bool) =
         let loopBody =
             if nestedRuntimeAsync then
                 "__runtimeAsyncReturn (if count = 0 then AsyncHelpers.Await ready else AsyncHelpers.Await (loop (count - 1)))"
@@ -2608,7 +2988,7 @@ let main _ =
                         let method = md.GetMethodDefinition methodHandle
                         if md.GetString method.Name = "Invoke" && int method.ImplAttributes &&& 0x2000 <> 0 then
                             yield md.GetString ty.Name ]
-            Assert.Equal(4, asyncInvokes.Length)
+            Assert.Equal(7, asyncInvokes.Length)
             Assert.Contains(asyncInvokes, fun name -> name.StartsWith("executeWithConstruction@", System.StringComparison.Ordinal)))
 
     [<InlineData(false)>]
@@ -2902,8 +3282,8 @@ let second () =
         |> compile
         |> shouldSucceed
         |> verifyPdb [
-            VerifyRuntimeAsyncMethodSequencePointsInSource("RuntimeAsyncEnumerableDebug.fs", 6, 8)
-            VerifyRuntimeAsyncMethodSequencePointsInSource("RuntimeAsyncEnumerableDebug.fs", 12, 14)
+            VerifyRuntimeAsyncMethodSequencePointsInSource("RuntimeAsyncEnumerableDebug.fs", 6, 8, 5)
+            VerifyRuntimeAsyncMethodSequencePointsInSource("RuntimeAsyncEnumerableDebug.fs", 12, 14, 5)
         ]
 
     [<Theory>]

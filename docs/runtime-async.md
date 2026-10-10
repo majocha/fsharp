@@ -153,14 +153,9 @@ Inline values whose bodies contain a return marker or an `AsyncHelpers`
 suspension are recursively specialized at their call sites, including when
 optimization is disabled. The analysis follows inline and local values with a
 cycle guard, and `InlineIfLambda` arguments are forced through when the caller
-is already in a runtime-async context. Ordinary inlining is tried first;
-applications of returned lambdas are reduced when their remaining arguments
-can safely move across the returned closure's construction. This handles
-computation-expression shapes where `Bind` returns a closure containing
-`Await`, and later `Combine`/`Delay` calls apply it. Inside a runtime-async expansion, captures
-that wrap an `InlineIfLambda` lambda or delegate (`let p = (let c = e in fun
-...)`) are floated above the binding so the callback can be inlined; they are
-still evaluated at the same point.
+is already in a runtime-async context. These requests force the ordinary
+optimizer; runtime-async does not separately reduce returned-closure
+applications or float callback captures.
 
 ## Runtime-async lowering
 
@@ -170,40 +165,43 @@ state, and before `LowerLocalMutables`, so captured mutable locals receive
 the ordinary shared reference-cell representation. It has two steps.
 
 Callback-use analysis, outlining, and invocation rewriting live in
-`LowerRuntimeAsync.fs`. `RuntimeAsyncAnalysis.fs` supplies fragment detection,
-optimizer-side returned-closure reduction, and suspension-lifetime analysis.
+`LowerRuntimeAsync.fs`. `RuntimeAsyncAnalysis.fs` supplies fragment detection
+and suspension-lifetime analysis.
 Both transformations share match-target rebuilding from
 `TypedTree/RuntimeAsync.fs`.
 
-First, if a compiler-owned `InlineIfLambda` function or delegate still
-contains a suspension, a fully rewritable, single-argument callback is
-outlined as a separate runtime-async closure. The ordinary optimizer already inlines a
-callback whose construction ends in one lambda, including after `let` or
-effect prefixes and at repeated invocations. What remains is a construction
-that selects a lambda by branching (`if`/`match`). Construction effects and
-branch selection stay at the original binding; each invocation calls the
-selected closure and awaits its outcome before continuing. Callback bodies
-are not copied into each invocation, so there is no callback-copy budget.
-Only the specialized copy changes, not the exported inline definition or
-source signature. This applies within a runtime-async body or sequence
-recipe, and to a callback bound immediately before a runtime-async body
-together with the callbacks its construction captures. Opaque consumers,
-escaping callbacks, unsupported callback shapes (including `try`/`with` in
-tail position), and unsafe byref or pinned captures are not rewritten;
-suspensions remaining in an ordinary method, such as a closure, are diagnosed
-with FS3918.
+First, lowering identifies local bindings containing unmarked suspensions
+and propagates that information through their dependencies. Starting at
+runtime-async bodies and sequence recipes, it follows callable definitions
+transitively, including bindings constructed outside the marked body.
+Residual lambdas and F# delegates on these paths become separate
+runtime-async closures. Curried applications await each outlined stage before
+applying the next argument; returned functions and delegates carry their
+rewritten physical types through callers. Recursive binding groups determine
+these types to a fixed point before their bodies are rewritten.
+When a branch returns an existing ordinary callable instead of a residual
+lambda, an adapter gives it the same fragment signature as its sibling
+branches. The callable-producing expression is evaluated once at the original
+construction point; its body is not inspected or copied.
 
-Inner callback bindings are processed before the outer delegate.
-If optimization leaves a construction expression directly as an `Invoke`
-receiver, it is first bound to a compiler-owned callback and lowered through
-the same path. Receiver construction still precedes argument evaluation.
+Construction effects and branch selection stay at their original locations;
+callback bodies are not copied into invocations and captures are not floated.
+Receiver construction still precedes argument evaluation, and arguments to a
+returned function are not evaluated until its producer has completed.
 Effectful precomputations that capture a delegate's inputs are not moved to
 its invocation, so a pending operation is created once and repeated invokes
-share captured state. Captured mutable locals
+share captured state. Only the specialized local copy changes, not the
+exported inline definition or source signature. Captured mutable locals
 retain their identities and are handled by ordinary closure conversion, not
 copied into and out of each fragment. Callback uses are checked before
 rewriting; opaque consumers and quotations retaining the callback reject the
-candidate. IlxGen checks each generated closure or delegate `Invoke` as its
+candidate. Already marked methods, ordinary resumable state machines, and
+unsafe byref or pinned captures are not converted into fragments. The
+ordinary state-machine boundary clears the inherited runtime-async context,
+but lowering still visits independently marked runtime-async children.
+The pseudo-lambdas representing loops, exception handlers, and runtime-async
+sequence recipes and combinators remain in their
+enclosing method. IlxGen checks each generated closure or delegate `Invoke` as its
 own method: an `Await` left there without a return marker produces FS3918,
 even when the enclosing method is runtime-async.
 
