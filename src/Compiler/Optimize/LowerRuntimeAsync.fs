@@ -204,11 +204,7 @@ let private tryDefunctionalizeCallback (g: TcGlobals) (stackGuard: StackGuard) m
                     }
 
                 Some(List.foldBack (mkCompGenSequential m) assignments select)
-        | RuntimeAsyncDebugWrapper body -> defunctionalize body |> Option.map (RebuildRuntimeAsyncDebugWrapper expr)
-        | Expr.Sequential(first, rest, NormalSeq, m) ->
-            defunctionalize rest
-            |> Option.map (fun rest -> Expr.Sequential(first, rest, NormalSeq, m))
-        | Expr.Let(binding, rest, m, _) -> defunctionalize rest |> Option.map (mkLetBind m binding)
+        | RuntimeAsyncConstructionPrefix(body, rebuild) -> defunctionalize body |> Option.map rebuild
         | Expr.Match(point, matchRange, tree, targets, m, _) ->
             TryMapRuntimeAsyncMatchTargets g (point, matchRange, tree, targets, m) (fun _ -> defunctionalize)
         | _ -> None
@@ -303,15 +299,14 @@ let private inlineCallback (g: TcGlobals) runtimeAsyncContext (expr: Expr) =
                 | NewDelegateExpr g (_, [ _ ], _, _, _) ->
                     ValueSome(fun (invokeRef, invokeTy, tyargs, arg, callRange) ->
                         MakeFSharpDelegateInvokeAndTryBetaReduce g (invokeRef, construction, invokeTy, tyargs, arg, callRange))
-                | RuntimeAsyncDebugWrapper rest ->
-                    tryPrepareDelegateInvocation rest
-                    |> ValueOption.map (fun invoke -> invoke >> RebuildRuntimeAsyncDebugWrapper construction)
-                | Expr.Sequential(first, rest, NormalSeq, m) when isTrivialValue first ->
-                    tryPrepareDelegateInvocation rest
-                    |> ValueOption.map (fun invoke -> fun args -> Expr.Sequential(first, invoke args, NormalSeq, m))
-                | Expr.Let((TBind(_, rhs, _)) as binding, rest, m, _) when isTrivialValue rhs ->
-                    tryPrepareDelegateInvocation rest
-                    |> ValueOption.map (fun invoke -> invoke >> mkLetBind m binding)
+                | RuntimeAsyncConstructionPrefix(body, rebuild) when
+                    match construction with
+                    | Expr.Sequential(first, _, _, _) -> isTrivialValue first
+                    | Expr.Let(TBind(_, rhs, _), _, _, _) -> isTrivialValue rhs
+                    | _ -> true
+                    ->
+                    tryPrepareDelegateInvocation body
+                    |> ValueOption.map (fun invoke -> invoke >> rebuild)
                 | Expr.Match(point,
                              matchRange,
                              (TDSwitch((Expr.Val _ as input), [ TCase(_, TDSuccess([], _)) ], Some(TDSuccess([], _)), _) as tree),

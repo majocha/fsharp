@@ -15,6 +15,9 @@ val (|RuntimeAsyncDebugWrapper|_|): expr: Expr -> Expr voption
 /// Retains the original debug range or lexical scope when rebuilding a matched wrapper.
 val RebuildRuntimeAsyncDebugWrapper: wrapper: Expr -> body: Expr -> Expr
 
+/// Exposes one construction prefix and a rebuilder retaining its bindings, effects, or debug scope.
+val (|RuntimeAsyncConstructionPrefix|_|): expr: Expr -> (Expr * (Expr -> Expr)) voption
+
 /// Rebuilds a match with every target rewritten, or returns None if any target cannot be.
 val TryMapRuntimeAsyncMatchTargets:
     g: TcGlobals ->

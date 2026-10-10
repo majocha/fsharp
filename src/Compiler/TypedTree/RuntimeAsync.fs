@@ -22,6 +22,14 @@ let RebuildRuntimeAsyncDebugWrapper wrapper body =
     | Expr.Op(TOp.DebugLocalScope _ as op, [], [ _ ], m) -> Expr.Op(op, [], [ body ], m)
     | _ -> failwith "unreachable: expression is not a runtime-async debug wrapper"
 
+[<return: Struct>]
+let (|RuntimeAsyncConstructionPrefix|_|) expr =
+    match expr with
+    | RuntimeAsyncDebugWrapper body -> ValueSome(body, RebuildRuntimeAsyncDebugWrapper expr)
+    | Expr.Let(binding, body, m, _) -> ValueSome(body, mkLetBind m binding)
+    | Expr.Sequential(first, body, NormalSeq, m) -> ValueSome(body, fun body -> Expr.Sequential(first, body, NormalSeq, m))
+    | _ -> ValueNone
+
 let TryMapRuntimeAsyncMatchTargets (g: TcGlobals) matchInfo mapTarget =
     let point, matchRange, tree, (targets: DecisionTreeTarget array), m = matchInfo
 

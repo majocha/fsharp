@@ -175,6 +175,10 @@ it reoptimizes with synthetic pipe-input bindings in scope. This enables
 existing optimizations on callbacks that capture those inputs; it is not a
 separate rewrite.
 
+Returned-closure fusion and callback lowering share construction-prefix
+recognition and rebuilding (`RuntimeAsyncConstructionPrefix` in `RuntimeAsync.fs`).
+Each rewrite retains its own movement checks, branch handling, and lambda reduction.
+
 ## Runtime-async lowering
 
 `LowerRuntimeAsync.fs` runs once per file after the first optimization loop,

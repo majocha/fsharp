@@ -166,18 +166,10 @@ let ReduceRuntimeAsyncReturnedClosureApplications (g: TcGlobals) (analyzer: Runt
             ->
             apply inner fty tyargs args m
         | Expr.DebugPoint(_, inner), _ -> apply inner fty tyargs args m |> Option.map (RebuildRuntimeAsyncDebugWrapper f)
-        | RuntimeAsyncDebugWrapper body, _ ->
-            apply body (tyOfExpr g body) tyargs args m
-            |> Option.map (RebuildRuntimeAsyncDebugWrapper f)
-        | Expr.Let(binding, body, mLet, _), _ ->
-            apply body (tyOfExpr g body) tyargs args m
-            |> Option.map (mkLetBind mLet binding)
+        | RuntimeAsyncConstructionPrefix(body, rebuild), _ -> apply body (tyOfExpr g body) tyargs args m |> Option.map rebuild
         | Expr.LetRec(bindings, body, mLet, _), _ ->
             apply body (tyOfExpr g body) tyargs args m
             |> Option.map (mkLetRecBinds mLet bindings)
-        | Expr.Sequential(first, rest, NormalSeq, mSeq), _ ->
-            apply rest (tyOfExpr g rest) tyargs args m
-            |> Option.map (fun rest -> Expr.Sequential(first, rest, NormalSeq, mSeq))
         | Expr.Match(point, matchRange, tree, targets, mMatch, _), _ when List.forall effectFree args ->
             // Each target after the first needs its own copy of any values bound by the arguments.
             TryMapRuntimeAsyncMatchTargets g (point, matchRange, tree, targets, mMatch) (fun i body ->
