@@ -4007,3 +4007,24 @@ let ``ImmediateSubExpressions`` (case: ImmediateSubExpressionsTestCase) =
     // on auto-generated comparison code for generic DUs/records.
     // Before the fix for #19118, this would crash with ConstraintSolverMissingConstraint.
     ProjectForWitnessConditionalComparison.walkAllExpressions case.Source
+
+[<Fact>]
+let ``Issue 20812 - Optimization does not rename the type parameters of types in place`` () =
+    // Under parallel optimization a later file reads these types while an earlier file's TLR phase runs, so renaming
+    // them in place left field types referring to stale type parameters.
+    let source = """
+module M
+
+type Ops<'C> = { OfSeq: seq<int> -> 'C; ToArray: 'C -> int array }
+"""
+    let options = createProjectOptions [ source ] [ "--optimize+" ]
+    let exprChecker = FSharpChecker.Create(keepAssemblyContents = true, useTransparentCompiler = CompilerAssertHelpers.UseTransparentCompiler)
+    let wholeProjectResults = exprChecker.ParseAndCheckProject(options) |> Async.RunSynchronouslyImmediate
+    wholeProjectResults.Diagnostics |> shouldEqual [||]
+
+    let ops = wholeProjectResults.AssemblySignature.FindEntityByPath [ "M"; "Ops`1" ] |> Option.get
+    let typarBefore = ops.GenericParameters[0].TypeParameter
+
+    wholeProjectResults.GetOptimizedAssemblyContents() |> ignore
+
+    Assert.Same(typarBefore, ops.GenericParameters[0].TypeParameter)

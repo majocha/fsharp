@@ -2337,32 +2337,35 @@ module internal ExprRemapping =
 
             tcref.Deref
 
-        (tycons, tyconsR)
-        ||> List.iter2 (fun tcd tcdR ->
-            let lookupTycon tycon = lookupTycon tycon
+        // OnlyCloneExprVals does not copy tycons, so tyconsR are the original tycons. Remapping them would rename
+        // their typars in place, which races with other files reading them under parallel optimization (#20812).
+        if not compgen.IsOnlyCloneExprVals then
+            (tycons, tyconsR)
+            ||> List.iter2 (fun tcd tcdR ->
+                let lookupTycon tycon = lookupTycon tycon
 
-            let tpsR, tmenvinner2 =
-                tmenvCopyRemapAndBindTypars (remapAttribs ctxt tmenvinner) tmenvinner tcd.Typars
+                let tpsR, tmenvinner2 =
+                    tmenvCopyRemapAndBindTypars (remapAttribs ctxt tmenvinner) tmenvinner tcd.Typars
 
-            tcdR.entity_typars <- LazyWithContext.NotLazy tpsR
-            tcdR.entity_attribs <- WellKnownEntityAttribs.Create(tcd.entity_attribs.AsList() |> remapAttribs ctxt tmenvinner2)
-            tcdR.entity_tycon_repr <- tcd.entity_tycon_repr |> remapTyconRepr ctxt tmenvinner2
-            let typeAbbrevR = tcd.TypeAbbrev |> Option.map (remapType tmenvinner2)
-            tcdR.entity_tycon_tcaug <- tcd.entity_tycon_tcaug |> remapTyconAug tmenvinner2
-            tcdR.entity_modul_type <- MaybeLazy.Strict(tcd.entity_modul_type.Value |> mapImmediateValsAndTycons lookupTycon lookupVal)
-            let exnInfoR = tcd.ExceptionInfo |> remapTyconExnInfo ctxt tmenvinner2
+                tcdR.entity_typars <- LazyWithContext.NotLazy tpsR
+                tcdR.entity_attribs <- WellKnownEntityAttribs.Create(tcd.entity_attribs.AsList() |> remapAttribs ctxt tmenvinner2)
+                tcdR.entity_tycon_repr <- tcd.entity_tycon_repr |> remapTyconRepr ctxt tmenvinner2
+                let typeAbbrevR = tcd.TypeAbbrev |> Option.map (remapType tmenvinner2)
+                tcdR.entity_tycon_tcaug <- tcd.entity_tycon_tcaug |> remapTyconAug tmenvinner2
+                tcdR.entity_modul_type <- MaybeLazy.Strict(tcd.entity_modul_type.Value |> mapImmediateValsAndTycons lookupTycon lookupVal)
+                let exnInfoR = tcd.ExceptionInfo |> remapTyconExnInfo ctxt tmenvinner2
 
-            match tcdR.entity_opt_data with
-            | Some optData ->
-                tcdR.entity_opt_data <-
-                    Some
-                        { optData with
-                            entity_tycon_abbrev = typeAbbrevR
-                            entity_exn_info = exnInfoR
-                        }
-            | _ ->
-                tcdR.SetTypeAbbrev typeAbbrevR
-                tcdR.SetExceptionInfo exnInfoR)
+                match tcdR.entity_opt_data with
+                | Some optData ->
+                    tcdR.entity_opt_data <-
+                        Some
+                            { optData with
+                                entity_tycon_abbrev = typeAbbrevR
+                                entity_exn_info = exnInfoR
+                            }
+                | _ ->
+                    tcdR.SetTypeAbbrev typeAbbrevR
+                    tcdR.SetExceptionInfo exnInfoR)
 
         tyconsR, vsR, tmenvinner
 
