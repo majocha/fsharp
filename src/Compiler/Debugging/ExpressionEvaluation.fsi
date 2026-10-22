@@ -102,6 +102,9 @@ type CompiledExpression =
 
         /// The F# type of the result, for display.
         ResultType: string
+
+        /// Format specifiers that followed the expression (`x, h` gives `h`).
+        FormatSpecifiers: string list
     }
 
 /// A diagnostic from compiling an expression.

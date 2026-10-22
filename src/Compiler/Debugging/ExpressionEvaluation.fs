@@ -81,6 +81,7 @@ type CompiledExpression =
         TypeName: string
         MethodName: string
         ResultType: string
+        FormatSpecifiers: string list
     }
 
 type EvaluationDiagnostic =
@@ -210,12 +211,10 @@ let private querySource (opens: string list) (text: string) =
     let openLines = opens |> List.map (fun o -> $"open {o}") |> String.concat "\n"
     $"module ``{QueryTypeName}``\n{openLines}\nlet ``{QueryMethodName}`` () =\n    (\n{indented}\n    )\n"
 
-/// Alias names such as `$exception` and `$1` are not F# identifiers: outside string and character
-/// literals, backticked names and line comments, `$name` becomes ``$name``.
-let private quoteDollarNames (text: string) =
-    let out = Text.StringBuilder()
+/// The end of the lexical unit of `text` at `i`: past a string or character literal, a
+/// backticked name or a line comment starting there, otherwise `i + 1`.
+let private unitEnd (text: string) i =
     let n = text.Length
-    let isNameChar c = Char.IsLetterOrDigit c || c = '_'
 
     let at i (s: string) =
         String.CompareOrdinal(text, i, s, 0, s.Length) = 0
@@ -241,6 +240,26 @@ let private quoteDollarNames (text: string) =
 
             scan (i + 1)
 
+    if text[i] = '"' then
+        stringEnd i
+    elif at i "``" then
+        after "``" (i + 2)
+    elif at i "//" then
+        after "\n" i
+    elif text[i] = '\'' && i + 2 < n && text[i + 2] = '\'' then
+        i + 3
+    elif text[i] = '\'' && i + 1 < n && text[i + 1] = '\\' then
+        after "'" (i + 2)
+    else
+        i + 1
+
+/// Alias names such as `$exception` and `$1` are not F# identifiers: outside string and character
+/// literals, backticked names and line comments, `$name` becomes ``$name``.
+let private quoteDollarNames (text: string) =
+    let out = Text.StringBuilder()
+    let n = text.Length
+    let isNameChar c = Char.IsLetterOrDigit c || c = '_'
+
     let rec go i =
         if i < n then
             if
@@ -257,25 +276,55 @@ let private quoteDollarNames (text: string) =
                 out.Append("``").Append(text, i, j - i).Append("``") |> ignore
                 go j
             else
-                let next =
-                    if text[i] = '"' then
-                        stringEnd i
-                    elif at i "``" then
-                        after "``" (i + 2)
-                    elif at i "//" then
-                        after "\n" i
-                    elif text[i] = '\'' && i + 2 < n && text[i + 2] = '\'' then
-                        i + 3
-                    elif text[i] = '\'' && i + 1 < n && text[i + 1] = '\\' then
-                        after "'" (i + 2)
-                    else
-                        i + 1
-
+                let next = unitEnd text i
                 out.Append(text, i, next - i) |> ignore
                 go next
 
     go 0
     out.ToString()
+
+/// Format specifiers the debugger knows (as for C#), besides `view(...)`.
+let private knownFormatSpecifiers =
+    set [ "ac"; "d"; "dynamic"; "h"; "hidden"; "nq"; "nse"; "raw"; "results" ]
+
+/// Splits trailing format specifiers off an expression: `x, h, nq` is `x` with `h` and `nq`. A
+/// trailing run of known specifiers after top-level commas counts, so `(x, h)` stays a tuple.
+let private splitFormatSpecifiers (text: string) =
+    // Top-level commas, outside brackets, literals and comments
+    let commas =
+        let rec go i depth acc =
+            if i >= text.Length then
+                List.rev acc
+            else
+                match text[i] with
+                | '('
+                | '['
+                | '{' -> go (i + 1) (depth + 1) acc
+                | ')'
+                | ']'
+                | '}' -> go (i + 1) (depth - 1) acc
+                | ',' when depth = 0 -> go (i + 1) depth (i :: acc)
+                | _ -> go (unitEnd text i) depth acc
+
+        go 0 0 []
+
+    let isSpecifier (s: string) =
+        knownFormatSpecifiers.Contains s || (s.StartsWith "view(" && s.EndsWith ")")
+
+    // Walk the segments after the commas from the end while they are specifiers.
+    let ends = commas @ [ text.Length ]
+
+    let segments =
+        List.zip (-1 :: commas) ends
+        |> List.map (fun (start, stop) -> text.Substring(start + 1, stop - start - 1).Trim())
+
+    let specifiers = segments |> List.rev |> List.takeWhile isSpecifier |> List.rev
+
+    if specifiers.IsEmpty || specifiers.Length = segments.Length then
+        text, []
+    else
+        let cut = List.item (commas.Length - specifiers.Length) commas
+        text.Substring(0, cut), specifiers
 
 /// A CLR type name as the debugger reports it, e.g. ``System.Collections.Generic.List`1[[System.Int32, System.Private.CoreLib]][], System.Private.CoreLib``.
 type private ClrTypeName =
@@ -902,6 +951,7 @@ type EvaluationSession(tcConfig: TcConfig, tcGlobals: TcGlobals.TcGlobals, tcImp
 
     member _.CompileExpression(frame: FrameContext, text: string, ?localsAsParameters: bool) =
         let localsAsParameters = defaultArg localsAsParameters false
+        let text, formatSpecifiers = splitFormatSpecifiers text
         let g = tcGlobals
         let m = range0
 
@@ -1441,5 +1491,6 @@ type EvaluationSession(tcConfig: TcConfig, tcGlobals: TcGlobals.TcGlobals, tcImp
                     TypeName = QueryTypeName
                     MethodName = QueryMethodName
                     ResultType = resultType
+                    FormatSpecifiers = formatSpecifiers
                 }
         }

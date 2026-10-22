@@ -484,3 +484,21 @@ let ``variables of a seq state machine`` () =
         | Ok _ -> failwithf "%s should not be in scope" plumbing
         | Error _ -> ()
 
+
+[<Fact>]
+let ``trailing format specifiers are split off`` () =
+    let add = methodOf fixtures "add"
+
+    let specifiers text =
+        match compile add text with
+        | Ok compiled -> compiled.ResultType, compiled.FormatSpecifiers
+        | Error diagnostics -> failwithf "%s: %A" text diagnostics
+
+    Assert.Equal(("int", [ "h" ]), specifiers "x, h")
+    Assert.Equal(("int", [ "h"; "nq" ]), specifiers "x + y , h,nq")
+    Assert.Equal(("string", [ "nq" ]), specifiers "\"a, h\", nq")
+    Assert.Equal(("int list", [ "view(simple)" ]), specifiers "[ x, y ] |> List.map fst, view(simple)")
+    // Not specifiers: a tuple, and a tuple in parentheses
+    Assert.Equal(("(int * int)", []), specifiers "x, y")
+    Assert.Equal(("(int * int)", []), specifiers "(x, y)")
+    Assert.Equal((box (3, 4), "(int * int)"), evaluate add [ 3; 4 ] "x, y")
