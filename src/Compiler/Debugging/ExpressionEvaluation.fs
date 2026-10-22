@@ -49,6 +49,21 @@ type DebuggeeModule =
 
 type FrameLocal = { Name: string; Slot: int }
 
+[<RequireQualifiedAccess>]
+type AliasKind =
+    | Exception
+    | StowedException
+    | ReturnValue
+    | ObjectId
+    | Variable
+
+type Alias =
+    {
+        Name: string
+        Kind: AliasKind
+        TypeName: string
+    }
+
 type FrameContext =
     {
         AssemblyName: string
@@ -56,6 +71,8 @@ type FrameContext =
         LocalSignatureToken: int
         Opens: string list
         Locals: FrameLocal list
+        Aliases: Alias list
+        IntrinsicsAssembly: string
     }
 
 type CompiledExpression =
@@ -185,30 +202,212 @@ let private querySource (opens: string list) (text: string) =
     let openLines = opens |> List.map (fun o -> $"open {o}") |> String.concat "\n"
     $"module ``{QueryTypeName}``\n{openLines}\nlet ``{QueryMethodName}`` () =\n    (\n{indented}\n    )\n"
 
-/// Gives `<>m0` the frame's `this` and parameters as its own parameters: the type checker saw them
-/// as free locals, so after this rewrite IlxGen stores them as method arguments.
-/// An instance field of the frame's `this` exposed as a variable: a closure's captured value or
-/// a class `let` field.
-type private FieldVariable =
+/// Alias names such as `$exception` and `$1` are not F# identifiers: outside string and character
+/// literals, backticked names and line comments, `$name` becomes ``$name``.
+let private quoteDollarNames (text: string) =
+    let out = Text.StringBuilder()
+    let n = text.Length
+    let isNameChar c = Char.IsLetterOrDigit c || c = '_'
+
+    let at i (s: string) =
+        String.CompareOrdinal(text, i, s, 0, s.Length) = 0
+
+    let after (closing: string) from =
+        match text.IndexOf(closing, from, StringComparison.Ordinal) with
+        | -1 -> n
+        | j -> j + closing.Length
+
+    // End of the string literal starting at i (regular, verbatim or triple-quoted)
+    let stringEnd i =
+        if at i "\"\"\"" then
+            after "\"\"\"" (i + 3)
+        else
+            let verbatim = i > 0 && text[i - 1] = '@'
+
+            let rec scan j =
+                if j >= n then n
+                elif verbatim && at j "\"\"" then scan (j + 2)
+                elif not verbatim && text[j] = '\\' then scan (j + 2)
+                elif text[j] = '"' then j + 1
+                else scan (j + 1)
+
+            scan (i + 1)
+
+    let rec go i =
+        if i < n then
+            if
+                text[i] = '$'
+                && i + 1 < n
+                && isNameChar text[i + 1]
+                && (i = 0 || not (isNameChar text[i - 1]))
+            then
+                let mutable j = i + 1
+
+                while j < n && isNameChar text[j] do
+                    j <- j + 1
+
+                out.Append("``").Append(text, i, j - i).Append("``") |> ignore
+                go j
+            else
+                let next =
+                    if text[i] = '"' then
+                        stringEnd i
+                    elif at i "``" then
+                        after "``" (i + 2)
+                    elif at i "//" then
+                        after "\n" i
+                    elif text[i] = '\'' && i + 2 < n && text[i + 2] = '\'' then
+                        i + 3
+                    elif text[i] = '\'' && i + 1 < n && text[i + 1] = '\\' then
+                        after "'" (i + 2)
+                    else
+                        i + 1
+
+                out.Append(text, i, next - i) |> ignore
+                go next
+
+    go 0
+    out.ToString()
+
+/// A CLR type name as the debugger reports it, e.g. ``System.Collections.Generic.List`1[[System.Int32, System.Private.CoreLib]][], System.Private.CoreLib``.
+type private ClrTypeName =
     {
-        Val: Val
-        Field: ILFieldSpec
-        Type: TType
+        /// Full name, nested types separated by '+'
+        Name: string
+        Args: ClrTypeName list
+        ArrayRanks: int list
+        Assembly: string option
     }
 
-/// Reads of field variables become field loads from `this` (as class `let` fields are compiled).
-let private rewriteFieldVariables (thisVal: Val option) (fields: FieldVariable list) expr =
-    match thisVal, fields with
-    | None, _
-    | _, [] -> expr
-    | Some thisVal, _ ->
-        let byStamp = fields |> List.map (fun f -> f.Val.Stamp, f) |> dict
+let private parseClrTypeName (s: string) =
+    let mutable i = 0
+    let peek () = if i < s.Length then s[i] else '\000'
+
+    // `nested`: inside brackets, where an assembly name ends at ']'
+    let rec parse nested =
+        let start = i
+
+        while i < s.Length && "[],".IndexOf s[i] < 0 do
+            i <- i + 1
+
+        let name = s.Substring(start, i - start).Trim()
+
+        let args =
+            if peek () = '[' && i + 1 < s.Length && s[i + 1] <> ']' && s[i + 1] <> ',' then
+                i <- i + 1
+
+                let rec loop acc =
+                    let arg =
+                        if peek () = '[' then
+                            i <- i + 1
+                            let arg = parse true
+                            i <- i + 1 // ']'
+                            arg
+                        else
+                            parse true
+
+                    if peek () = ',' then
+                        i <- i + 1
+                        loop (arg :: acc)
+                    else
+                        i <- i + 1 // ']'
+                        List.rev (arg :: acc)
+
+                loop []
+            else
+                []
+
+        let ranks =
+            [
+                while peek () = '[' do
+                    let close = s.IndexOf(']', i)
+                    let close = if close < 0 then s.Length - 1 else close
+                    yield s.Substring(i + 1, close - i - 1).Split(',').Length
+                    i <- close + 1
+            ]
+
+        let assembly =
+            if peek () = ',' then
+                i <- i + 1
+                let start = i
+
+                while i < s.Length && not (nested && s[i] = ']') do
+                    i <- i + 1
+
+                Some(s.Substring(start, i - start).Trim())
+            else
+                None
+
+        {
+            Name = name
+            Args = args
+            ArrayRanks = ranks
+            Assembly = assembly
+        }
+
+    parse false
+
+/// The F# type for a CLR type name, looked up in the given assembly when it names one the
+/// session imports, otherwise in every imported assembly.
+let private resolveClrType
+    (g: TcGlobals.TcGlobals)
+    (amap: Import.ImportMap)
+    (scopes: ILScopeRef list)
+    (scopeOfAssembly: string -> ILScopeRef option)
+    (typeName: string)
+    =
+    let m = range0
+
+    let rec resolve (t: ClrTypeName) =
+        let path = t.Name.Split('+') |> List.ofArray
+        let enclosing, name = List.frontAndBack path
+
+        let candidates =
+            match t.Assembly |> Option.bind scopeOfAssembly with
+            | Some scope -> scope :: scopes
+            | None -> scopes
+
+        let tcref =
+            candidates
+            |> List.tryPick (fun scope ->
+                match ILTypeRef.Create(scope, enclosing, name) with
+                | Import.TryImportILTypeRef amap m tcref -> Some tcref
+                | _ -> None)
+
+        let args = t.Args |> List.map resolve
+
+        match tcref with
+        | Some(tcref: TyconRef) when args |> List.forall Option.isSome && tcref.Typars.Length = args.Length ->
+            let ty = g.improveType tcref (args |> List.choose id) g.knownWithoutNull
+
+            Some(
+                (ty, List.rev t.ArrayRanks)
+                ||> List.fold (fun ty rank ->
+                    if rank = 1 then
+                        mkArrayType g ty
+                    else
+                        mkArrayTy g rank g.knownWithoutNull ty m)
+            )
+        | _ -> None
+
+    try
+        resolve (parseClrTypeName typeName)
+    with _ ->
+        None
+    |> Option.defaultValue g.obj_ty_ambivalent
+
+/// Replaces reads of the given Vals with expressions built at the read's range: field variables
+/// become field loads from `this` (as class `let` fields are compiled), aliases become calls to
+/// the debugger's intrinsic methods.
+let private replaceReads (replacements: (Val * (range -> Expr)) list) expr =
+    match replacements with
+    | [] -> expr
+    | _ ->
+        let byStamp = replacements |> List.map (fun (v, f) -> v.Stamp, f) |> dict
 
         let intercept _ (e: Expr) =
             match e with
-            | Expr.Val(vref, _, m) when byStamp.ContainsKey vref.Stamp ->
-                let f = byStamp[vref.Stamp]
-                Some(mkAsmExpr ([ mkNormalLdfld f.Field ], [], [ exprForVal m thisVal ], [ f.Type ], m))
+            | Expr.Val(vref, _, m) when byStamp.ContainsKey vref.Stamp -> Some(byStamp[vref.Stamp]m)
             | _ -> None
 
         RewriteExpr
@@ -222,14 +421,13 @@ let private rewriteFieldVariables (thisVal: Val option) (fields: FieldVariable l
             expr
 
 /// Gives `<>m0` the frame's `this`, parameters and locals as its own parameters: the type checker
-/// saw them as free locals, so after this rewrite IlxGen stores them as method arguments. Field
-/// variables become loads from `this`, and a generic result type is fixed to `obj`, since the
-/// debugger runs the query without choosing type arguments for it.
+/// saw them as free locals, so after this rewrite IlxGen stores them as method arguments. Other
+/// variables (fields of `this`, aliases) are replaced by their reads, and a generic result type
+/// is fixed to `obj`, since the debugger runs the query without choosing type arguments for it.
 let private bindFrameValues
-    g
+    (g: TcGlobals.TcGlobals)
     (frameVals: Val list)
-    (thisVal: Val option)
-    (fields: FieldVariable list)
+    (replacements: (Val * (range -> Expr)) list)
     (contents: ModuleOrNamespaceContents)
     =
     let resultType = ref None
@@ -246,7 +444,7 @@ let private bindFrameValues
 
             match stripDebugPoints expr with
             | Expr.Lambda(_, _, _, [ unitArg ], body, m, bodyTy) ->
-                let body = rewriteFieldVariables thisVal fields body
+                let body = replaceReads replacements body
 
                 let lambda, args =
                     if frameVals.IsEmpty then
@@ -767,9 +965,8 @@ type EvaluationSession(tcConfig: TcConfig, tcGlobals: TcGlobals.TcGlobals, tcImp
             // Instance fields of `this` that read as variables: a closure's captured values, a
             // class's `let` fields. Compiler-generated and backing fields (`X@`, `_tag`) are left out.
             let fieldVariables =
-                if methodDef.IsStatic then
-                    []
-                else
+                match thisVal with
+                | [ thisVal ] ->
                     declaringType.Fields.AsList()
                     |> List.filter (fun f ->
                         not f.IsStatic
@@ -779,12 +976,66 @@ type EvaluationSession(tcConfig: TcConfig, tcGlobals: TcGlobals.TcGlobals, tcImp
                     |> List.map (fun f ->
                         let fieldType = rescopeILType dllInfo.ILScopeRef f.FieldType
                         let ty = Import.ImportILType amap m [] fieldType
+                        let field = mkILFieldSpecInTy (thisILType, f.Name, fieldType)
 
-                        {
-                            Val = fst (mkLocal m f.Name ty)
-                            Field = mkILFieldSpecInTy (thisILType, f.Name, fieldType)
-                            Type = ty
-                        })
+                        fst (mkLocal m f.Name ty), fun m -> mkAsmExpr ([ mkNormalLdfld field ], [], [ exprForVal m thisVal ], [ ty ], m))
+                | _ -> []
+
+            // The debugger's aliases, read through its intrinsic methods (as Roslyn binds them).
+            let aliasVariables =
+                let intrinsics =
+                    lazy
+                        (let assembly =
+                            ILAssemblyRef.FromAssemblyName(Reflection.AssemblyName frame.IntrinsicsAssembly)
+
+                         mkILNonGenericBoxedTy (
+                             mkILTyRef (ILScopeRef.Assembly assembly, "Microsoft.VisualStudio.Debugger.Clr.IntrinsicMethods")
+                         ))
+
+                let call name argTys args (retILTy, retTy) m =
+                    let spec =
+                        mkILNonGenericStaticMethSpecInTy (intrinsics.Value, name, argTys, retILTy)
+
+                    mkAsmExpr ([ mkNormalCall spec ], [], args, [ retTy ], m), retTy
+
+                let exn = g.iltyp_Exception, g.exn_ty
+                let obj = g.ilg.typ_Object, g.obj_ty_ambivalent
+
+                let scopes = tcImports.GetImportedAssemblies() |> List.map _.ILScopeRef
+
+                let scopeOfAssembly (name: string) =
+                    try
+                        tcImports.TryFindDllInfo(ctok, m, Reflection.AssemblyName(name).Name, lookupOnly = true)
+                        |> Option.map _.ILScopeRef
+                    with _ ->
+                        None
+
+                frame.Aliases
+                |> List.map (fun alias ->
+                    let ty = resolveClrType g amap scopes scopeOfAssembly alias.TypeName
+
+                    let read m =
+                        let value, valueTy =
+                            match alias.Kind with
+                            | AliasKind.Exception -> call "GetException" [] [] exn m
+                            | AliasKind.StowedException -> call "GetStowedException" [] [] exn m
+                            | AliasKind.ReturnValue ->
+                                // `$ReturnValue` is the last value returned, `$ReturnValueN` the Nth.
+                                let index =
+                                    match Int32.TryParse(alias.Name.Substring(min alias.Name.Length "$ReturnValue".Length)) with
+                                    | true, index -> index
+                                    | _ -> 0
+
+                                call "GetReturnValue" [ g.ilg.typ_Int32 ] [ mkInt32 g m index ] obj m
+                            | AliasKind.ObjectId
+                            | AliasKind.Variable -> call "GetObjectByAlias" [ g.ilg.typ_String ] [ mkString g m alias.Name ] obj m
+
+                        if typeEquiv g valueTy ty then
+                            value
+                        else
+                            mkCallUnbox g m ty (mkCoerceIfNeeded g g.obj_ty_ambivalent valueTy value)
+
+                    fst (mkLocal m alias.Name ty), read)
 
             let parameterVals =
                 methodDef.Parameters
@@ -829,13 +1080,18 @@ type EvaluationSession(tcConfig: TcConfig, tcGlobals: TcGlobals.TcGlobals, tcImp
 
             let frameVals = thisVal @ parameterVals @ localVals
 
-            // Name scopes, outermost first: fields of `this` are shadowed by parameters, and those by locals.
+            // Name scopes, outermost first: fields of `this` are shadowed by parameters, those by
+            // locals, and those by the debugger's variables.
             let scopedVals =
-                thisVal @ (fieldVariables |> List.map _.Val) @ parameterVals @ localVals
+                thisVal
+                @ (fieldVariables |> List.map fst)
+                @ parameterVals
+                @ localVals
+                @ (aliasVariables |> List.map fst)
 
             let! parsed =
                 withDiagnostics BuildPhase.Parse (fun () ->
-                    let source = querySource opens text
+                    let source = querySource opens (quoteDollarNames text)
 
                     ParseOneInputSourceText(
                         tcConfig,
@@ -917,7 +1173,7 @@ type EvaluationSession(tcConfig: TcConfig, tcGlobals: TcGlobals.TcGlobals, tcImp
                     implFile
 
                 let rewrittenContents, resultTy =
-                    bindFrameValues g frameVals (List.tryHead thisVal) fieldVariables contents
+                    bindFrameValues g frameVals (fieldVariables @ aliasVariables) contents
 
                 CheckedImplFile(
                     qualifiedNameOfFile,

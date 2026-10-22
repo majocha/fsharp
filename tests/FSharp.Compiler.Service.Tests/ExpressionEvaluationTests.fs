@@ -10,6 +10,7 @@ open System.Reflection.Metadata
 open System.Reflection.Metadata.Ecma335
 open Xunit
 open FSharp.Compiler.Debugging.ExpressionEvaluation
+open Microsoft.VisualStudio.Debugger.Clr
 
 module EvalFixtures =
 
@@ -139,6 +140,9 @@ let private frameOf (frameMethod: MethodBase) =
             | body -> body.LocalSignatureMetadataToken
         Opens = []
         Locals = pdbLocals frameMethod
+        Aliases = []
+        // The stand-in IntrinsicMethods is defined in this assembly.
+        IntrinsicsAssembly = Assembly.GetExecutingAssembly().FullName
     }
 
 let private compileWith localsAsParameters (frameMethod: MethodBase) (text: string) =
@@ -146,13 +150,21 @@ let private compileWith localsAsParameters (frameMethod: MethodBase) (text: stri
 
 let private compile frameMethod text = compileWith true frameMethod text
 
-/// Compiles `text` in the frame of `frameMethod`, runs it with `args` as the frame's this/parameters.
-let private evaluate (frameMethod: MethodBase) (args: obj list) (text: string) =
-    match compile frameMethod text with
+let private run (compiled: Result<CompiledExpression, EvaluationDiagnostic list>) (args: obj list) (text: string) =
+    match compiled with
     | Ok compiled ->
         let query = Assembly.Load(compiled.Assembly).GetType(compiled.TypeName).GetMethod(compiled.MethodName, all)
         query.Invoke(null, Array.ofList args), compiled.ResultType
     | Error diagnostics -> failwithf "%s: %A" text diagnostics
+
+/// Compiles `text` in the frame of `frameMethod`, runs it with `args` as the frame's this/parameters.
+let private evaluate (frameMethod: MethodBase) (args: obj list) (text: string) =
+    run (compile frameMethod text) args text
+
+/// As `evaluate`, with the debugger's aliases in scope.
+let private evaluateWithAliases aliases (frameMethod: MethodBase) (args: obj list) (text: string) =
+    let frame = { frameOf frameMethod with Aliases = aliases }
+    run (session.Value.CompileExpression(frame, text, localsAsParameters = true)) args text
 
 [<Fact>]
 let ``the session reads every module from memory`` () =
@@ -245,4 +257,82 @@ let ``generic results are fixed to obj`` () =
     Assert.Equal("obj list", ty)
     Assert.Equal<obj list>([], value :?> obj list)
     Assert.Equal((null, "obj option"), evaluate add [ 0; 0 ] "None")
+
+[<Fact>]
+let ``the exception alias`` () =
+    IntrinsicMethods.Exception <- InvalidOperationException "boom"
+
+    let exceptionAlias =
+        {
+            Name = "$exception"
+            Kind = AliasKind.Exception
+            TypeName = typeof<InvalidOperationException>.AssemblyQualifiedName
+        }
+
+    let value, ty =
+        evaluateWithAliases [ exceptionAlias ] (methodOf fixtures "add") [ 1; 2 ] "$exception.Message + string x"
+
+    Assert.Equal(box "boom1", value)
+    Assert.Equal("string", ty)
+
+    let value, ty = evaluateWithAliases [ exceptionAlias ] (methodOf fixtures "add") [ 1; 2 ] "$exception"
+    Assert.IsType<InvalidOperationException>(value) |> ignore
+    Assert.Equal("System.InvalidOperationException", ty)
+
+[<Fact>]
+let ``return value aliases`` () =
+    IntrinsicMethods.ReturnValues <- [ box 10; box "ignored"; box 30 ]
+
+    let returnValue name =
+        {
+            Name = name
+            Kind = AliasKind.ReturnValue
+            TypeName = "System.Int32"
+        }
+
+    Assert.Equal(
+        (box 41, "int"),
+        evaluateWithAliases
+            [ returnValue "$ReturnValue"; returnValue "$ReturnValue2" ]
+            (methodOf fixtures "add")
+            [ 1; 2 ]
+            "$ReturnValue + $ReturnValue2 + x"
+    )
+
+[<Fact>]
+let ``object ids and user variables`` () =
+    IntrinsicMethods.Variables["$1"] <- box [ 1; 2; 3 ]
+    IntrinsicMethods.Variables["total"] <- box 5
+
+    let aliases =
+        [
+            {
+                Name = "$1"
+                Kind = AliasKind.ObjectId
+                TypeName = typeof<int list>.AssemblyQualifiedName
+            }
+            {
+                Name = "total"
+                Kind = AliasKind.Variable
+                TypeName = typeof<int>.FullName
+            }
+        ]
+
+    let add = methodOf fixtures "add"
+    Assert.Equal((box 11, "int"), evaluateWithAliases aliases add [ 1; 2 ] "List.sum $1 + total")
+    // `$1` inside literals and comments is left alone
+    Assert.Equal((box "$1 3", "string"), evaluateWithAliases aliases add [ 1; 2 ] "\"$1 \" + string $1.Length // $1")
+
+[<Fact>]
+let ``an alias of a type the session can't find reads as obj`` () =
+    IntrinsicMethods.Variables["$2"] <- box "x"
+
+    let alias =
+        {
+            Name = "$2"
+            Kind = AliasKind.ObjectId
+            TypeName = "No.Such.Type, NoSuchAssembly"
+        }
+
+    Assert.Equal((box "x", "obj"), evaluateWithAliases [ alias ] (methodOf fixtures "add") [ 1; 2 ] "$2")
 

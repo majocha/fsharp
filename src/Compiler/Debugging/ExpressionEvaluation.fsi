@@ -35,6 +35,37 @@ type FrameLocal =
         Slot: int
     }
 
+/// What a debugger alias stands for (Concord's DkmClrAliasKind).
+[<RequireQualifiedAccess>]
+type AliasKind =
+    /// `$exception`: the exception being thrown.
+    | Exception
+
+    /// `$stowedexception`: a WinRT stowed exception.
+    | StowedException
+
+    /// `$ReturnValue`, `$ReturnValue1`, ...: the value returned by a method just stepped over.
+    | ReturnValue
+
+    /// `$1`, `$2`, ...: an object id the user made.
+    | ObjectId
+
+    /// A variable the user declared in the Immediate window.
+    | Variable
+
+/// A pseudo-variable the debugger provides, read through its intrinsic methods.
+type Alias =
+    {
+        /// The name the expression uses, e.g. `$exception` or `$1`.
+        Name: string
+
+        Kind: AliasKind
+
+        /// The value's runtime type, as a CLR type name (assembly-qualified or not, with generic
+        /// arguments in `[[...]]`). A type the session can't find reads as `obj`.
+        TypeName: string
+    }
+
 /// The stopped frame an expression is evaluated in.
 type FrameContext =
     {
@@ -53,6 +84,13 @@ type FrameContext =
 
         /// Locals in scope at the frame's location, innermost last (later names shadow earlier ones).
         Locals: FrameLocal list
+
+        /// The debugger's pseudo-variables.
+        Aliases: Alias list
+
+        /// Display name of the assembly defining `Microsoft.VisualStudio.Debugger.Clr.IntrinsicMethods`,
+        /// which aliases are read through.
+        IntrinsicsAssembly: string
     }
 
 /// A compiled expression: an assembly with `TypeName.MethodName(this?, parameters...)`.

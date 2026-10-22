@@ -32,6 +32,7 @@
     <Compile Include="HotReload\GeneratedNamesTests.fs" />
     <Compile Include="HotReload\NameMapTests.fs" />
     <Compile Include="BreakpointLocationTests.fs" />
+    <Compile Include="ExpressionEvaluationIntrinsics.fs" />
     <Compile Include="ExpressionEvaluationTests.fs" />
     <Compile Include="AssemblyReaderShim.fs" />
     <Compile Include="ModuleReaderCancellationTests.fs" />
