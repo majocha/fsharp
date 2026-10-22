@@ -106,6 +106,12 @@ module internal SharedImportedCcus =
 
     val clear: unit -> unit
 
+/// The F# view of a .NET binary's contents, read from an already-opened IL module (whether it came
+/// from a file or from memory).
+type RawFSharpAssemblyDataBackedByFileOnDisk =
+    new: ilModule: ILModuleDef * ilAssemblyRefs: ILAssemblyRef list -> RawFSharpAssemblyDataBackedByFileOnDisk
+    interface IRawFSharpAssemblyData
+
 /// Represents a resolved imported binary
 [<RequireQualifiedAccess>]
 type ImportedBinary =

@@ -5,6 +5,27 @@
 /// whose parameters mirror the frame, which the debugger executes against the frame's values.
 module internal FSharp.Compiler.Debugging.ExpressionEvaluation
 
+/// The contents of a module loaded in the debuggee.
+[<RequireQualifiedAccess>]
+type DebuggeeImage =
+    /// A complete PE image (file layout). Needed for the frame's own module, whose method bodies
+    /// supply the frame's local signature.
+    | PE of image: byte[]
+
+    /// The module's metadata blob (as the debugger exposes it) and some of its embedded managed
+    /// resources, each with its offset in the resources directory. F# signature and optimization
+    /// data are such resources; other resources and method bodies are not needed for references.
+    | Metadata of metadata: byte[] * resources: (int * byte[]) list
+
+/// A module loaded in the debuggee.
+type DebuggeeModule =
+    {
+        /// The module's path in the debuggee, used to identify it; it need not exist on this machine.
+        FileName: string
+
+        Image: DebuggeeImage
+    }
+
 /// A local variable of the frame that is in scope at the stop location (from the PDB).
 type FrameLocal =
     {
@@ -22,6 +43,10 @@ type FrameContext =
 
         /// Metadata token of the frame's method.
         MethodToken: int
+
+        /// Token of the frame method's local signature (StandAloneSig), as the debugger reports it,
+        /// or 0 to take it from the method body (which needs a PE image of the frame's module).
+        LocalSignatureToken: int
 
         /// Namespaces and modules opened at the frame's location (from the PDB import scope).
         Opens: string list
@@ -51,8 +76,9 @@ type EvaluationDiagnostic =
 [<Sealed>]
 type EvaluationSession =
 
-    /// Creates a session over the given assemblies (paths of everything the debuggee has loaded).
-    static member Create: references: string list -> EvaluationSession
+    /// Creates a session over the modules the debuggee has loaded, read from memory: no file
+    /// of the debuggee needs to exist on this machine.
+    static member Create: modules: DebuggeeModule list -> EvaluationSession
 
     /// Compiles an expression in the context of a frame. The query method takes the frame's
     /// `this` and parameters as parameters and starts its locals with the frame's local signature,

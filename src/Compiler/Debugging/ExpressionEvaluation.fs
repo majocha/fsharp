@@ -3,7 +3,11 @@
 module internal FSharp.Compiler.Debugging.ExpressionEvaluation
 
 open System
+open System.Collections.Immutable
 open System.IO
+open System.Reflection.Metadata
+open System.Reflection.Metadata.Ecma335
+open System.Reflection.PortableExecutable
 open Internal.Utilities.Library
 open FSharp.Compiler
 open FSharp.Compiler.AbstractIL.IL
@@ -32,12 +36,24 @@ open FSharp.Compiler.TypedTree
 open FSharp.Compiler.TypedTreeBasics
 open FSharp.Compiler.TypedTreeOps
 
+[<RequireQualifiedAccess>]
+type DebuggeeImage =
+    | PE of image: byte[]
+    | Metadata of metadata: byte[] * resources: (int * byte[]) list
+
+type DebuggeeModule =
+    {
+        FileName: string
+        Image: DebuggeeImage
+    }
+
 type FrameLocal = { Name: string; Slot: int }
 
 type FrameContext =
     {
         AssemblyName: string
         MethodToken: int
+        LocalSignatureToken: int
         Opens: string list
         Locals: FrameLocal list
     }
@@ -203,6 +219,230 @@ let private bindFrameValues g (frameVals: Val list) (contents: ModuleOrNamespace
 
     rewrite contents
 
+/// A PE image holding only a metadata blob and embedded managed resources (at their original
+/// offsets in the resources directory): enough for the IL reader to import a reference.
+type private MetadataOnlyPEBuilder(metadata: byte[], resources: byte[]) =
+    inherit PEBuilder(PEHeaderBuilder.CreateLibraryHeader(), null)
+
+    let directories = PEDirectoriesBuilder()
+
+    override _.CreateSections() =
+        ImmutableArray.Create(
+            PEBuilder.Section(
+                ".text",
+                SectionCharacteristics.MemRead
+                ||| SectionCharacteristics.ContainsInitializedData
+            )
+        )
+
+    override _.SerializeSection(_name, location) =
+        let corHeaderSize = 72
+        let metadataRva = location.RelativeVirtualAddress + corHeaderSize
+        let resourcesRva = metadataRva + ((metadata.Length + 3) &&& ~~~3)
+        let builder = BlobBuilder()
+
+        // CLI header (ECMA-335 II.25.3.3)
+        builder.WriteInt32 corHeaderSize
+        builder.WriteUInt16 2us
+        builder.WriteUInt16 5us
+        builder.WriteInt32 metadataRva
+        builder.WriteInt32 metadata.Length
+        builder.WriteInt32 1 // COMIMAGE_FLAGS_ILONLY
+        builder.WriteInt32 0 // entry point
+        builder.WriteInt32(if resources.Length = 0 then 0 else resourcesRva)
+        builder.WriteInt32 resources.Length
+
+        // strong name signature, code manager, vtable fixups, export address table jumps, managed native header
+        for _ in 1..5 do
+            builder.WriteInt64 0L
+
+        builder.WriteBytes metadata
+        builder.Align 4
+        builder.WriteBytes resources
+        directories.CorHeaderTable <- DirectoryEntry(location.RelativeVirtualAddress, corHeaderSize)
+        builder
+
+    override _.GetDirectories() = directories
+
+let private metadataOnlyImage (metadata: byte[]) (resources: (int * byte[]) list) =
+    // Each resource is a length-prefixed blob at its offset in the resources directory. The IL
+    // reader reads every embedded resource listed in the metadata, so resources that were not
+    // provided get an empty blob at their offset.
+    let allOffsets =
+        use provider =
+            MetadataReaderProvider.FromMetadataImage(ImmutableArray.Create<byte>(metadata))
+
+        let md = provider.GetMetadataReader()
+
+        [
+            for h in md.ManifestResources do
+                let r = md.GetManifestResource h
+
+                if r.Implementation.IsNil then
+                    int r.Offset
+        ]
+
+    let size =
+        let provided =
+            resources
+            |> List.fold (fun size (offset, data: byte[]) -> max size (offset + 4 + data.Length)) 0
+
+        allOffsets |> List.fold (fun size offset -> max size (offset + 4)) provided
+
+    let directory = Array.zeroCreate<byte> size
+
+    for offset, data in resources do
+        BitConverter.GetBytes(data.Length).CopyTo(directory, offset)
+        data.CopyTo(directory, offset + 4)
+
+    let blob = BlobBuilder()
+    MetadataOnlyPEBuilder(metadata, directory).Serialize(blob) |> ignore
+    blob.ToArray()
+
+/// A type in a local signature, with whether the local is pinned.
+[<Struct>]
+type private SignatureType = { Type: ILType; Pinned: bool }
+
+/// Decodes a method's local signature (StandAloneSig) from the module's metadata, giving the same
+/// AbstractIL locals the IL reader would produce from the method body.
+let private decodeLocalSignature
+    (g: TcGlobals.TcGlobals)
+    (metadata: byte[])
+    (scopeRef: ILScopeRef)
+    (assemblyRefs: ILAssemblyRef list)
+    (classTypars: int)
+    (token: int)
+    : ILLocals =
+    use provider =
+        MetadataReaderProvider.FromMetadataImage(ImmutableArray.Create<byte>(metadata))
+
+    let md = provider.GetMetadataReader()
+    let plain t = { Type = t; Pinned = false }
+
+    let fullName (ns: StringHandle) (name: StringHandle) =
+        match md.GetString ns with
+        | "" -> md.GetString name
+        | ns -> ns + "." + md.GetString name
+
+    let rec typeDefRef (h: TypeDefinitionHandle) =
+        let td = md.GetTypeDefinition h
+        let declaring = td.GetDeclaringType()
+
+        if declaring.IsNil then
+            ILTypeRef.Create(scopeRef, [], fullName td.Namespace td.Name)
+        else
+            let outer = typeDefRef declaring
+            ILTypeRef.Create(scopeRef, outer.Enclosing @ [ outer.Name ], md.GetString td.Name)
+
+    let rec typeRefRef (h: TypeReferenceHandle) =
+        let tr = md.GetTypeReference h
+        let scope = tr.ResolutionScope
+
+        match scope.Kind with
+        | HandleKind.TypeReference ->
+            let outer = typeRefRef (TypeReferenceHandle.op_Explicit scope)
+            ILTypeRef.Create(outer.Scope, outer.Enclosing @ [ outer.Name ], md.GetString tr.Name)
+        | HandleKind.AssemblyReference ->
+            let row =
+                MetadataTokens.GetRowNumber(AssemblyReferenceHandle.op_Explicit scope: AssemblyReferenceHandle)
+
+            ILTypeRef.Create(ILScopeRef.Assembly assemblyRefs[row - 1], [], fullName tr.Namespace tr.Name)
+        | HandleKind.ModuleReference ->
+            let moduleRef = md.GetModuleReference(ModuleReferenceHandle.op_Explicit scope)
+
+            ILTypeRef.Create(
+                ILScopeRef.Module(ILModuleRef.Create(md.GetString moduleRef.Name, true, None)),
+                [],
+                fullName tr.Namespace tr.Name
+            )
+        | _ -> ILTypeRef.Create(scopeRef, [], fullName tr.Namespace tr.Name)
+
+    let named (tref: ILTypeRef) (rawKind: byte) =
+        let spec = ILTypeSpec.Create(tref, [])
+        // SignatureTypeKind.ValueType
+        plain (
+            if rawKind = 0x11uy then
+                ILType.Value spec
+            else
+                ILType.Boxed spec
+        )
+
+    let types =
+        { new ISignatureTypeProvider<SignatureType, unit> with
+            member _.GetPrimitiveType code =
+                plain (
+                    match code with
+                    | PrimitiveTypeCode.Void -> ILType.Void
+                    | PrimitiveTypeCode.Boolean -> g.ilg.typ_Bool
+                    | PrimitiveTypeCode.Char -> g.ilg.typ_Char
+                    | PrimitiveTypeCode.SByte -> g.ilg.typ_SByte
+                    | PrimitiveTypeCode.Byte -> g.ilg.typ_Byte
+                    | PrimitiveTypeCode.Int16 -> g.ilg.typ_Int16
+                    | PrimitiveTypeCode.UInt16 -> g.ilg.typ_UInt16
+                    | PrimitiveTypeCode.Int32 -> g.ilg.typ_Int32
+                    | PrimitiveTypeCode.UInt32 -> g.ilg.typ_UInt32
+                    | PrimitiveTypeCode.Int64 -> g.ilg.typ_Int64
+                    | PrimitiveTypeCode.UInt64 -> g.ilg.typ_UInt64
+                    | PrimitiveTypeCode.Single -> g.ilg.typ_Single
+                    | PrimitiveTypeCode.Double -> g.ilg.typ_Double
+                    | PrimitiveTypeCode.String -> g.ilg.typ_String
+                    | PrimitiveTypeCode.IntPtr -> g.ilg.typ_IntPtr
+                    | PrimitiveTypeCode.UIntPtr -> g.ilg.typ_UIntPtr
+                    | PrimitiveTypeCode.TypedReference -> g.ilg.typ_TypedReference
+                    | _ -> g.ilg.typ_Object
+                )
+
+            member _.GetTypeFromDefinition(_, h, rawKind) = named (typeDefRef h) rawKind
+            member _.GetTypeFromReference(_, h, rawKind) = named (typeRefRef h) rawKind
+
+            member this.GetTypeFromSpecification(_, context, h, _) =
+                (md.GetTypeSpecification h).DecodeSignature(this, context)
+
+            member _.GetGenericInstantiation(generic, args) =
+                let args = [ for a in args -> a.Type ]
+
+                plain (
+                    match generic.Type with
+                    | ILType.Value spec -> ILType.Value(ILTypeSpec.Create(spec.TypeRef, args))
+                    | ILType.Boxed spec -> ILType.Boxed(ILTypeSpec.Create(spec.TypeRef, args))
+                    | t -> t
+                )
+
+            member _.GetSZArrayType element =
+                plain (mkILArrTy (element.Type, ILArrayShape.SingleDimensional))
+
+            member _.GetArrayType(element, shape) =
+                plain (mkILArrTy (element.Type, ILArrayShape.FromRank shape.Rank))
+
+            member _.GetByReferenceType element = plain (ILType.Byref element.Type)
+            member _.GetPointerType element = plain (ILType.Ptr element.Type)
+            member _.GetGenericTypeParameter(_, index) = plain (ILType.TypeVar(uint16 index))
+
+            member _.GetGenericMethodParameter(_, index) =
+                plain (ILType.TypeVar(uint16 (classTypars + index)))
+
+            member _.GetFunctionPointerType _ = plain g.ilg.typ_IntPtr
+
+            member _.GetModifiedType(modifier, unmodified, isRequired) =
+                { unmodified with
+                    Type = ILType.Modified(isRequired, modifier.Type.TypeRef, unmodified.Type)
+                }
+
+            member _.GetPinnedType element = { element with Pinned = true }
+        }
+
+    let signature =
+        md.GetStandaloneSignature(MetadataTokens.StandaloneSignatureHandle(token &&& 0x00FFFFFF))
+
+    [
+        for local in signature.DecodeLocalSignature(types, ()) ->
+            {
+                Type = local.Type
+                IsPinned = local.Pinned
+                DebugInfo = None
+            }
+    ]
+
 /// IlxGen saw the frame's locals as the trailing parameters of `<>m0`. The debugger instead
 /// needs them as the method's leading locals, in the frame's exact local signature: drop those
 /// parameters, prepend the frame's locals, and retarget argument and local instructions.
@@ -288,43 +528,61 @@ let private ignoresAccessChecksTo (g: TcGlobals.TcGlobals) (assemblyNames: strin
 
     typeDef, attributes
 
+/// The metadata blob of a module image.
+let private metadataOf (image: DebuggeeImage) =
+    match image with
+    | DebuggeeImage.Metadata(metadata, _) -> metadata
+    | DebuggeeImage.PE image ->
+        use pe = new PEReader(ImmutableArray.Create<byte>(image))
+        let content = pe.GetMetadata().GetContent()
+        Array.init content.Length (fun i -> content[i])
+
 [<Sealed>]
-type EvaluationSession(tcConfig: TcConfig, tcGlobals: TcGlobals.TcGlobals, tcImports: TcImports) =
+type EvaluationSession(tcConfig: TcConfig, tcGlobals: TcGlobals.TcGlobals, tcImports: TcImports, modules: Map<string, DebuggeeImage>) =
 
     let ctok = AssumeCompilationThreadWithoutEvidence()
     let lexResourceManager = LexResourceManager()
     let amap = tcImports.GetImportMap()
 
-    let bodyReaders = Collections.Generic.Dictionary<string, ILModuleReader>()
+    static member Create(modules: DebuggeeModule list) =
+        let readerOptions =
+            {
+                pdbDirPath = None
+                reduceMemoryUsage = ReduceMemoryFlag.Yes
+                metadataOnly = MetadataOnlyFlag.No
+                tryGetMetadataSnapshot = (fun _ -> None)
+            }
 
-    /// A reader of a debuggee binary that, unlike the imports, includes method bodies.
-    let readerWithBodies (fileName: string) =
-        lock bodyReaders (fun () ->
-            match bodyReaders.TryGetValue fileName with
-            | true, reader -> reader
-            | _ ->
-                let reader =
-                    OpenILModuleReader
-                        fileName
-                        {
-                            pdbDirPath = None
-                            reduceMemoryUsage = ReduceMemoryFlag.Yes
-                            metadataOnly = MetadataOnlyFlag.No
-                            tryGetMetadataSnapshot = (fun _ -> None)
-                        }
+        // Each module is a project reference whose contents are already available, so nothing is
+        // read from disk: this is how the IDE references in-memory project outputs.
+        let projectReference (m: DebuggeeModule) =
+            let contents =
+                lazy
+                    (let image =
+                        match m.Image with
+                        | DebuggeeImage.PE image -> image
+                        | DebuggeeImage.Metadata(metadata, resources) -> metadataOnlyImage metadata resources
 
-                bodyReaders[fileName] <- reader
-                reader)
+                     let reader = OpenILModuleReaderFromBytes m.FileName image readerOptions
+                     RawFSharpAssemblyDataBackedByFileOnDisk(reader.ILModuleDef, reader.ILAssemblyRefs) :> IRawFSharpAssemblyData)
 
-    static member Create(references: string list) =
+            { new IProjectReference with
+                member _.FileName = m.FileName
+
+                member _.EvaluateRawContents() =
+                    async { return ProjectAssemblyDataResult.Available contents.Value }
+
+                member _.TryGetLogicalTimeStamp _ = Some DateTime.MinValue
+            }
+
         let fsharpCore =
-            references
-            |> List.tryFind (fun r -> String.Equals(Path.GetFileName r, "FSharp.Core.dll", StringComparison.OrdinalIgnoreCase))
+            modules
+            |> List.tryFind (fun m -> String.Equals(Path.GetFileName m.FileName, "FSharp.Core.dll", StringComparison.OrdinalIgnoreCase))
 
         let binariesDir =
             match fsharpCore with
-            | Some path ->
-                Path.GetDirectoryName path
+            | Some m ->
+                Path.GetDirectoryName m.FileName
                 |> Option.ofObj
                 |> Option.defaultValue AppContext.BaseDirectory
             | None -> AppContext.BaseDirectory
@@ -358,8 +616,10 @@ type EvaluationSession(tcConfig: TcConfig, tcGlobals: TcGlobals.TcGlobals, tcImp
                 localOptUser = Some false
             }
 
-        for r in references do
-            tcConfigB.AddReferencedAssemblyByPath(range0, r)
+        tcConfigB.projectReferences <- modules |> List.map projectReference
+
+        for m in modules do
+            tcConfigB.AddReferencedAssemblyByPath(range0, m.FileName)
 
         let tcConfig = TcConfig.Create(tcConfigB, validate = false)
         let tcConfigP = TcConfigProvider.Constant tcConfig
@@ -368,7 +628,7 @@ type EvaluationSession(tcConfig: TcConfig, tcGlobals: TcGlobals.TcGlobals, tcImp
             TcImports.BuildTcImports(tcConfigP, new DependencyProvider())
             |> Async.RunSynchronouslyImmediate
 
-        EvaluationSession(tcConfig, tcGlobals, tcImports)
+        EvaluationSession(tcConfig, tcGlobals, tcImports, modules |> List.map (fun m -> m.FileName, m.Image) |> Map.ofList)
 
     member _.CompileExpression(frame: FrameContext, text: string, ?localsAsParameters: bool) =
         let localsAsParameters = defaultArg localsAsParameters false
@@ -432,24 +692,30 @@ type EvaluationSession(tcConfig: TcConfig, tcGlobals: TcGlobals.TcGlobals, tcImp
                     let ty = Import.ImportILType amap m [] p.Type
                     fst (mkLocal m (defaultArg p.Name $"arg{i}") ty))
 
-            // The frame's locals, typed from its own local signature. References are imported
-            // metadata-only, so the method body comes from a second reader of the same binary.
-            // TODO: decode the StandAloneSig by token instead, for in-memory debuggee metadata.
+            // The frame's locals, typed from its own local signature: decoded from the module's
+            // metadata by token, or taken from the method body when the module is a full image.
             let frameLocalSignature =
-                match
-                    (readerWithBodies dllInfo.FileName).ILModuleDef
-                    |> fun ilModule -> tryFindMethod ilModule frame.MethodToken
-                with
-                | Some(_, md) ->
-                    match md.Body with
-                    | MethodBody.IL body ->
+                if frame.LocalSignatureToken <> 0 then
+                    match modules.TryFind dllInfo.FileName with
+                    | Some image ->
+                        decodeLocalSignature
+                            g
+                            (metadataOf image)
+                            dllInfo.ILScopeRef
+                            dllInfo.ILAssemblyRefs
+                            declaringType.GenericParams.Length
+                            frame.LocalSignatureToken
+                    | None -> []
+                else
+                    match modules.TryFind dllInfo.FileName, methodDef.Body with
+                    // Only a full image has method bodies; a metadata-only one has nothing to read
+                    | Some(DebuggeeImage.PE _), MethodBody.IL body ->
                         body.Value.Locals
                         |> List.map (fun l ->
                             { l with
                                 Type = rescopeILType dllInfo.ILScopeRef l.Type
                             })
                     | _ -> []
-                | None -> []
 
             let localVals =
                 frame.Locals

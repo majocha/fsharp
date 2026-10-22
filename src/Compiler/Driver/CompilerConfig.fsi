@@ -877,6 +877,9 @@ type TcConfig =
 
     member IsSystemAssembly: string -> bool
 
+    /// Whether a path names a system assembly, whether or not the file exists.
+    member IsSystemAssemblyPath: string -> bool
+
     member PrimaryAssemblyDllReference: unit -> AssemblyReference
 
     member CoreLibraryDllReference: unit -> AssemblyReference

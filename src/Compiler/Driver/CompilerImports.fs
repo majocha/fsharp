@@ -699,7 +699,8 @@ type TcConfig with
         match r.ProjectReference with
         | Some _ ->
             let resolved = r.Text
-            let sysdir = tcConfig.IsSystemAssembly resolved
+            // The contents come from the project reference; the file need not exist
+            let sysdir = tcConfig.IsSystemAssemblyPath resolved
 
             Some
                 {
@@ -2912,7 +2913,8 @@ and [<Sealed>] TcImports
                         res = 0)
 
                 match path with
-                | Some p -> AssemblyReference(range0, p.resolvedPath, None)
+                // Keep a project reference: its contents may exist only in memory
+                | Some p -> AssemblyReference(range0, p.resolvedPath, p.ProjectReference)
                 | None -> tcConfig.PrimaryAssemblyDllReference()
 
             let primaryAssemblyResolution =
@@ -2944,8 +2946,18 @@ and [<Sealed>] TcImports
                 if primaryAssemblyResolvedPath = resolvedAssembly.resolvedPath then
                     None
                 else
-                    let reader = OpenILModuleReader resolvedAssembly.resolvedPath readerSettings
-                    let mdef = reader.ILModuleDef
+                    let mdef =
+                        // A project reference's contents may exist only in memory
+                        let fromProjectReference =
+                            resolvedAssembly.ProjectReference
+                            |> Option.bind (fun pr ->
+                                match pr.EvaluateRawContents() |> Async.RunSynchronouslyImmediate with
+                                | ProjectAssemblyDataResult.Available data -> data.TryGetILModuleDef()
+                                | ProjectAssemblyDataResult.Unavailable _ -> None)
+
+                        match fromProjectReference with
+                        | Some mdef -> mdef
+                        | None -> (OpenILModuleReader resolvedAssembly.resolvedPath readerSettings).ILModuleDef
 
                     // We check the exported types of all assemblies, since many may forward System.Object,
                     // but only check the actual type definitions for specific assemblies that we know

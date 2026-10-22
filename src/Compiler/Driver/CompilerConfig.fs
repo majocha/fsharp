@@ -1155,7 +1155,8 @@ type TcConfig private (data: TcConfigBuilder, validate: bool) =
         let nameOfDll (assemRef: AssemblyReference) =
             let fileName = ComputeMakePathAbsolute data.implicitIncludeDir assemRef.Text
 
-            if FileSystem.FileExistsShim fileName then
+            // A project reference supplies its contents, so its file need not exist
+            if assemRef.ProjectReference.IsSome || FileSystem.FileExistsShim fileName then
                 assemRef, Some fileName
             else
                 // If the file doesn't exist, let reference resolution logic report the error later...
@@ -1504,13 +1505,20 @@ type TcConfig private (data: TcConfigBuilder, validate: bool) =
     /// 'framework' reference set that is potentially shared across multiple compilations.
     member tcConfig.IsSystemAssembly(fileName: string) =
         try
+            FileSystem.FileExistsShim fileName && tcConfig.IsSystemAssemblyPath fileName
+        with _ ->
+            false
+
+    /// Whether a path names a system assembly, whether or not the file exists (project references
+    /// may supply the contents of a file that is not on disk).
+    member tcConfig.IsSystemAssemblyPath(fileName: string) =
+        try
             let dirName = !!Path.GetDirectoryName(fileName)
             let baseName = FileSystemUtils.fileNameWithoutExtension fileName
 
-            FileSystem.FileExistsShim fileName
-            && ((tcConfig.GetTargetFrameworkDirectories() |> List.contains dirName)
-                || FxResolver.GetSystemAssemblies().Contains baseName
-                || FxResolver.IsReferenceAssemblyPackDirectoryApprox dirName)
+            (tcConfig.GetTargetFrameworkDirectories() |> List.contains dirName)
+            || FxResolver.GetSystemAssemblies().Contains baseName
+            || FxResolver.IsReferenceAssemblyPackDirectoryApprox dirName
         with _ ->
             false
 

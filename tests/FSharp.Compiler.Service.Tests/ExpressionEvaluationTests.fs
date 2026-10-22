@@ -33,7 +33,7 @@ module EvalFixtures =
 let private all = BindingFlags.Public ||| BindingFlags.NonPublic ||| BindingFlags.Instance ||| BindingFlags.Static
 
 /// What a debuggee process has loaded: the runtime's implementation assemblies, FSharp.Core and this assembly.
-let private references () =
+let private loadedAssemblies () =
     let isManaged (path: string) =
         try
             AssemblyName.GetAssemblyName path |> ignore
@@ -49,7 +49,54 @@ let private references () =
         Assembly.GetExecutingAssembly().Location
     ]
 
-let private session = lazy (EvaluationSession.Create(references ()))
+/// A module as the debugger sees it in memory: its metadata blob and its F# resources (with their
+/// offsets in the resources directory), nothing else.
+let private metadataOnly (path: string) =
+    use pe = new System.Reflection.PortableExecutable.PEReader(File.OpenRead path)
+    let md = pe.GetMetadataReader()
+    let metadata = pe.GetMetadata().GetContent() |> Seq.toArray
+    let resourcesRva = pe.PEHeaders.CorHeader.ResourcesDirectory.RelativeVirtualAddress
+
+    let resources =
+        [
+            for h in md.ManifestResources do
+                let r = md.GetManifestResource h
+
+                if r.Implementation.IsNil && (md.GetString r.Name).StartsWith "FSharp" then
+                    let mutable blob = pe.GetSectionData(resourcesRva + int r.Offset).GetReader()
+                    let length = blob.ReadInt32()
+                    int r.Offset, blob.ReadBytes length
+        ]
+
+    DebuggeeImage.Metadata(metadata, resources)
+
+/// Where the debuggee's modules claim to live: directories that do not exist on this machine, as
+/// for a remote debuggee, so nothing can be read from disk. The shared framework and the app are
+/// in different directories, as in a real process.
+let private debuggeePath (path: string) =
+    let runtimeDir = Path.GetDirectoryName(typeof<obj>.Assembly.Location)
+    let dir = if Path.GetDirectoryName path = runtimeDir then @"Z:\debuggee\shared" else @"Z:\debuggee\app"
+    Path.Combine(dir, Path.GetFileName path)
+
+/// The debuggee's modules, as metadata only, read from memory as the debugger would. With
+/// `framePE` the frame's module (this assembly) is a full image instead.
+let private debuggeeModules framePE =
+    let self = Assembly.GetExecutingAssembly().Location
+
+    loadedAssemblies ()
+    |> List.map (fun path ->
+        {
+            FileName = debuggeePath path
+            Image =
+                if framePE && path = self then
+                    DebuggeeImage.PE(File.ReadAllBytes path)
+                else
+                    metadataOnly path
+        })
+
+let private session = lazy (EvaluationSession.Create(debuggeeModules false))
+
+let private sessionWithFramePE = lazy (EvaluationSession.Create(debuggeeModules true))
 
 let private fixtures = typeof<EvalFixtures.Counter>.DeclaringType
 
@@ -73,6 +120,10 @@ let private frameOf (frameMethod: MethodBase) =
     {
         AssemblyName = Assembly.GetExecutingAssembly().GetName().Name
         MethodToken = frameMethod.MetadataToken
+        LocalSignatureToken =
+            match frameMethod.GetMethodBody() with
+            | null -> 0
+            | body -> body.LocalSignatureMetadataToken
         Opens = []
         Locals = pdbLocals frameMethod
     }
@@ -89,6 +140,11 @@ let private evaluate (frameMethod: MethodBase) (args: obj list) (text: string) =
         let query = Assembly.Load(compiled.Assembly).GetType(compiled.TypeName).GetMethod(compiled.MethodName, all)
         query.Invoke(null, Array.ofList args), compiled.ResultType
     | Error diagnostics -> failwithf "%s: %A" text diagnostics
+
+[<Fact>]
+let ``the session reads every module from memory`` () =
+    Assert.All(debuggeeModules false, fun m -> Assert.False(File.Exists m.FileName))
+    Assert.Equal((box 3, "int"), evaluate (methodOf fixtures "add") [ 1; 2 ] "List.length moduleValue")
 
 [<Fact>]
 let ``constant expression`` () =
@@ -143,4 +199,15 @@ let ``the query method starts its locals with the frame's local signature`` () =
         Assert.Equal(1, query.GetParameters().Length)
         // Invoked directly the frame's locals are zero-initialized: doubled = 0.
         Assert.Equal(box 5, query.Invoke(null, [| box 5 |]))
+
+[<Fact>]
+let ``with a full image of the frame's module the local signature comes from the method body`` () =
+    let withLocals = methodOf fixtures "withLocals"
+    let frame = { frameOf withLocals with LocalSignatureToken = 0 }
+
+    match sessionWithFramePE.Value.CompileExpression(frame, "doubled + label.Length + x", localsAsParameters = true) with
+    | Error diagnostics -> failwithf "%A" diagnostics
+    | Ok compiled ->
+        let query = Assembly.Load(compiled.Assembly).GetType(compiled.TypeName).GetMethod(compiled.MethodName, all)
+        Assert.Equal(box 11, query.Invoke(null, [| box 3; box 6; box "n6" |]))
 
