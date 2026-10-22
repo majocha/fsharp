@@ -502,3 +502,26 @@ let ``trailing format specifiers are split off`` () =
     Assert.Equal(("(int * int)", []), specifiers "x, y")
     Assert.Equal(("(int * int)", []), specifiers "(x, y)")
     Assert.Equal((box (3, 4), "(int * int)"), evaluate add [ 3; 4 ] "x, y")
+
+[<Fact>]
+let ``result properties`` () =
+    let properties frameMethod text =
+        match compile frameMethod text with
+        | Ok c -> c.PotentialSideEffect, c.ReadOnlyResult, c.BoolResult
+        | Error diagnostics -> failwithf "%s: %A" text diagnostics
+
+    let add = methodOf fixtures "add"
+    let increment = methodOf typeof<EvalFixtures.Counter> "Increment"
+
+    // (side effects, read-only, bool)
+    Assert.Equal((false, false, false), properties add "x")
+    Assert.Equal((false, true, false), properties add "x + y")
+    Assert.Equal((false, true, true), properties add "x > y && not (y = 0)")
+    Assert.Equal((false, true, false), properties add "string x + string (moduleValue |> List.length)")
+    Assert.Equal((false, true, false), properties add "fst (x, y)")
+    Assert.Equal((false, true, false), properties increment "this.Start + by")
+    Assert.Equal((true, true, false), properties add "greet \"you\"")
+    Assert.Equal((true, true, false), properties add "moduleValue |> List.map (fun i -> i + x)")
+    Assert.Equal((true, true, false), properties add "System.Text.StringBuilder()")
+    Assert.Equal((true, true, false), properties add "\"abc\".ToUpper()")
+    Assert.Equal((false, true, false), properties add "\"abc\".Length")

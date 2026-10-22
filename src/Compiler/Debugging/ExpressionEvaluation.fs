@@ -82,6 +82,9 @@ type CompiledExpression =
         MethodName: string
         ResultType: string
         FormatSpecifiers: string list
+        PotentialSideEffect: bool
+        ReadOnlyResult: bool
+        BoolResult: bool
     }
 
 type EvaluationDiagnostic =
@@ -489,7 +492,7 @@ let private bindFrameValues
     (replacements: (Val * (range -> Expr)) list)
     (contents: ModuleOrNamespaceContents)
     =
-    let resultType = ref None
+    let checkedBody = ref None
 
     let rewriteBinding (TBind(v, expr, sp) as bind) =
         if v.LogicalName <> QueryMethodName then
@@ -502,8 +505,8 @@ let private bindFrameValues
                 | expr -> expr
 
             match stripDebugPoints expr with
-            | Expr.Lambda(_, _, _, [ unitArg ], body, m, bodyTy) ->
-                let body = replaceReads replacements body
+            | Expr.Lambda(_, _, _, [ unitArg ], body0, m, bodyTy) ->
+                let body = replaceReads replacements body0
 
                 let lambda, args =
                     if frameVals.IsEmpty then
@@ -516,7 +519,7 @@ let private bindFrameValues
 
                 v.SetValReprInfo(Some(ValReprInfo(ValReprInfo.InferTyparInfo frameTypars, args, ValReprInfo.unnamedRetVal)))
                 v.SetType(tyOfExpr g lambda)
-                resultType.Value <- Some bodyTy
+                checkedBody.Value <- Some(body0, bodyTy)
                 TBind(v, lambda, sp)
             | _ -> bind
 
@@ -536,7 +539,87 @@ let private bindFrameValues
         | TMDefOpens _ -> contents
 
     let contents = rewrite contents
-    contents, resultType.Value
+    contents, checkedBody.Value
+
+/// FSharp.Core functions known to have no side effects, by module and name.
+let private pureFSharpCoreFunctions =
+    set
+        [
+            "Operators.fst"
+            "Operators.snd"
+            "Operators.id"
+            "List.length"
+            "List.isEmpty"
+            "List.head"
+            "List.tail"
+            "Array.length"
+            "Option.isSome"
+            "Option.isNone"
+            "Option.get"
+        ]
+
+/// Whether an expression may have side effects: assignments, method and constructor calls and
+/// function applications may; field reads, property getters, inline functions (operators) and
+/// some FSharp.Core functions don't.
+let private mayHaveSideEffects (g: TcGlobals.TcGlobals) (expr: Expr) =
+    let mutable sideEffects = false
+
+    let isPure (vref: ValRef) =
+        vref.ShouldInline
+        || vref.IsPropertyGetterMethod
+        || (match ccuOfValRef vref with
+            | Some ccu when ccuEq ccu g.fslibCcu && vref.HasDeclaringEntity ->
+                pureFSharpCoreFunctions.Contains(vref.DeclaringEntity.DisplayName + "." + vref.LogicalName)
+            | _ -> false)
+
+    let hasSideEffects instr =
+        match instr with
+        | I_stfld _
+        | I_stsfld _
+        | I_stelem _
+        | I_stelem_any _
+        | I_stind _
+        | I_call _
+        | I_callvirt _
+        | I_callconstraint _
+        | I_newobj _ -> true
+        | _ -> false
+
+    let intercept _ (e: Expr) =
+        match e with
+        | Expr.App(f, _, _, args, _) ->
+            match stripDebugPoints f with
+            | Expr.Val(vref, _, _) when isPure vref -> ()
+            | Expr.Val _ when args.IsEmpty -> ()
+            | _ -> sideEffects <- true
+        | Expr.Op(op, _, _, _) ->
+            match op with
+            | TOp.LValueOp((LSet | LByrefSet), _)
+            | TOp.ValFieldSet _
+            | TOp.UnionCaseFieldSet _
+            | TOp.ExnFieldSet _ -> sideEffects <- true
+            | TOp.ILCall(isCtor = isCtor; isProperty = isProperty; ilMethRef = mref) when
+                isCtor || not (isProperty && mref.Name.StartsWith "get_")
+                ->
+                sideEffects <- true
+            | TOp.ILAsm(instrs, _) when List.exists hasSideEffects instrs -> sideEffects <- true
+            | _ -> ()
+        | _ -> ()
+
+        None
+
+    RewriteExpr
+        {
+            PreIntercept = Some intercept
+            PostTransform = (fun _ -> None)
+            PreInterceptBinding = None
+            RewriteQuotations = false
+            StackGuard = StackGuard("ExpressionEvaluation")
+        }
+        expr
+    |> ignore
+
+    sideEffects
 
 /// A PE image holding only a metadata blob and embedded managed resources (at their original
 /// offsets in the resources directory): enough for the IL reader to import a reference.
@@ -1313,7 +1396,7 @@ type EvaluationSession(tcConfig: TcConfig, tcGlobals: TcGlobals.TcGlobals, tcImp
                 | Some v -> v
                 | None -> failwith $"'{QueryMethodName}' not found in the checked query module"
 
-            let implFile, resultTy =
+            let implFile, checkedBody =
                 let (CheckedImplFile(qualifiedNameOfFile,
                                      signature,
                                      contents,
@@ -1323,7 +1406,7 @@ type EvaluationSession(tcConfig: TcConfig, tcGlobals: TcGlobals.TcGlobals, tcImp
                                      namedDebugPoints)) =
                     implFile
 
-                let rewrittenContents, resultTy =
+                let rewrittenContents, checkedBody =
                     bindFrameValues g frameTypars frameVals (fieldVariables @ aliasVariables) contents
 
                 CheckedImplFile(
@@ -1335,7 +1418,7 @@ type EvaluationSession(tcConfig: TcConfig, tcGlobals: TcGlobals.TcGlobals, tcImp
                     anonRecdTypes,
                     namedDebugPoints
                 ),
-                resultTy
+                checkedBody
 
             if not frameTypars.IsEmpty then
                 do!
@@ -1360,9 +1443,32 @@ type EvaluationSession(tcConfig: TcConfig, tcGlobals: TcGlobals.TcGlobals, tcImp
                         |> ignore)
 
             let resultType =
-                match resultTy with
-                | Some ty -> NicePrint.prettyStringOfTy denv ty
+                match checkedBody with
+                | Some(_, ty) -> NicePrint.prettyStringOfTy denv ty
                 | None -> NicePrint.prettyStringOfTy denv (snd (stripFunTy g queryVal.Type))
+
+            // Variables an assignment can target: the frame's values, fields of `this`, and the
+            // user's Immediate-window variables.
+            let assignable =
+                [
+                    yield! frameVals
+                    yield! fieldVariables |> List.map fst
+                    for alias, (v, _) in List.zip frame.Aliases aliasVariables do
+                        if alias.Kind = AliasKind.Variable then
+                            v
+                ]
+                |> List.map _.Stamp
+                |> set
+
+            let potentialSideEffect, readOnlyResult, boolResult =
+                match checkedBody with
+                | Some(body, ty) ->
+                    mayHaveSideEffects g body,
+                    (match stripDebugPoints body with
+                     | Expr.Val(vref, _, _) -> not (vref.IsMutable || assignable.Contains vref.Stamp)
+                     | _ -> true),
+                    typeEquiv g ty g.bool_ty
+                | None -> true, true, false
 
             let! assembly =
                 withDiagnostics BuildPhase.IlxGen (fun () ->
@@ -1492,5 +1598,8 @@ type EvaluationSession(tcConfig: TcConfig, tcGlobals: TcGlobals.TcGlobals, tcImp
                     MethodName = QueryMethodName
                     ResultType = resultType
                     FormatSpecifiers = formatSpecifiers
+                    PotentialSideEffect = potentialSideEffect
+                    ReadOnlyResult = readOnlyResult
+                    BoolResult = boolResult
                 }
         }

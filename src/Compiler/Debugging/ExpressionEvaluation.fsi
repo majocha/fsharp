@@ -105,6 +105,16 @@ type CompiledExpression =
 
         /// Format specifiers that followed the expression (`x, h` gives `h`).
         FormatSpecifiers: string list
+
+        /// The expression may have side effects (assignments, calls, function applications), so
+        /// the debugger won't run it where side effects are not allowed.
+        PotentialSideEffect: bool
+
+        /// The result is not a variable that can be assigned to.
+        ReadOnlyResult: bool
+
+        /// The result is a `bool` (as a breakpoint condition needs).
+        BoolResult: bool
     }
 
 /// A diagnostic from compiling an expression.
