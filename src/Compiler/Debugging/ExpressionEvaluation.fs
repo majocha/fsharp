@@ -102,6 +102,7 @@ let private toDiagnostic (d: PhasedDiagnostic) =
 /// Runs `f` with a capturing diagnostics logger; fails with the captured errors, if any.
 let private withDiagnostics (phase: BuildPhase) (f: unit -> 'T) : Result<'T, EvaluationDiagnostic list> =
     let logger = CapturingDiagnosticsLogger("ExpressionEvaluation")
+
     use _ = UseBuildPhase phase
     use _ = UseDiagnosticsLogger logger
 
@@ -186,19 +187,78 @@ let private querySource (opens: string list) (text: string) =
 
 /// Gives `<>m0` the frame's `this` and parameters as its own parameters: the type checker saw them
 /// as free locals, so after this rewrite IlxGen stores them as method arguments.
-let private bindFrameValues g (frameVals: Val list) (contents: ModuleOrNamespaceContents) =
+/// An instance field of the frame's `this` exposed as a variable: a closure's captured value or
+/// a class `let` field.
+type private FieldVariable =
+    {
+        Val: Val
+        Field: ILFieldSpec
+        Type: TType
+    }
+
+/// Reads of field variables become field loads from `this` (as class `let` fields are compiled).
+let private rewriteFieldVariables (thisVal: Val option) (fields: FieldVariable list) expr =
+    match thisVal, fields with
+    | None, _
+    | _, [] -> expr
+    | Some thisVal, _ ->
+        let byStamp = fields |> List.map (fun f -> f.Val.Stamp, f) |> dict
+
+        let intercept _ (e: Expr) =
+            match e with
+            | Expr.Val(vref, _, m) when byStamp.ContainsKey vref.Stamp ->
+                let f = byStamp[vref.Stamp]
+                Some(mkAsmExpr ([ mkNormalLdfld f.Field ], [], [ exprForVal m thisVal ], [ f.Type ], m))
+            | _ -> None
+
+        RewriteExpr
+            {
+                PreIntercept = Some intercept
+                PostTransform = (fun _ -> None)
+                PreInterceptBinding = None
+                RewriteQuotations = true
+                StackGuard = StackGuard("ExpressionEvaluation")
+            }
+            expr
+
+/// Gives `<>m0` the frame's `this`, parameters and locals as its own parameters: the type checker
+/// saw them as free locals, so after this rewrite IlxGen stores them as method arguments. Field
+/// variables become loads from `this`, and a generic result type is fixed to `obj`, since the
+/// debugger runs the query without choosing type arguments for it.
+let private bindFrameValues
+    g
+    (frameVals: Val list)
+    (thisVal: Val option)
+    (fields: FieldVariable list)
+    (contents: ModuleOrNamespaceContents)
+    =
+    let resultType = ref None
+
     let rewriteBinding (TBind(v, expr, sp) as bind) =
-        if v.LogicalName <> QueryMethodName || frameVals.IsEmpty then
+        if v.LogicalName <> QueryMethodName then
             bind
         else
-            match stripDebugPoints expr with
-            | Expr.Lambda(_, _, _, [ _unitArg ], body, m, bodyTy) ->
-                let lambda =
-                    mkMultiLambdas g m [] (frameVals |> List.map List.singleton) (body, bodyTy)
+            let expr =
+                match stripDebugPoints expr with
+                | Expr.TyLambda(_, typars, body, _, _) ->
+                    instExpr g (mkTyparInst typars (typars |> List.map (fun _ -> g.obj_ty_ambivalent))) body
+                | expr -> expr
 
-                let args = frameVals |> List.map (fun _ -> [ ValReprInfo.unnamedTopArg1 ])
+            match stripDebugPoints expr with
+            | Expr.Lambda(_, _, _, [ unitArg ], body, m, bodyTy) ->
+                let body = rewriteFieldVariables thisVal fields body
+
+                let lambda, args =
+                    if frameVals.IsEmpty then
+                        let (ValReprInfo(_, args, _)) = v.ValReprInfo.Value
+                        mkLambda m unitArg (body, bodyTy), args
+                    else
+                        mkMultiLambdas g m [] (frameVals |> List.map List.singleton) (body, bodyTy),
+                        frameVals |> List.map (fun _ -> [ ValReprInfo.unnamedTopArg1 ])
+
                 v.SetValReprInfo(Some(ValReprInfo([], args, ValReprInfo.unnamedRetVal)))
                 v.SetType(tyOfExpr g lambda)
+                resultType.Value <- Some bodyTy
                 TBind(v, lambda, sp)
             | _ -> bind
 
@@ -217,7 +277,8 @@ let private bindFrameValues g (frameVals: Val list) (contents: ModuleOrNamespace
         | TMDefDo _
         | TMDefOpens _ -> contents
 
-    rewrite contents
+    let contents = rewrite contents
+    contents, resultType.Value
 
 /// A PE image holding only a metadata blob and embedded managed resources (at their original
 /// offsets in the resources directory): enough for the IL reader to import a reference.
@@ -679,12 +740,51 @@ type EvaluationSession(tcConfig: TcConfig, tcGlobals: TcGlobals.TcGlobals, tcImp
             if not methodDef.GenericParams.IsEmpty || not declaringType.GenericParams.IsEmpty then
                 failwith "Generic frames are not supported yet"
 
+            let thisILType = mkILNonGenericBoxedTy declaringTypeRef
+
+            // Compiler-generated classes (closures, state machines) are not part of the assembly's
+            // F# signature, so `this` takes the nearest base type F# can see (e.g. FSharpFunc<_,_>).
+            // Field loads still name the generated class: it exists in IL.
+            let isGenerated (t: ILType) =
+                t.IsNominal
+                && (t.TypeRef.Name.Contains "@"
+                    || t.TypeRef.Enclosing |> List.exists (fun n -> n.Contains "@"))
+
+            let thisFSharpILType =
+                if entities.Length = enclosing.Length then
+                    thisILType
+                else
+                    match declaringType.Extends.Value with
+                    | Some baseType -> rescopeILType dllInfo.ILScopeRef baseType
+                    | None -> g.ilg.typ_Object
+
             let thisVal =
                 if methodDef.IsStatic then
                     []
                 else
-                    let ty = Import.ImportILType amap m [] (mkILNonGenericBoxedTy declaringTypeRef)
-                    [ fst (mkLocal m "this" ty) ]
+                    [ fst (mkLocal m "this" (Import.ImportILType amap m [] thisFSharpILType)) ]
+
+            // Instance fields of `this` that read as variables: a closure's captured values, a
+            // class's `let` fields. Compiler-generated and backing fields (`X@`, `_tag`) are left out.
+            let fieldVariables =
+                if methodDef.IsStatic then
+                    []
+                else
+                    declaringType.Fields.AsList()
+                    |> List.filter (fun f ->
+                        not f.IsStatic
+                        && not (f.Name.Contains "@")
+                        && not (f.Name.StartsWith "_")
+                        && not (isGenerated (rescopeILType dllInfo.ILScopeRef f.FieldType)))
+                    |> List.map (fun f ->
+                        let fieldType = rescopeILType dllInfo.ILScopeRef f.FieldType
+                        let ty = Import.ImportILType amap m [] fieldType
+
+                        {
+                            Val = fst (mkLocal m f.Name ty)
+                            Field = mkILFieldSpecInTy (thisILType, f.Name, fieldType)
+                            Type = ty
+                        })
 
             let parameterVals =
                 methodDef.Parameters
@@ -729,6 +829,10 @@ type EvaluationSession(tcConfig: TcConfig, tcGlobals: TcGlobals.TcGlobals, tcImp
 
             let frameVals = thisVal @ parameterVals @ localVals
 
+            // Name scopes, outermost first: fields of `this` are shadowed by parameters, and those by locals.
+            let scopedVals =
+                thisVal @ (fieldVariables |> List.map _.Val) @ parameterVals @ localVals
+
             let! parsed =
                 withDiagnostics BuildPhase.Parse (fun () ->
                     let source = querySource opens text
@@ -763,7 +867,7 @@ type EvaluationSession(tcConfig: TcConfig, tcGlobals: TcGlobals.TcGlobals, tcImp
                         }
 
                     let tcEnv =
-                        (tcEnv, frameVals)
+                        (tcEnv, scopedVals)
                         ||> List.fold (fun env v -> AddLocalVal g TcResultsSink.NoSink m v env)
 
                     let implInput =
@@ -802,14 +906,7 @@ type EvaluationSession(tcConfig: TcConfig, tcGlobals: TcGlobals.TcGlobals, tcImp
                 | Some v -> v
                 | None -> failwith $"'{QueryMethodName}' not found in the checked query module"
 
-            if not queryVal.Typars.IsEmpty then
-                failwith "Generic expressions are not supported yet"
-
-            let resultType =
-                match stripFunTy g queryVal.Type with
-                | _, resultTy -> NicePrint.prettyStringOfTy denv resultTy
-
-            let implFile =
+            let implFile, resultTy =
                 let (CheckedImplFile(qualifiedNameOfFile,
                                      signature,
                                      contents,
@@ -819,15 +916,24 @@ type EvaluationSession(tcConfig: TcConfig, tcGlobals: TcGlobals.TcGlobals, tcImp
                                      namedDebugPoints)) =
                     implFile
 
+                let rewrittenContents, resultTy =
+                    bindFrameValues g frameVals (List.tryHead thisVal) fieldVariables contents
+
                 CheckedImplFile(
                     qualifiedNameOfFile,
                     signature,
-                    bindFrameValues g frameVals contents,
+                    rewrittenContents,
                     hasExplicitEntryPoint,
                     isScript,
                     anonRecdTypes,
                     namedDebugPoints
-                )
+                ),
+                resultTy
+
+            let resultType =
+                match resultTy with
+                | Some ty -> NicePrint.prettyStringOfTy denv ty
+                | None -> NicePrint.prettyStringOfTy denv (snd (stripFunTy g queryVal.Type))
 
             let! assembly =
                 withDiagnostics BuildPhase.IlxGen (fun () ->

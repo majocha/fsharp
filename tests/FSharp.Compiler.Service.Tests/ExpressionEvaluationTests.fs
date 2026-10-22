@@ -30,6 +30,19 @@ module EvalFixtures =
         member this.Start = start
         member this.Increment(by: int) = start + by
 
+    type Account(owner: string) =
+        let mutable balance = 100
+
+        member this.Deposit(amount: int) =
+            balance <- balance + amount
+            balance
+
+        member _.Owner = owner
+
+    let makeClosure () =
+        let captured = 5
+        fun (x: int) -> captured + x
+
 let private all = BindingFlags.Public ||| BindingFlags.NonPublic ||| BindingFlags.Instance ||| BindingFlags.Static
 
 /// What a debuggee process has loaded: the runtime's implementation assemblies, FSharp.Core and this assembly.
@@ -210,4 +223,26 @@ let ``with a full image of the frame's module the local signature comes from the
     | Ok compiled ->
         let query = Assembly.Load(compiled.Assembly).GetType(compiled.TypeName).GetMethod(compiled.MethodName, all)
         Assert.Equal(box 11, query.Invoke(null, [| box 3; box 6; box "n6" |]))
+
+[<Fact>]
+let ``captured values of a closure frame`` () =
+    let closure = EvalFixtures.makeClosure ()
+    let invoke = closure.GetType().GetMethod("Invoke", [| typeof<int> |])
+    Assert.Equal((box 6, "int"), evaluate invoke [ closure; 1 ] "captured + x")
+    Assert.Equal((box 15, "int"), evaluate invoke [ closure; 1 ] "([ 1 .. x ] |> List.map (fun i -> i + captured) |> List.sum) + 9")
+
+[<Fact>]
+let ``let fields of a class member frame`` () =
+    let deposit = methodOf typeof<EvalFixtures.Account> "Deposit"
+    let account = EvalFixtures.Account "ann"
+    Assert.Equal((box 110, "int"), evaluate deposit [ account; 10 ] "balance + amount")
+    Assert.Equal((box "ann!", "string"), evaluate deposit [ account; 10 ] "owner + \"!\"")
+
+[<Fact>]
+let ``generic results are fixed to obj`` () =
+    let add = methodOf fixtures "add"
+    let value, ty = evaluate add [ 0; 0 ] "[]"
+    Assert.Equal("obj list", ty)
+    Assert.Equal<obj list>([], value :?> obj list)
+    Assert.Equal((null, "obj option"), evaluate add [ 0; 0 ] "None")
 

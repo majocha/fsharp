@@ -238,11 +238,19 @@ let IsILFieldInfoAccessible g amap m ad x =
 
 /// True if the IL field has protected (family) accessibility.
 let private isProtectedILFieldSpec (amap: ImportMap) m (fspec: ILFieldSpec) =
-    match fspec.DeclaringTypeRef with
-    | TryImportILTypeRef amap m (ILTyconRawMetadata tdef) ->
-        tdef.Fields.LookupByName fspec.Name
-        |> List.exists (fun fdef -> fdef.Access = ILMemberAccess.Family || fdef.Access = ILMemberAccess.FamilyOrAssembly)
-    | _ -> false
+    // A type that is not in the F# view of its assembly (e.g. a compiler-generated closure class
+    // referenced by the debugger's expression evaluator) cannot be imported; it has no protected
+    // fields F# code could see, so failing to import it is not an error here.
+    use _ = UseDiagnosticsLogger DiscardErrorsLogger
+
+    try
+        match fspec.DeclaringTypeRef with
+        | TryImportILTypeRef amap m (ILTyconRawMetadata tdef) ->
+            tdef.Fields.LookupByName fspec.Name
+            |> List.exists (fun fdef -> fdef.Access = ILMemberAccess.Family || fdef.Access = ILMemberAccess.FamilyOrAssembly)
+        | _ -> false
+    with _ ->
+        false
 
 let exprReferencesProtectedILField (amap: ImportMap) expr =
     let mutable found = false
