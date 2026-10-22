@@ -525,3 +525,57 @@ let ``result properties`` () =
     Assert.Equal((true, true, false), properties add "System.Text.StringBuilder()")
     Assert.Equal((true, true, false), properties add "\"abc\".ToUpper()")
     Assert.Equal((false, true, false), properties add "\"abc\".Length")
+
+let private assign localsAsParameters (frameMethod: MethodBase) target value =
+    match session.Value.CompileAssignment(frameOf frameMethod, target, value, localsAsParameters = localsAsParameters) with
+    | Ok compiled -> compiled
+    | Error diagnostics -> failwithf "%s <- %s: %A" target value diagnostics
+
+let private queryMethod (compiled: CompiledExpression) =
+    Assembly.Load(compiled.Assembly).GetType(compiled.TypeName).GetMethod(compiled.MethodName, all)
+
+[<Fact>]
+let ``assignment to fields of this`` () =
+    let deposit = methodOf typeof<EvalFixtures.Account> "Deposit"
+    let account = EvalFixtures.Account "ann"
+    let compiled = assign true deposit "balance" "amount * 7"
+    Assert.True compiled.PotentialSideEffect
+    Assert.Equal("unit", compiled.ResultType)
+    (queryMethod compiled).Invoke(null, [| box account; box 6 |]) |> ignore
+    Assert.Equal(42, account.Deposit 0)
+
+[<Fact>]
+let ``assignment to a hoisted variable of a state machine`` () =
+    let moveNext, machine =
+        stateMachine fixtures "taskSum" [ "x", box 3; "doubled", box 6 ]
+
+    let args = [| machine; box "n6" |]
+    (queryMethod (assign true moveNext "doubled" "x + label.Length")).Invoke(null, args) |> ignore
+    // The state machine is passed by reference: the boxed copy in args is updated.
+    Assert.Equal(box 5, args[0].GetType().GetField("doubled", all).GetValue args[0])
+
+[<Fact>]
+let ``assignment to parameters and locals stores to the frame's slots`` () =
+    let hasOpcodes (code: byte list) (compiled: CompiledExpression) =
+        let il = (queryMethod compiled).GetMethodBody().GetILAsByteArray() |> List.ofArray
+        il |> List.windowed code.Length |> List.contains code
+
+    // starg.s 0: the parameter x
+    Assert.True(hasOpcodes [ 0x10uy; 0x00uy ] (assign false (methodOf fixtures "add") "x" "y * 10"))
+
+    // stloc to the slot of `doubled` in withLocals (stloc.0-3 or stloc.s)
+    let withLocals = methodOf fixtures "withLocals"
+
+    let slot =
+        (frameOf withLocals).Locals |> List.find (fun l -> l.Name = "doubled") |> _.Slot
+
+    let stloc =
+        if slot <= 3 then [ 0x0Auy + byte slot ] else [ 0x13uy; byte slot ]
+
+    Assert.True(hasOpcodes stloc (assign false withLocals "doubled" "x + 1"))
+
+[<Fact>]
+let ``frame values are not mutable in expressions`` () =
+    match compile (methodOf fixtures "add") "x <- 1" with
+    | Ok _ -> failwith "expected an error"
+    | Error diagnostics -> Assert.Contains(diagnostics, fun d -> d.Number = 27)

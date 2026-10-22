@@ -456,18 +456,24 @@ let private resolveClrType
         None
     |> Option.defaultValue g.obj_ty_ambivalent
 
-/// Replaces reads of the given Vals with expressions built at the read's range: field variables
-/// become field loads from `this` (as class `let` fields are compiled), aliases become calls to
-/// the debugger's intrinsic methods.
-let private replaceReads (replacements: (Val * (range -> Expr)) list) expr =
-    match replacements with
-    | [] -> expr
+/// Replaces reads and writes of the given Vals with expressions built at their range: field
+/// variables become field loads and stores on `this` (as class `let` fields are compiled), aliases
+/// become calls to the debugger's intrinsic methods.
+let private replaceVariables (reads: (Val * (range -> Expr)) list) (writes: (Val * (range -> Expr -> Expr)) list) expr =
+    match reads, writes with
+    | [], [] -> expr
     | _ ->
-        let byStamp = replacements |> List.map (fun (v, f) -> v.Stamp, f) |> dict
+        let readsByStamp = reads |> List.map (fun (v, f) -> v.Stamp, f) |> dict
+        let writesByStamp = writes |> List.map (fun (v, f) -> v.Stamp, f) |> dict
 
-        let intercept _ (e: Expr) =
+        let intercept recurse (e: Expr) =
             match e with
-            | Expr.Val(vref, _, m) when byStamp.ContainsKey vref.Stamp -> Some(byStamp[vref.Stamp]m)
+            | Expr.Val(vref, _, m) when readsByStamp.ContainsKey vref.Stamp ->
+                let read = readsByStamp[vref.Stamp]
+                Some(read m)
+            | Expr.Op(TOp.LValueOp(LSet, vref), _, [ value ], m) when writesByStamp.ContainsKey vref.Stamp ->
+                let write = writesByStamp[vref.Stamp]
+                Some(write m (recurse value))
             | _ -> None
 
         RewriteExpr
@@ -489,7 +495,8 @@ let private bindFrameValues
     (g: TcGlobals.TcGlobals)
     (frameTypars: Typars)
     (frameVals: Val list)
-    (replacements: (Val * (range -> Expr)) list)
+    (reads: (Val * (range -> Expr)) list)
+    (writes: (Val * (range -> Expr -> Expr)) list)
     (contents: ModuleOrNamespaceContents)
     =
     let checkedBody = ref None
@@ -506,7 +513,23 @@ let private bindFrameValues
 
             match stripDebugPoints expr with
             | Expr.Lambda(_, _, _, [ unitArg ], body0, m, bodyTy) ->
-                let body = replaceReads replacements body0
+                let body = replaceVariables reads writes body0
+
+                // Frame values are mutable only so that an assignment checks; its writes are now
+                // stores to the arguments. Immutable copies keep the optimizer from turning them
+                // into ref cells (as it does for mutable values used in an inner lambda).
+                let frameVals, body =
+                    if frameVals |> List.exists _.IsMutable then
+                        let copies =
+                            frameVals |> List.map (fun v -> fst (mkLocal v.Range v.LogicalName v.Type))
+
+                        let remap =
+                            (Remap.Empty, frameVals, copies)
+                            |||> List.fold2 (fun r v c -> addValRemap v c r)
+
+                        copies, remapExpr g CloneAll remap body
+                    else
+                        frameVals, body
 
                 let lambda, args =
                     if frameVals.IsEmpty then
@@ -1011,6 +1034,8 @@ type EvaluationSession(tcConfig: TcConfig, tcGlobals: TcGlobals.TcGlobals, tcImp
         tcConfigB.target <- CompilerTarget.Dll
         tcConfigB.debuginfo <- false
         tcConfigB.emitTailcalls <- false
+        // A query is one small module: nothing to gain from generating its code in parallel.
+        tcConfigB.parallelIlxGen <- false
 
         tcConfigB.optSettings <-
             { tcConfigB.optSettings with
@@ -1032,9 +1057,15 @@ type EvaluationSession(tcConfig: TcConfig, tcGlobals: TcGlobals.TcGlobals, tcImp
 
         EvaluationSession(tcConfig, tcGlobals, tcImports, modules |> List.map (fun m -> m.FileName, m.Image) |> Map.ofList)
 
-    member _.CompileExpression(frame: FrameContext, text: string, ?localsAsParameters: bool) =
-        let localsAsParameters = defaultArg localsAsParameters false
+    member this.CompileExpression(frame: FrameContext, text: string, ?localsAsParameters: bool) =
         let text, formatSpecifiers = splitFormatSpecifiers text
+        this.Compile(frame, text, formatSpecifiers, defaultArg localsAsParameters false, false)
+
+    member this.CompileAssignment(frame: FrameContext, target: string, value: string, ?localsAsParameters: bool) =
+        let text = $"{target} <- (\n{value}\n)"
+        this.Compile(frame, text, [], defaultArg localsAsParameters false, true)
+
+    member private _.Compile(frame: FrameContext, text: string, formatSpecifiers: string list, localsAsParameters: bool, assigning: bool) =
         let g = tcGlobals
         let m = range0
 
@@ -1135,6 +1166,11 @@ type EvaluationSession(tcConfig: TcConfig, tcGlobals: TcGlobals.TcGlobals, tcImp
                 else
                     [ fst (mkLocal m "this" (importType thisILType)) ]
 
+            // Variables of the frame. When compiling an assignment they are mutable, so the checker
+            // lets the expression assign them (and, as F# requires, no closure captures them).
+            let mkVariable name ty =
+                fst (mkLocalAux m name ty (if assigning then Mutable else Immutable) false)
+
             // A type definition of the frame's assembly.
             let tryFindTypeDef (tref: ILTypeRef) =
                 if tref.Scope <> dllInfo.ILScopeRef then
@@ -1164,7 +1200,12 @@ type EvaluationSession(tcConfig: TcConfig, tcGlobals: TcGlobals.TcGlobals, tcImp
                     let fieldType = instILType ownerType.GenericArgs formalType
                     let ty = importType fieldType
                     let field = mkILFieldSpecInTy (ownerType, f.Name, formalType)
-                    f.Name, fieldType, ty, (fun m -> mkAsmExpr ([ mkNormalLdfld field ], [], [ owner m ], [ ty ], m)))
+
+                    f.Name,
+                    fieldType,
+                    ty,
+                    (fun m -> mkAsmExpr ([ mkNormalLdfld field ], [], [ owner m ], [ ty ], m)),
+                    (fun m value -> mkAsmExpr ([ mkNormalStfld field ], [], [ owner m; value ], [], m)))
 
             // Plumbing fields of state machines, not user variables: those of resumable code
             // (`task`), and of `seq` (a GeneratedSequenceBase<_> subclass).
@@ -1194,18 +1235,18 @@ type EvaluationSession(tcConfig: TcConfig, tcGlobals: TcGlobals.TcGlobals, tcImp
                 | [ thisVal ] ->
                     let own =
                         fieldsOf declaringType thisILType (fun m -> exprForVal m thisVal)
-                        |> List.filter (fun (name, _, _, _) -> not (isPlumbing name))
+                        |> List.filter (fun (name, _, _, _, _) -> not (isPlumbing name))
 
                     let ofOriginalThis =
-                        match own |> List.tryFind (fun (name, _, _, _) -> name = "this") with
-                        | Some(_, (ILType.Boxed _ as originalThisType), _, read) ->
+                        match own |> List.tryFind (fun (name, _, _, _, _) -> name = "this") with
+                        | Some(_, (ILType.Boxed _ as originalThisType), _, read, _) ->
                             match tryFindTypeDef originalThisType.TypeRef with
                             | Some td -> fieldsOf td originalThisType read
                             | None -> []
                         | _ -> []
 
                     (ofOriginalThis @ own)
-                    |> List.map (fun (name, _, ty, read) -> fst (mkLocal m name ty), read)
+                    |> List.map (fun (name, _, ty, read, write) -> mkVariable name ty, read, write)
                 | _ -> []
 
             // The debugger's aliases, read through its intrinsic methods (as Roslyn binds them).
@@ -1268,7 +1309,7 @@ type EvaluationSession(tcConfig: TcConfig, tcGlobals: TcGlobals.TcGlobals, tcImp
                 methodDef.Parameters
                 |> List.mapi (fun i p ->
                     let ty = importType p.Type
-                    fst (mkLocal m (defaultArg p.Name $"arg{i}") ty))
+                    mkVariable (defaultArg p.Name $"arg{i}") ty)
 
             // The frame's locals, typed from its own local signature: decoded from the module's
             // metadata by token, or taken from the method body when the module is a full image.
@@ -1298,7 +1339,7 @@ type EvaluationSession(tcConfig: TcConfig, tcGlobals: TcGlobals.TcGlobals, tcImp
             let localVals =
                 frame.Locals
                 |> List.filter (fun l -> l.Slot < frameLocalSignature.Length)
-                |> List.map (fun l -> fst (mkLocal m l.Name (importType frameLocalSignature[l.Slot].Type)))
+                |> List.map (fun l -> mkVariable l.Name (importType frameLocalSignature[l.Slot].Type))
 
             let localSlots =
                 frame.Locals
@@ -1307,11 +1348,18 @@ type EvaluationSession(tcConfig: TcConfig, tcGlobals: TcGlobals.TcGlobals, tcImp
 
             let frameVals = thisVal @ parameterVals @ localVals
 
+            // Assignments to frame values store to the query's arguments, which the frame's values
+            // are (IlxGen never stores to an argument itself); for locals in the frame's slots that
+            // becomes a store to the slot.
+            let frameValueWrites =
+                frameVals
+                |> List.mapi (fun i v -> v, (fun m value -> mkAsmExpr ([ I_starg(uint16 i) ], [], [ value ], [], m)))
+
             // Name scopes, outermost first: fields of `this` are shadowed by parameters, those by
             // locals, and those by the debugger's variables.
             let scopedVals =
                 thisVal
-                @ (fieldVariables |> List.map fst)
+                @ (fieldVariables |> List.map (fun (v, _, _) -> v))
                 @ parameterVals
                 @ localVals
                 @ (aliasVariables |> List.map fst)
@@ -1407,7 +1455,13 @@ type EvaluationSession(tcConfig: TcConfig, tcGlobals: TcGlobals.TcGlobals, tcImp
                     implFile
 
                 let rewrittenContents, checkedBody =
-                    bindFrameValues g frameTypars frameVals (fieldVariables @ aliasVariables) contents
+                    bindFrameValues
+                        g
+                        frameTypars
+                        frameVals
+                        ((fieldVariables |> List.map (fun (v, read, _) -> v, read)) @ aliasVariables)
+                        ((fieldVariables |> List.map (fun (v, _, write) -> v, write)) @ frameValueWrites)
+                        contents
 
                 CheckedImplFile(
                     qualifiedNameOfFile,
@@ -1452,7 +1506,7 @@ type EvaluationSession(tcConfig: TcConfig, tcGlobals: TcGlobals.TcGlobals, tcImp
             let assignable =
                 [
                     yield! frameVals
-                    yield! fieldVariables |> List.map fst
+                    yield! fieldVariables |> List.map (fun (v, _, _) -> v)
                     for alias, (v, _) in List.zip frame.Aliases aliasVariables do
                         if alias.Kind = AliasKind.Variable then
                             v

@@ -140,3 +140,10 @@ type EvaluationSession =
     member CompileExpression:
         frame: FrameContext * text: string * ?localsAsParameters: bool ->
             Result<CompiledExpression, EvaluationDiagnostic list>
+
+    /// Compiles `target <- value` in the context of a frame, as for the debugger's edits of a
+    /// value: the frame's parameters, locals and the fields of `this` can be assigned. The query
+    /// method is as for `CompileExpression` and returns unit.
+    member CompileAssignment:
+        frame: FrameContext * target: string * value: string * ?localsAsParameters: bool ->
+            Result<CompiledExpression, EvaluationDiagnostic list>
