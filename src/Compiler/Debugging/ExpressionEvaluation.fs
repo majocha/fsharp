@@ -976,12 +976,12 @@ type EvaluationSession(tcConfig: TcConfig, tcGlobals: TcGlobals.TcGlobals, tcImp
                 && (t.TypeRef.Name.Contains "@"
                     || t.TypeRef.Enclosing |> List.exists (fun n -> n.Contains "@"))
 
-            // Compiler-generated classes (closures, state machines) are not part of the assembly's
-            // F# signature. A closure's `this` takes the nearest base type F# can see (e.g.
-            // FSharpFunc<_,_>). A resumable state machine is a generated struct the user didn't
-            // write: its `this` is hidden, typed `nativeint` for checking and given the struct's
-            // byref type in IL; the original `this`, if any, is its hoisted `this` field. Field
-            // loads still name the generated type: it exists in IL.
+            // Compiler-generated types (closures, `seq` and `task` state machines) are not part of
+            // the assembly's F# signature, and the user didn't write them: their `this` is hidden,
+            // and the original `this`, if any, is their hoisted `this` field. A generated class's
+            // `this` is typed as the nearest base type F# can see (e.g. FSharpFunc<_,_>); a
+            // resumable state machine's (a struct) as `nativeint` for checking, then given the
+            // struct's byref type in IL. Field loads still name the generated type: it exists in IL.
             let isGeneratedFrame = entities.Length <> enclosing.Length
             let isStateMachine = isGeneratedFrame && isValueType
 
@@ -996,7 +996,7 @@ type EvaluationSession(tcConfig: TcConfig, tcGlobals: TcGlobals.TcGlobals, tcImp
                         | Some baseType -> rescopeILType dllInfo.ILScopeRef baseType
                         | None -> g.ilg.typ_Object
 
-                    [ fst (mkLocal m "this" (importType baseType)) ]
+                    [ fst (mkLocal m "<>this" (importType baseType)) ]
                 elif isValueType then
                     [ fst (mkLocal m "this" (mkByrefTy g (importType thisILType))) ]
                 else
@@ -1033,9 +1033,25 @@ type EvaluationSession(tcConfig: TcConfig, tcGlobals: TcGlobals.TcGlobals, tcImp
                     let field = mkILFieldSpecInTy (ownerType, f.Name, formalType)
                     f.Name, fieldType, ty, (fun m -> mkAsmExpr ([ mkNormalLdfld field ], [], [ owner m ], [ ty ], m)))
 
-            // Plumbing fields of resumable state machines, not user variables.
-            let isStateMachinePlumbing name =
-                name = "Data" || name = "ResumptionPoint" || name = "awaiter"
+            // Plumbing fields of state machines, not user variables: those of resumable code
+            // (`task`), and of `seq` (a GeneratedSequenceBase<_> subclass).
+            let isPlumbing =
+                let isSeq =
+                    match declaringType.Extends.Value with
+                    | Some baseType when baseType.IsNominal ->
+                        baseType.TypeRef.FullName = "Microsoft.FSharp.Core.CompilerServices.GeneratedSequenceBase`1"
+                    | _ -> false
+
+                fun name ->
+                    (isStateMachine
+                     && (name = "Data" || name = "ResumptionPoint" || name = "awaiter"))
+                    || (isGeneratedFrame
+                        && isSeq
+                        && (name = "pc"
+                            || name = "current"
+                            || name = "enum"
+                            || name = "redirect"
+                            || name = "redirectTo"))
 
             // Fields of `this` as variables: a closure's captured values, a class's `let` fields, a
             // state machine's hoisted variables. A hoisted `this` also brings the fields of the
@@ -1045,7 +1061,7 @@ type EvaluationSession(tcConfig: TcConfig, tcGlobals: TcGlobals.TcGlobals, tcImp
                 | [ thisVal ] ->
                     let own =
                         fieldsOf declaringType thisILType (fun m -> exprForVal m thisVal)
-                        |> List.filter (fun (name, _, _, _) -> not (isStateMachine && isStateMachinePlumbing name))
+                        |> List.filter (fun (name, _, _, _) -> not (isPlumbing name))
 
                     let ofOriginalThis =
                         match own |> List.tryFind (fun (name, _, _, _) -> name = "this") with

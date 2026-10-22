@@ -53,6 +53,13 @@ module EvalFixtures =
 
     let pairUp (x: 'a) (n: int) = (x, n)
 
+    let countUp (limit: int) =
+        seq {
+            for i in 1..limit do
+                let square = i * i
+                yield square + limit
+        }
+
     let taskSum (x: int) =
         task {
             let doubled = x * 2
@@ -451,4 +458,29 @@ let ``a task in a class member sees the member's this and the class's fields`` (
         (box "ann 105 ann", "string"),
         evaluate moveNext args "owner + \" \" + string (balance + amount) + \" \" + this.Owner"
     )
+
+[<Fact>]
+let ``variables of a seq state machine`` () =
+    let generator =
+        fixtures.GetNestedTypes all |> Array.find (fun t -> t.Name.StartsWith "countUp@")
+
+    let machine = Runtime.CompilerServices.RuntimeHelpers.GetUninitializedObject generator
+    generator.GetField("limit", all).SetValue(machine, 3)
+    let generateNext = generator.GetMethod("GenerateNext", all)
+
+    // GenerateNext(this, next), then its named locals
+    let locals =
+        (frameOf generateNext).Locals
+        |> List.map (fun l ->
+            match l.Name with
+            | "i" -> box 2
+            | "square" -> box 4
+            | _ -> null)
+
+    Assert.Equal((box 9, "int"), evaluate generateNext (machine :: null :: locals) "limit + i + square")
+
+    for plumbing in [ "pc"; "current"; "redirectTo"; "this" ] do
+        match compile generateNext plumbing with
+        | Ok _ -> failwithf "%s should not be in scope" plumbing
+        | Error _ -> ()
 
