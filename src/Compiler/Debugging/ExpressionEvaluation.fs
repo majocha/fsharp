@@ -907,7 +907,7 @@ type EvaluationSession(tcConfig: TcConfig, tcGlobals: TcGlobals.TcGlobals, tcImp
 
         result {
             // The frame's method and the F# entities enclosing it.
-            let! dllInfo, ccu, enclosing, methodDef =
+            let! dllInfo, ccu, ilModule, enclosing, methodDef =
                 withDiagnostics BuildPhase.TypeCheck (fun () ->
                     let dllInfo = tcImports.FindDllInfo(ctok, m, frame.AssemblyName)
 
@@ -922,7 +922,7 @@ type EvaluationSession(tcConfig: TcConfig, tcGlobals: TcGlobals.TcGlobals, tcImp
                         | None -> failwith $"No metadata for '{frame.AssemblyName}'"
 
                     match tryFindMethod ilModule frame.MethodToken with
-                    | Some(enclosing, md) -> dllInfo, ccu, enclosing, md
+                    | Some(enclosing, md) -> dllInfo, ccu, ilModule, enclosing, md
                     | None -> failwith $"Method 0x{frame.MethodToken:X8} not found in '{frame.AssemblyName}'")
 
             let entities = fsharpEntities ccu enclosing
@@ -961,48 +961,102 @@ type EvaluationSession(tcConfig: TcConfig, tcGlobals: TcGlobals.TcGlobals, tcImp
             let importType ty =
                 Import.ImportILType amap m frameTinst ty
 
-            let thisILType =
-                mkILBoxedTy declaringTypeRef (classTypars |> List.mapi (fun i _ -> ILType.TypeVar(uint16 i)))
+            let isValueType = declaringType.IsStruct
 
-            // Compiler-generated classes (closures, state machines) are not part of the assembly's
-            // F# signature, so `this` takes the nearest base type F# can see (e.g. FSharpFunc<_,_>).
-            // Field loads still name the generated class: it exists in IL.
+            let thisILType =
+                let args = classTypars |> List.mapi (fun i _ -> ILType.TypeVar(uint16 i))
+
+                if isValueType then
+                    mkILValueTy declaringTypeRef args
+                else
+                    mkILBoxedTy declaringTypeRef args
+
             let isGenerated (t: ILType) =
                 t.IsNominal
                 && (t.TypeRef.Name.Contains "@"
                     || t.TypeRef.Enclosing |> List.exists (fun n -> n.Contains "@"))
 
-            let thisFSharpILType =
-                if entities.Length = enclosing.Length then
-                    thisILType
-                else
-                    match declaringType.Extends.Value with
-                    | Some baseType -> rescopeILType dllInfo.ILScopeRef baseType
-                    | None -> g.ilg.typ_Object
+            // Compiler-generated classes (closures, state machines) are not part of the assembly's
+            // F# signature. A closure's `this` takes the nearest base type F# can see (e.g.
+            // FSharpFunc<_,_>). A resumable state machine is a generated struct the user didn't
+            // write: its `this` is hidden, typed `nativeint` for checking and given the struct's
+            // byref type in IL; the original `this`, if any, is its hoisted `this` field. Field
+            // loads still name the generated type: it exists in IL.
+            let isGeneratedFrame = entities.Length <> enclosing.Length
+            let isStateMachine = isGeneratedFrame && isValueType
 
             let thisVal =
                 if methodDef.IsStatic then
                     []
-                else
-                    [ fst (mkLocal m "this" (importType thisFSharpILType)) ]
+                elif isStateMachine then
+                    [ fst (mkLocal m "<>this" g.nativeint_ty) ]
+                elif isGeneratedFrame then
+                    let baseType =
+                        match declaringType.Extends.Value with
+                        | Some baseType -> rescopeILType dllInfo.ILScopeRef baseType
+                        | None -> g.ilg.typ_Object
 
-            // Instance fields of `this` that read as variables: a closure's captured values, a
-            // class's `let` fields. Compiler-generated and backing fields (`X@`, `_tag`) are left out.
+                    [ fst (mkLocal m "this" (importType baseType)) ]
+                elif isValueType then
+                    [ fst (mkLocal m "this" (mkByrefTy g (importType thisILType))) ]
+                else
+                    [ fst (mkLocal m "this" (importType thisILType)) ]
+
+            // A type definition of the frame's assembly.
+            let tryFindTypeDef (tref: ILTypeRef) =
+                if tref.Scope <> dllInfo.ILScopeRef then
+                    None
+                else
+                    try
+                        let outer = ilModule.TypeDefs.FindByName(List.head (tref.Enclosing @ [ tref.Name ]))
+
+                        Some(
+                            (outer, List.tail (tref.Enclosing @ [ tref.Name ]))
+                            ||> List.fold (fun td name -> td.NestedTypes.FindByName name)
+                        )
+                    with _ ->
+                        None
+
+            // Instance fields that read as variables: those of `ownerType` (defined by `td`), read
+            // from `owner`. Compiler-generated and backing fields (`X@`, `_tag`) are left out.
+            let fieldsOf (td: ILTypeDef) (ownerType: ILType) (owner: range -> Expr) =
+                td.Fields.AsList()
+                |> List.filter (fun f ->
+                    not f.IsStatic
+                    && not (f.Name.Contains "@")
+                    && not (f.Name.StartsWith "_")
+                    && not (isGenerated (rescopeILType dllInfo.ILScopeRef f.FieldType)))
+                |> List.map (fun f ->
+                    let formalType = rescopeILType dllInfo.ILScopeRef f.FieldType
+                    let fieldType = instILType ownerType.GenericArgs formalType
+                    let ty = importType fieldType
+                    let field = mkILFieldSpecInTy (ownerType, f.Name, formalType)
+                    f.Name, fieldType, ty, (fun m -> mkAsmExpr ([ mkNormalLdfld field ], [], [ owner m ], [ ty ], m)))
+
+            // Plumbing fields of resumable state machines, not user variables.
+            let isStateMachinePlumbing name =
+                name = "Data" || name = "ResumptionPoint" || name = "awaiter"
+
+            // Fields of `this` as variables: a closure's captured values, a class's `let` fields, a
+            // state machine's hoisted variables. A hoisted `this` also brings the fields of the
+            // original `this`, shadowed by the frame's own.
             let fieldVariables =
                 match thisVal with
                 | [ thisVal ] ->
-                    declaringType.Fields.AsList()
-                    |> List.filter (fun f ->
-                        not f.IsStatic
-                        && not (f.Name.Contains "@")
-                        && not (f.Name.StartsWith "_")
-                        && not (isGenerated (rescopeILType dllInfo.ILScopeRef f.FieldType)))
-                    |> List.map (fun f ->
-                        let fieldType = rescopeILType dllInfo.ILScopeRef f.FieldType
-                        let ty = importType fieldType
-                        let field = mkILFieldSpecInTy (thisILType, f.Name, fieldType)
+                    let own =
+                        fieldsOf declaringType thisILType (fun m -> exprForVal m thisVal)
+                        |> List.filter (fun (name, _, _, _) -> not (isStateMachine && isStateMachinePlumbing name))
 
-                        fst (mkLocal m f.Name ty), fun m -> mkAsmExpr ([ mkNormalLdfld field ], [], [ exprForVal m thisVal ], [ ty ], m))
+                    let ofOriginalThis =
+                        match own |> List.tryFind (fun (name, _, _, _) -> name = "this") with
+                        | Some(_, (ILType.Boxed _ as originalThisType), _, read) ->
+                            match tryFindTypeDef originalThisType.TypeRef with
+                            | Some td -> fieldsOf td originalThisType read
+                            | None -> []
+                        | _ -> []
+
+                    (ofOriginalThis @ own)
+                    |> List.map (fun (name, _, ty, read) -> fst (mkLocal m name ty), read)
                 | _ -> []
 
             // The debugger's aliases, read through its intrinsic methods (as Roslyn binds them).
@@ -1269,6 +1323,23 @@ type EvaluationSession(tcConfig: TcConfig, tcGlobals: TcGlobals.TcGlobals, tcImp
                                 md
                             else
                                 parametersToFrameLocals frameLocalSignature localSlots md
+
+                        // The state machine's `this` is a byref to the struct (typed `nativeint` for checking).
+                        let md =
+                            if isStateMachine then
+                                md.With(
+                                    parameters =
+                                        (md.Parameters
+                                         |> List.mapi (fun i p ->
+                                             if i = 0 then
+                                                 { p with
+                                                     Type = ILType.Byref thisILType
+                                                 }
+                                             else
+                                                 p))
+                                )
+                            else
+                                md
 
                         md.With(genericParams = List.skip classTyparCount md.GenericParams)
 

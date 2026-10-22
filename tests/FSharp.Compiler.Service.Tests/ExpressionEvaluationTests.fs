@@ -40,11 +40,26 @@ module EvalFixtures =
 
         member _.Owner = owner
 
+        member this.DepositLater(amount: int) =
+            task {
+                do! System.Threading.Tasks.Task.Yield()
+                balance <- balance + amount
+                return this.Owner, balance
+            }
+
     let makeClosure () =
         let captured = 5
         fun (x: int) -> captured + x
 
     let pairUp (x: 'a) (n: int) = (x, n)
+
+    let taskSum (x: int) =
+        task {
+            let doubled = x * 2
+            do! System.Threading.Tasks.Task.Yield()
+            let label = "n" + string doubled
+            return doubled + label.Length + x
+        }
 
     type Box<'T>(value: 'T) =
         member this.Value = value
@@ -385,3 +400,55 @@ let ``generic methods of generic classes`` () =
         (box (1, "v"), "('U * 'T)"),
         evaluateGeneric [ typeof<string> ] [ typeof<int> ] map [ EvalFixtures.Box "v"; f ] "(f value, value)"
     )
+
+/// The state machine of a `task` in `owner.name` (a generated struct), boxed, with fields set.
+let private stateMachine (owner: Type) (name: string) (fields: (string * obj) list) =
+    let t =
+        owner.GetNestedTypes all
+        |> Array.find (fun t -> t.IsValueType && t.Name.StartsWith(name + "@"))
+
+    let machine = Activator.CreateInstance t
+
+    for field, value in fields do
+        t.GetField(field, all).SetValue(machine, value)
+
+    t.GetMethod("MoveNext", all), machine
+
+/// Default values for the frame's named locals, which follow the parameters with localsAsParameters.
+let private localDefaults (frameMethod: MethodBase) =
+    let types = frameMethod.GetMethodBody().LocalVariables
+
+    (frameOf frameMethod).Locals
+    |> List.map (fun l ->
+        let ty = types[l.Slot].LocalType
+        if ty.IsValueType then Activator.CreateInstance ty else null)
+
+[<Fact>]
+let ``hoisted variables of a task state machine`` () =
+    let moveNext, machine =
+        stateMachine fixtures "taskSum" [ "x", box 3; "doubled", box 6 ]
+
+    // `label` is a local of MoveNext; `x` and `doubled` are fields of the state machine.
+    Assert.Equal<string list>([ "label" ], (frameOf moveNext).Locals |> List.map _.Name)
+    Assert.Equal((box 11, "int"), evaluate moveNext [ machine; "n6" ] "doubled + label.Length + x")
+
+    // The state machine's plumbing is not visible.
+    for plumbing in [ "ResumptionPoint"; "Data"; "awaiter"; "this" ] do
+        match compile moveNext plumbing with
+        | Ok _ -> failwithf "%s should not be in scope" plumbing
+        | Error _ -> ()
+
+[<Fact>]
+let ``a task in a class member sees the member's this and the class's fields`` () =
+    let account = EvalFixtures.Account "ann"
+
+    let moveNext, machine =
+        stateMachine fixtures "DepositLater" [ "this", box account; "amount", box 5 ]
+
+    let args = machine :: localDefaults moveNext
+
+    Assert.Equal(
+        (box "ann 105 ann", "string"),
+        evaluate moveNext args "owner + \" \" + string (balance + amount) + \" \" + this.Owner"
+    )
+
