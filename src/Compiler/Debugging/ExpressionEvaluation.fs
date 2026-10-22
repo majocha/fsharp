@@ -32,11 +32,14 @@ open FSharp.Compiler.TypedTree
 open FSharp.Compiler.TypedTreeBasics
 open FSharp.Compiler.TypedTreeOps
 
+type FrameLocal = { Name: string; Slot: int }
+
 type FrameContext =
     {
         AssemblyName: string
         MethodToken: int
         Opens: string list
+        Locals: FrameLocal list
     }
 
 type CompiledExpression =
@@ -200,6 +203,52 @@ let private bindFrameValues g (frameVals: Val list) (contents: ModuleOrNamespace
 
     rewrite contents
 
+/// IlxGen saw the frame's locals as the trailing parameters of `<>m0`. The debugger instead
+/// needs them as the method's leading locals, in the frame's exact local signature: drop those
+/// parameters, prepend the frame's locals, and retarget argument and local instructions.
+let private parametersToFrameLocals (frameLocalSignature: ILLocals) (slots: int list) (md: ILMethodDef) =
+    let ownParameters = md.Parameters.Length - slots.Length
+    let shift = uint16 frameLocalSignature.Length
+    let slotOf (i: uint16) = uint16 slots[int i - ownParameters]
+    let isFrameLocal (i: uint16) = int i >= ownParameters
+    let body = md.MethodBody
+
+    let rewrite instr =
+        match instr with
+        | I_ldarg i when isFrameLocal i -> I_ldloc(slotOf i)
+        | I_ldarga i when isFrameLocal i -> I_ldloca(slotOf i)
+        | I_starg i when isFrameLocal i -> I_stloc(slotOf i)
+        | I_ldloc i -> I_ldloc(i + shift)
+        | I_ldloca i -> I_ldloca(i + shift)
+        | I_stloc i -> I_stloc(i + shift)
+        | instr -> instr
+
+    let code =
+        { body.Code with
+            Instrs = body.Code.Instrs |> Array.map rewrite
+            Locals =
+                body.Code.Locals
+                |> List.map (fun info ->
+                    { info with
+                        DebugMappings =
+                            info.DebugMappings
+                            |> List.map (fun mapping ->
+                                { mapping with
+                                    LocalIndex = mapping.LocalIndex + int shift
+                                })
+                    })
+        }
+
+    let body =
+        { body with
+            Locals =
+                (frameLocalSignature |> List.map (fun l -> { l with DebugInfo = None }))
+                @ body.Locals
+            Code = code
+        }
+
+    md.With(parameters = List.take ownParameters md.Parameters, body = notlazy (MethodBody.IL(notlazy body)))
+
 /// `IgnoresAccessChecksToAttribute` (defined in the query assembly, as the runtime expects) applied
 /// for the debuggee's assemblies. The debugger's IL interpreter ignores accessibility; this lets
 /// CoreCLR do the same when the query assembly runs as ordinary code (func-eval of lambdas, tests).
@@ -245,6 +294,27 @@ type EvaluationSession(tcConfig: TcConfig, tcGlobals: TcGlobals.TcGlobals, tcImp
     let ctok = AssumeCompilationThreadWithoutEvidence()
     let lexResourceManager = LexResourceManager()
     let amap = tcImports.GetImportMap()
+
+    let bodyReaders = Collections.Generic.Dictionary<string, ILModuleReader>()
+
+    /// A reader of a debuggee binary that, unlike the imports, includes method bodies.
+    let readerWithBodies (fileName: string) =
+        lock bodyReaders (fun () ->
+            match bodyReaders.TryGetValue fileName with
+            | true, reader -> reader
+            | _ ->
+                let reader =
+                    OpenILModuleReader
+                        fileName
+                        {
+                            pdbDirPath = None
+                            reduceMemoryUsage = ReduceMemoryFlag.Yes
+                            metadataOnly = MetadataOnlyFlag.No
+                            tryGetMetadataSnapshot = (fun _ -> None)
+                        }
+
+                bodyReaders[fileName] <- reader
+                reader)
 
     static member Create(references: string list) =
         let fsharpCore =
@@ -300,7 +370,8 @@ type EvaluationSession(tcConfig: TcConfig, tcGlobals: TcGlobals.TcGlobals, tcImp
 
         EvaluationSession(tcConfig, tcGlobals, tcImports)
 
-    member _.CompileExpression(frame: FrameContext, text: string) =
+    member _.CompileExpression(frame: FrameContext, text: string, ?localsAsParameters: bool) =
+        let localsAsParameters = defaultArg localsAsParameters false
         let g = tcGlobals
         let m = range0
 
@@ -361,7 +432,36 @@ type EvaluationSession(tcConfig: TcConfig, tcGlobals: TcGlobals.TcGlobals, tcImp
                     let ty = Import.ImportILType amap m [] p.Type
                     fst (mkLocal m (defaultArg p.Name $"arg{i}") ty))
 
-            let frameVals = thisVal @ parameterVals
+            // The frame's locals, typed from its own local signature. References are imported
+            // metadata-only, so the method body comes from a second reader of the same binary.
+            // TODO: decode the StandAloneSig by token instead, for in-memory debuggee metadata.
+            let frameLocalSignature =
+                match
+                    (readerWithBodies dllInfo.FileName).ILModuleDef
+                    |> fun ilModule -> tryFindMethod ilModule frame.MethodToken
+                with
+                | Some(_, md) ->
+                    match md.Body with
+                    | MethodBody.IL body ->
+                        body.Value.Locals
+                        |> List.map (fun l ->
+                            { l with
+                                Type = rescopeILType dllInfo.ILScopeRef l.Type
+                            })
+                    | _ -> []
+                | None -> []
+
+            let localVals =
+                frame.Locals
+                |> List.filter (fun l -> l.Slot < frameLocalSignature.Length)
+                |> List.map (fun l -> fst (mkLocal m l.Name (Import.ImportILType amap m [] frameLocalSignature[l.Slot].Type)))
+
+            let localSlots =
+                frame.Locals
+                |> List.filter (fun l -> l.Slot < frameLocalSignature.Length)
+                |> List.map _.Slot
+
+            let frameVals = thisVal @ parameterVals @ localVals
 
             let! parsed =
                 withDiagnostics BuildPhase.Parse (fun () ->
@@ -477,6 +577,27 @@ type EvaluationSession(tcConfig: TcConfig, tcGlobals: TcGlobals.TcGlobals, tcImp
                     let codegen =
                         GenerateIlxCode(IlWriteBackend, false, tcConfig, topAttrs, optimized, QueryTypeName, ilxGenerator)
 
+                    let queryTypeDefs =
+                        if localsAsParameters || localSlots.IsEmpty then
+                            codegen.ilTypeDefs
+                        else
+                            codegen.ilTypeDefs
+                            |> List.map (fun td ->
+                                if td.Name <> QueryTypeName then
+                                    td
+                                else
+                                    td.With(
+                                        methods =
+                                            mkILMethods (
+                                                td.Methods.AsList()
+                                                |> List.map (fun md ->
+                                                    if md.Name = QueryMethodName then
+                                                        parametersToFrameLocals frameLocalSignature localSlots md
+                                                    else
+                                                        md)
+                                            )
+                                    ))
+
                     let ilModule =
                         let ignoresAccessChecks = ignoresAccessChecksTo g [ frame.AssemblyName ]
 
@@ -486,7 +607,7 @@ type EvaluationSession(tcConfig: TcConfig, tcGlobals: TcGlobals.TcGlobals, tcImp
                             true
                             (4, 0)
                             false
-                            (mkILTypeDefs (fst ignoresAccessChecks :: codegen.ilTypeDefs))
+                            (mkILTypeDefs (fst ignoresAccessChecks :: queryTypeDefs))
                             None
                             None
                             0x0

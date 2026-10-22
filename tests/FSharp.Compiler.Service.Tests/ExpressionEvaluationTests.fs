@@ -6,6 +6,8 @@ module FSharp.Compiler.Service.Tests.ExpressionEvaluationTests
 open System
 open System.IO
 open System.Reflection
+open System.Reflection.Metadata
+open System.Reflection.Metadata.Ecma335
 open Xunit
 open FSharp.Compiler.Debugging.ExpressionEvaluation
 
@@ -18,6 +20,11 @@ module EvalFixtures =
     let add (x: int) (y: int) = x + y
 
     let greet (name: string) = "hello " + name
+
+    let withLocals (x: int) =
+        let doubled = x * 2
+        let label = "n" + string doubled
+        doubled + label.Length
 
     type Counter(start: int) =
         member this.Start = start
@@ -48,15 +55,32 @@ let private fixtures = typeof<EvalFixtures.Counter>.DeclaringType
 
 let private methodOf (t: Type) name = t.GetMethods all |> Array.find (fun m -> m.Name = name)
 
-let private compile (frameMethod: MethodBase) (text: string) =
-    let frame =
-        {
-            AssemblyName = Assembly.GetExecutingAssembly().GetName().Name
-            MethodToken = frameMethod.MetadataToken
-            Opens = []
-        }
+/// All named locals of a method, from this assembly's portable PDB, as the debugger would read them.
+let private pdbLocals (frameMethod: MethodBase) =
+    let pdbPath = Path.ChangeExtension(Assembly.GetExecutingAssembly().Location, ".pdb")
+    use provider = MetadataReaderProvider.FromPortablePdbStream(File.OpenRead pdbPath)
+    let pdb = provider.GetMetadataReader()
+    let handle = MetadataTokens.MethodDefinitionHandle(frameMethod.MetadataToken &&& 0xFFFFFF)
 
-    session.Value.CompileExpression(frame, text)
+    [
+        for scope in pdb.GetLocalScopes handle do
+            for v in (pdb.GetLocalScope scope).GetLocalVariables() do
+                let local = pdb.GetLocalVariable v
+                { Name = pdb.GetString local.Name; Slot = local.Index }
+    ]
+
+let private frameOf (frameMethod: MethodBase) =
+    {
+        AssemblyName = Assembly.GetExecutingAssembly().GetName().Name
+        MethodToken = frameMethod.MetadataToken
+        Opens = []
+        Locals = pdbLocals frameMethod
+    }
+
+let private compileWith localsAsParameters (frameMethod: MethodBase) (text: string) =
+    session.Value.CompileExpression(frameOf frameMethod, text, localsAsParameters = localsAsParameters)
+
+let private compile frameMethod text = compileWith true frameMethod text
 
 /// Compiles `text` in the frame of `frameMethod`, runs it with `args` as the frame's this/parameters.
 let private evaluate (frameMethod: MethodBase) (args: obj list) (text: string) =
@@ -95,3 +119,28 @@ let ``errors are reported with F# diagnostics`` () =
     match compile (methodOf fixtures "add") "undefinedThing + x" with
     | Ok _ -> failwith "expected an error"
     | Error diagnostics -> Assert.Contains(diagnostics, fun d -> d.Number = 39)
+
+[<Fact>]
+let ``locals of the frame`` () =
+    let withLocals = methodOf fixtures "withLocals"
+    let locals = (frameOf withLocals).Locals |> List.map _.Name
+    Assert.Equal<string list>([ "doubled"; "label" ], locals)
+    // With localsAsParameters the locals follow the parameters: x, doubled, label.
+    Assert.Equal((box 11, "int"), evaluate withLocals [ 3; 6; "n6" ] "doubled + label.Length + x")
+
+[<Fact>]
+let ``the query method starts its locals with the frame's local signature`` () =
+    let withLocals = methodOf fixtures "withLocals"
+
+    match compileWith false withLocals "doubled + x" with
+    | Error diagnostics -> failwithf "%A" diagnostics
+    | Ok compiled ->
+        let query = Assembly.Load(compiled.Assembly).GetType(compiled.TypeName).GetMethod(compiled.MethodName, all)
+        let frameLocals = withLocals.GetMethodBody().LocalVariables |> Seq.map _.LocalType.FullName |> List.ofSeq
+        let queryLocals = query.GetMethodBody().LocalVariables |> Seq.map _.LocalType.FullName |> List.ofSeq
+
+        Assert.Equal<string list>(frameLocals, List.truncate frameLocals.Length queryLocals)
+        Assert.Equal(1, query.GetParameters().Length)
+        // Invoked directly the frame's locals are zero-initialized: doubled = 0.
+        Assert.Equal(box 5, query.Invoke(null, [| box 5 |]))
+
