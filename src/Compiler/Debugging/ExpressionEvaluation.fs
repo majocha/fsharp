@@ -116,8 +116,9 @@ let private toDiagnostic (d: PhasedDiagnostic) =
         IsError = (d.Severity = FSharpDiagnosticSeverity.Error)
     }
 
-/// Runs `f` with a capturing diagnostics logger; fails with the captured errors, if any.
-let private withDiagnostics (phase: BuildPhase) (f: unit -> 'T) : Result<'T, EvaluationDiagnostic list> =
+/// Runs `f` with a capturing diagnostics logger; fails with the captured errors, if any, other
+/// than the `ignored` ones.
+let private withDiagnosticsIgnoring (ignored: int list) (phase: BuildPhase) (f: unit -> 'T) : Result<'T, EvaluationDiagnostic list> =
     let logger = CapturingDiagnosticsLogger("ExpressionEvaluation")
 
     use _ = UseBuildPhase phase
@@ -132,9 +133,16 @@ let private withDiagnostics (phase: BuildPhase) (f: unit -> 'T) : Result<'T, Eva
             errorRecovery e range0
             None
 
+    let errors =
+        logger.Diagnostics
+        |> List.map toDiagnostic
+        |> List.filter (fun d -> d.IsError && not (List.contains d.Number ignored))
+
     match value with
-    | Some value when logger.ErrorCount = 0 -> Result.Ok value
-    | _ -> Result.Error(logger.Diagnostics |> List.map toDiagnostic |> List.filter _.IsError)
+    | Some value when errors.IsEmpty -> Result.Ok value
+    | _ -> Result.Error errors
+
+let private withDiagnostics phase f = withDiagnosticsIgnoring [] phase f
 
 /// Finds a method definition by token, with the chain of type definitions enclosing it.
 let private tryFindMethod (ilModule: ILModuleDef) (token: int) =
@@ -424,8 +432,10 @@ let private replaceReads (replacements: (Val * (range -> Expr)) list) expr =
 /// saw them as free locals, so after this rewrite IlxGen stores them as method arguments. Other
 /// variables (fields of `this`, aliases) are replaced by their reads, and a generic result type
 /// is fixed to `obj`, since the debugger runs the query without choosing type arguments for it.
+/// In a generic frame `<>m0` is generic over the frame's type parameters, class ones first.
 let private bindFrameValues
     (g: TcGlobals.TcGlobals)
+    (frameTypars: Typars)
     (frameVals: Val list)
     (replacements: (Val * (range -> Expr)) list)
     (contents: ModuleOrNamespaceContents)
@@ -449,12 +459,13 @@ let private bindFrameValues
                 let lambda, args =
                     if frameVals.IsEmpty then
                         let (ValReprInfo(_, args, _)) = v.ValReprInfo.Value
-                        mkLambda m unitArg (body, bodyTy), args
+                        let lambda = mkLambda m unitArg (body, bodyTy)
+                        mkTypeLambda m frameTypars (lambda, tyOfExpr g lambda), args
                     else
-                        mkMultiLambdas g m [] (frameVals |> List.map List.singleton) (body, bodyTy),
+                        mkMultiLambdas g m frameTypars (frameVals |> List.map List.singleton) (body, bodyTy),
                         frameVals |> List.map (fun _ -> [ ValReprInfo.unnamedTopArg1 ])
 
-                v.SetValReprInfo(Some(ValReprInfo([], args, ValReprInfo.unnamedRetVal)))
+                v.SetValReprInfo(Some(ValReprInfo(ValReprInfo.InferTyparInfo frameTypars, args, ValReprInfo.unnamedRetVal)))
                 v.SetType(tyOfExpr g lambda)
                 resultType.Value <- Some bodyTy
                 TBind(v, lambda, sp)
@@ -935,10 +946,23 @@ type EvaluationSession(tcConfig: TcConfig, tcGlobals: TcGlobals.TcGlobals, tcImp
             let declaringTypeRef =
                 mkRefForNestedILTypeDef dllInfo.ILScopeRef (enclosing |> List.take (enclosing.Length - 1), declaringType)
 
-            if not methodDef.GenericParams.IsEmpty || not declaringType.GenericParams.IsEmpty then
-                failwith "Generic frames are not supported yet"
+            // The frame's type parameters, class ones first (as IL numbers them), become rigid
+            // typars the expression can name and that `<>m0` is generic over.
+            let classTypars =
+                declaringType.GenericParams
+                |> List.map (fun p -> Construct.NewRigidTypar p.Name m)
 
-            let thisILType = mkILNonGenericBoxedTy declaringTypeRef
+            let methodTypars =
+                methodDef.GenericParams |> List.map (fun p -> Construct.NewRigidTypar p.Name m)
+
+            let frameTypars = classTypars @ methodTypars
+            let frameTinst = frameTypars |> List.map mkTyparTy
+
+            let importType ty =
+                Import.ImportILType amap m frameTinst ty
+
+            let thisILType =
+                mkILBoxedTy declaringTypeRef (classTypars |> List.mapi (fun i _ -> ILType.TypeVar(uint16 i)))
 
             // Compiler-generated classes (closures, state machines) are not part of the assembly's
             // F# signature, so `this` takes the nearest base type F# can see (e.g. FSharpFunc<_,_>).
@@ -960,7 +984,7 @@ type EvaluationSession(tcConfig: TcConfig, tcGlobals: TcGlobals.TcGlobals, tcImp
                 if methodDef.IsStatic then
                     []
                 else
-                    [ fst (mkLocal m "this" (Import.ImportILType amap m [] thisFSharpILType)) ]
+                    [ fst (mkLocal m "this" (importType thisFSharpILType)) ]
 
             // Instance fields of `this` that read as variables: a closure's captured values, a
             // class's `let` fields. Compiler-generated and backing fields (`X@`, `_tag`) are left out.
@@ -975,7 +999,7 @@ type EvaluationSession(tcConfig: TcConfig, tcGlobals: TcGlobals.TcGlobals, tcImp
                         && not (isGenerated (rescopeILType dllInfo.ILScopeRef f.FieldType)))
                     |> List.map (fun f ->
                         let fieldType = rescopeILType dllInfo.ILScopeRef f.FieldType
-                        let ty = Import.ImportILType amap m [] fieldType
+                        let ty = importType fieldType
                         let field = mkILFieldSpecInTy (thisILType, f.Name, fieldType)
 
                         fst (mkLocal m f.Name ty), fun m -> mkAsmExpr ([ mkNormalLdfld field ], [], [ exprForVal m thisVal ], [ ty ], m))
@@ -1040,7 +1064,7 @@ type EvaluationSession(tcConfig: TcConfig, tcGlobals: TcGlobals.TcGlobals, tcImp
             let parameterVals =
                 methodDef.Parameters
                 |> List.mapi (fun i p ->
-                    let ty = Import.ImportILType amap m [] p.Type
+                    let ty = importType p.Type
                     fst (mkLocal m (defaultArg p.Name $"arg{i}") ty))
 
             // The frame's locals, typed from its own local signature: decoded from the module's
@@ -1071,7 +1095,7 @@ type EvaluationSession(tcConfig: TcConfig, tcGlobals: TcGlobals.TcGlobals, tcImp
             let localVals =
                 frame.Locals
                 |> List.filter (fun l -> l.Slot < frameLocalSignature.Length)
-                |> List.map (fun l -> fst (mkLocal m l.Name (Import.ImportILType amap m [] frameLocalSignature[l.Slot].Type)))
+                |> List.map (fun l -> fst (mkLocal m l.Name (importType frameLocalSignature[l.Slot].Type)))
 
             let localSlots =
                 frame.Locals
@@ -1102,25 +1126,32 @@ type EvaluationSession(tcConfig: TcConfig, tcGlobals: TcGlobals.TcGlobals, tcImp
                         SourceText.ofString source
                     ))
 
+            // The frame's module and assembly grant private and internal access to the expression.
+            let accessPaths =
+                [
+                    yield CompPath(dllInfo.ILScopeRef, SyntaxAccess.Unknown, [])
+                    for e in entities -> e.CompilationPath.NestedCompPath e.LogicalName (ModuleOrType)
+                ]
+
+            // In a generic frame the checker sees the frame's typars as free in `<>m0` until
+            // `bindFrameValues` makes it generic over them, so its scope errors (FS3188) wait for
+            // the post-inference checks rerun on the rewritten tree.
+            let deferredErrors = if frameTypars.IsEmpty then [] else [ 3188 ]
+
             let! tcState, topAttrs, implFile, denv =
-                withDiagnostics BuildPhase.TypeCheck (fun () ->
+                withDiagnosticsIgnoring deferredErrors BuildPhase.TypeCheck (fun () ->
                     let tcEnv0, openDecls0 =
                         GetInitialTcEnv(QueryTypeName, m, tcConfig, tcImports, tcGlobals)
 
                     let tcState =
                         GetInitialTcState(m, QueryTypeName, tcConfig, tcGlobals, tcImports, tcEnv0, openDecls0)
 
-                    // The frame's module and assembly grant private and internal access to the expression.
-                    let accessPaths =
-                        [
-                            yield CompPath(dllInfo.ILScopeRef, SyntaxAccess.Unknown, [])
-                            for e in entities -> e.CompilationPath.NestedCompPath e.LogicalName (ModuleOrType)
-                        ]
-
                     let tcEnv =
                         { tcEnv0 with
                             eInternalsVisibleCompPaths = accessPaths @ tcEnv0.eInternalsVisibleCompPaths
                         }
+
+                    let tcEnv = AddDeclaredTypars NoCheckForDuplicateTypars frameTypars tcEnv
 
                     let tcEnv =
                         (tcEnv, scopedVals)
@@ -1173,7 +1204,7 @@ type EvaluationSession(tcConfig: TcConfig, tcGlobals: TcGlobals.TcGlobals, tcImp
                     implFile
 
                 let rewrittenContents, resultTy =
-                    bindFrameValues g frameVals (fieldVariables @ aliasVariables) contents
+                    bindFrameValues g frameTypars frameVals (fieldVariables @ aliasVariables) contents
 
                 CheckedImplFile(
                     qualifiedNameOfFile,
@@ -1185,6 +1216,28 @@ type EvaluationSession(tcConfig: TcConfig, tcGlobals: TcGlobals.TcGlobals, tcImp
                     namedDebugPoints
                 ),
                 resultTy
+
+            if not frameTypars.IsEmpty then
+                do!
+                    withDiagnostics BuildPhase.TypeCheck (fun () ->
+                        let (CheckedImplFile(signature = signature; contents = contents)) = implFile
+
+                        PostTypeCheckSemanticChecks.CheckImplFile(
+                            g,
+                            amap,
+                            true,
+                            InfoReader.InfoReader(g, amap),
+                            accessPaths,
+                            tcState.Ccu,
+                            LightweightTcValForUsingInBuildMethodCall g traitCtxtNone,
+                            denv,
+                            signature,
+                            contents,
+                            [],
+                            (false, false),
+                            false
+                        )
+                        |> ignore)
 
             let resultType =
                 match resultTy with
@@ -1205,26 +1258,43 @@ type EvaluationSession(tcConfig: TcConfig, tcGlobals: TcGlobals.TcGlobals, tcImp
                     let codegen =
                         GenerateIlxCode(IlWriteBackend, false, tcConfig, topAttrs, optimized, QueryTypeName, ilxGenerator)
 
+                    // The frame's class type parameters move from `<>m0` to `<>x`, as the debugger
+                    // instantiates the query class like the frame's: IL numbers class type parameters
+                    // before method ones, so the method body's type variables keep their meaning.
+                    let classTyparCount = classTypars.Length
+
+                    let rewriteQueryMethod (md: ILMethodDef) =
+                        let md =
+                            if localsAsParameters || localSlots.IsEmpty then
+                                md
+                            else
+                                parametersToFrameLocals frameLocalSignature localSlots md
+
+                        md.With(genericParams = List.skip classTyparCount md.GenericParams)
+
                     let queryTypeDefs =
-                        if localsAsParameters || localSlots.IsEmpty then
-                            codegen.ilTypeDefs
-                        else
-                            codegen.ilTypeDefs
-                            |> List.map (fun td ->
-                                if td.Name <> QueryTypeName then
-                                    td
-                                else
-                                    td.With(
-                                        methods =
-                                            mkILMethods (
-                                                td.Methods.AsList()
-                                                |> List.map (fun md ->
-                                                    if md.Name = QueryMethodName then
-                                                        parametersToFrameLocals frameLocalSignature localSlots md
-                                                    else
-                                                        md)
-                                            )
-                                    ))
+                        codegen.ilTypeDefs
+                        |> List.map (fun td ->
+                            if td.Name <> QueryTypeName then
+                                td
+                            else
+                                let queryMethod = td.Methods.FindByName QueryMethodName |> List.exactlyOne
+
+                                if classTyparCount > 0 && td.Methods.AsList().Length > 1 then
+                                    failwith "Expressions that define functions are not supported yet in generic classes"
+
+                                td.With(
+                                    genericParams = List.take classTyparCount queryMethod.GenericParams,
+                                    methods =
+                                        mkILMethods (
+                                            td.Methods.AsList()
+                                            |> List.map (fun md ->
+                                                if md.Name = QueryMethodName then
+                                                    rewriteQueryMethod md
+                                                else
+                                                    md)
+                                        )
+                                ))
 
                     let ilModule =
                         let ignoresAccessChecks = ignoresAccessChecksTo g [ frame.AssemblyName ]

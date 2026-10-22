@@ -44,6 +44,13 @@ module EvalFixtures =
         let captured = 5
         fun (x: int) -> captured + x
 
+    let pairUp (x: 'a) (n: int) = (x, n)
+
+    type Box<'T>(value: 'T) =
+        member this.Value = value
+        member this.Get(n: int) = n
+        member this.Map<'U>(f: 'T -> 'U) = f value
+
 let private all = BindingFlags.Public ||| BindingFlags.NonPublic ||| BindingFlags.Instance ||| BindingFlags.Static
 
 /// What a debuggee process has loaded: the runtime's implementation assemblies, FSharp.Core and this assembly.
@@ -160,6 +167,23 @@ let private run (compiled: Result<CompiledExpression, EvaluationDiagnostic list>
 /// Compiles `text` in the frame of `frameMethod`, runs it with `args` as the frame's this/parameters.
 let private evaluate (frameMethod: MethodBase) (args: obj list) (text: string) =
     run (compile frameMethod text) args text
+
+/// As `evaluate`, in a generic frame: the query class and method are instantiated as the frame's.
+let private evaluateGeneric (classArgs: Type list) (methodArgs: Type list) (frameMethod: MethodBase) (args: obj list) (text: string) =
+    match compile frameMethod text with
+    | Ok compiled ->
+        let queryType = Assembly.Load(compiled.Assembly).GetType(compiled.TypeName)
+
+        let queryType =
+            if classArgs.IsEmpty then queryType else queryType.MakeGenericType(Array.ofList classArgs)
+
+        let query = queryType.GetMethod(compiled.MethodName, all)
+
+        let query =
+            if methodArgs.IsEmpty then query else query.MakeGenericMethod(Array.ofList methodArgs)
+
+        query.Invoke(null, Array.ofList args), compiled.ResultType
+    | Error diagnostics -> failwithf "%s: %A" text diagnostics
 
 /// As `evaluate`, with the debugger's aliases in scope.
 let private evaluateWithAliases aliases (frameMethod: MethodBase) (args: obj list) (text: string) =
@@ -336,3 +360,28 @@ let ``an alias of a type the session can't find reads as obj`` () =
 
     Assert.Equal((box "x", "obj"), evaluateWithAliases [ alias ] (methodOf fixtures "add") [ 1; 2 ] "$2")
 
+[<Fact>]
+let ``generic method frames`` () =
+    let pairUp = methodOf fixtures "pairUp"
+    let evaluate = evaluateGeneric [] [ typeof<string> ] pairUp [ "hi"; 2 ]
+    Assert.Equal((box ("hi", 3), "('a * int)"), evaluate "(x, n + 1)")
+    Assert.Equal((box "String", "string"), evaluate "typeof<'a>.Name")
+
+[<Fact>]
+let ``generic class frames`` () =
+    let boxType = typedefof<EvalFixtures.Box<_>>
+    let get = methodOf boxType "Get"
+    let evaluate = evaluateGeneric [ typeof<string> ] [] get [ EvalFixtures.Box "v"; 2 ]
+    Assert.Equal((box ("v", 2), "('T * int)"), evaluate "(value, n)")
+    Assert.Equal((box "v!", "string"), evaluate "string this.Value + \"!\"")
+    Assert.Equal((box [ "v"; "v" ], "'T list"), evaluate "[ 1..n ] |> List.map (fun _ -> value)")
+
+[<Fact>]
+let ``generic methods of generic classes`` () =
+    let map = methodOf typedefof<EvalFixtures.Box<_>> "Map"
+    let f = fun (s: string) -> s.Length
+
+    Assert.Equal(
+        (box (1, "v"), "('U * 'T)"),
+        evaluateGeneric [ typeof<string> ] [ typeof<int> ] map [ EvalFixtures.Box "v"; f ] "(f value, value)"
+    )

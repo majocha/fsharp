@@ -122,6 +122,8 @@ type EvaluationSession =
     /// `this` and parameters as parameters and starts its locals with the frame's local signature,
     /// so the debugger can run it against the frame. With `localsAsParameters` the frame's locals
     /// are trailing parameters instead, so the method can be invoked directly (for testing).
+    /// In a generic frame the query class takes the frame's class type parameters and the query
+    /// method its method type parameters, to be instantiated as the frame's.
     member CompileExpression:
         frame: FrameContext * text: string * ?localsAsParameters: bool ->
             Result<CompiledExpression, EvaluationDiagnostic list>
