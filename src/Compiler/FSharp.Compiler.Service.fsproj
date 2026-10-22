@@ -553,6 +553,8 @@
     <Compile Include="Driver\CreateILModule.fs" />
     <Compile Include="Driver\fsc.fsi" />
     <Compile Include="Driver\fsc.fs" />
+    <Compile Include="Debugging\ExpressionEvaluation.fsi" />
+    <Compile Include="Debugging\ExpressionEvaluation.fs" />
 
     <!-- the symbol API. -->
     <Compile Include="Symbols\SymbolHelpers.fsi" />
