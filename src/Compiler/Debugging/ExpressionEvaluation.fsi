@@ -119,9 +119,15 @@ type CompiledExpression =
 
 /// A diagnostic from compiling an expression.
 type EvaluationDiagnostic =
-    { Number: int
-      Message: string
-      IsError: bool }
+    {
+        Number: int
+        Message: string
+        IsError: bool
+
+        /// Where in the expression text the diagnostic is: lines from 1, columns from 0. None
+        /// when it is not in the text (e.g. in the frame's context).
+        Range: FSharp.Compiler.Text.range option
+    }
 
 /// Type-checking state for one debuggee: imports built once, reused for every expression.
 [<Sealed>]

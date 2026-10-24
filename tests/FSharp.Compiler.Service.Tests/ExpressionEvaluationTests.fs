@@ -579,3 +579,28 @@ let ``frame values are not mutable in expressions`` () =
     match compile (methodOf fixtures "add") "x <- 1" with
     | Ok _ -> failwith "expected an error"
     | Error diagnostics -> Assert.Contains(diagnostics, fun d -> d.Number = 27)
+
+[<Fact>]
+let ``diagnostics are positioned in the expression text`` () =
+    let rangeOf (result: Result<CompiledExpression, EvaluationDiagnostic list>) =
+        match result with
+        | Ok _ -> failwith "expected an error"
+        | Error diagnostics ->
+            let d = diagnostics |> List.find (fun d -> d.Number = 39)
+            let r = d.Range.Value
+            (r.StartLine, r.StartColumn, r.EndLine, r.EndColumn)
+
+    let add = methodOf fixtures "add"
+    Assert.Equal((1, 4, 1, 18), rangeOf (compile add "x + undefinedThing"))
+    Assert.Equal((2, 4, 2, 18), rangeOf (compile add "let a = 1\r\na + undefinedThing"))
+
+    // After `$1`, which is quoted to ``$1`` before parsing
+    let objectId =
+        {
+            Name = "$1"
+            Kind = AliasKind.ObjectId
+            TypeName = "System.Int32"
+        }
+
+    let frame = { frameOf add with Aliases = [ objectId ] }
+    Assert.Equal((1, 5, 1, 19), rangeOf (session.Value.CompileExpression(frame, "$1 + undefinedThing")))

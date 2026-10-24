@@ -92,6 +92,7 @@ type EvaluationDiagnostic =
         Number: int
         Message: string
         IsError: bool
+        Range: range option
     }
 
 /// Sequences the compilation phases, stopping at the first that reports errors.
@@ -118,6 +119,7 @@ let private toDiagnostic (d: PhasedDiagnostic) =
         Number = d.Number
         Message = d.FormatCore(false, false)
         IsError = (d.Severity = FSharpDiagnosticSeverity.Error)
+        Range = d.Range
     }
 
 /// Runs `f` with a capturing diagnostics logger; fails with the captured errors, if any, other
@@ -204,11 +206,19 @@ let private sourcePath (e: Entity) =
         @ [ PrettyNaming.NormalizeIdentifierBackticks e.DisplayName ]
     )
 
+/// Lines of the query source before the expression: the module, the opens (at least one line),
+/// `let <>m0 () =` and `(`.
+let private linesBeforeExpression (opens: string list) = 3 + max 1 opens.Length
+
+/// Columns the expression is indented by in the query source.
+[<Literal>]
+let private ExpressionIndent = 8
+
 /// The source of the query module: opens, then `let <>m0 () = (expression)`.
 let private querySource (opens: string list) (text: string) =
     let indented =
         text.Replace("\r\n", "\n").Split('\n')
-        |> Array.map (fun line -> "        " + line)
+        |> Array.map (fun line -> String(' ', ExpressionIndent) + line)
         |> String.concat "\n"
 
     let openLines = opens |> List.map (fun o -> $"open {o}") |> String.concat "\n"
@@ -260,6 +270,8 @@ let private unitEnd (text: string) i =
 /// literals, backticked names and line comments, `$name` becomes ``$name``.
 let private quoteDollarNames (text: string) =
     let out = Text.StringBuilder()
+    // For each character of the output, the index of the input character it comes from
+    let origins = ResizeArray<int>()
     let n = text.Length
     let isNameChar c = Char.IsLetterOrDigit c || c = '_'
 
@@ -277,14 +289,60 @@ let private quoteDollarNames (text: string) =
                     j <- j + 1
 
                 out.Append("``").Append(text, i, j - i).Append("``") |> ignore
+                origins.AddRange [ i; i ]
+                origins.AddRange [ i .. j - 1 ]
+                origins.AddRange [ j; j ]
                 go j
             else
                 let next = unitEnd text i
                 out.Append(text, i, next - i) |> ignore
+                origins.AddRange [ i .. next - 1 ]
                 go next
 
     go 0
-    out.ToString()
+    out.ToString(), origins.ToArray()
+
+/// Maps a range of the query source onto the user's expression text (before `$name` quoting):
+/// lines from 1, columns from 0, in a file named "expression". Ranges outside it map to None.
+let private rangeInExpression (opens: string list) (text: string) (quoted: string) (origins: int[]) (r: range) =
+    let lineStarts (s: string) =
+        [|
+            yield 0
+            for i in 0 .. s.Length - 1 do
+                if s[i] = '\n' then
+                    yield i + 1
+        |]
+
+    let quotedStarts = lineStarts quoted
+    let textStarts = lineStarts text
+    let first = linesBeforeExpression opens + 1
+
+    let toExpression (p: pos) =
+        let line = p.Line - first
+
+        if line < 0 || line >= quotedStarts.Length then
+            None
+        else
+            let lineEnd =
+                if line + 1 < quotedStarts.Length then
+                    quotedStarts[line + 1] - 1
+                else
+                    quoted.Length
+
+            let offset = min lineEnd (quotedStarts[line] + max 0 (p.Column - ExpressionIndent))
+
+            let original =
+                if offset < origins.Length then
+                    origins[offset]
+                else
+                    text.Length
+
+            let textLine = (textStarts |> Array.findIndexBack (fun start -> start <= original))
+            Some(Position.mkPos (textLine + 1) (original - textStarts[textLine]))
+
+    match toExpression r.Start, toExpression r.End with
+    | Some startPos, Some endPos -> Some(mkRange "expression" startPos endPos)
+    | _ -> None
 
 /// Format specifiers the debugger knows (as for C#), besides `view(...)`.
 let private knownFormatSpecifiers =
@@ -1068,6 +1126,17 @@ type EvaluationSession(tcConfig: TcConfig, tcGlobals: TcGlobals.TcGlobals, tcImp
     member private _.Compile(frame: FrameContext, text: string, formatSpecifiers: string list, localsAsParameters: bool, assigning: bool) =
         let g = tcGlobals
         let m = range0
+        let text = text.Replace("\r\n", "\n")
+        let quoted, origins = quoteDollarNames text
+        let opensUsed = ref []
+
+        // Ranges of diagnostics are given in the user's text, as far as they fall in it.
+        let inExpression (diagnostics: EvaluationDiagnostic list) =
+            diagnostics
+            |> List.map (fun d ->
+                { d with
+                    Range = d.Range |> Option.bind (rangeInExpression opensUsed.Value text quoted origins)
+                })
 
         result {
             // The frame's method and the F# entities enclosing it.
@@ -1103,6 +1172,8 @@ type EvaluationSession(tcConfig: TcConfig, tcGlobals: TcGlobals.TcGlobals, tcImp
                     yield! frame.Opens
                 ]
                 |> List.distinct
+
+            opensUsed.Value <- opens
 
             // `this` and the parameters, as locals the expression can name.
             let declaringType = enclosing |> List.last
@@ -1366,7 +1437,7 @@ type EvaluationSession(tcConfig: TcConfig, tcGlobals: TcGlobals.TcGlobals, tcImp
 
             let! parsed =
                 withDiagnostics BuildPhase.Parse (fun () ->
-                    let source = querySource opens (quoteDollarNames text)
+                    let source = querySource opens quoted
 
                     ParseOneInputSourceText(
                         tcConfig,
@@ -1657,3 +1728,4 @@ type EvaluationSession(tcConfig: TcConfig, tcGlobals: TcGlobals.TcGlobals, tcImp
                     BoolResult = boolResult
                 }
         }
+        |> Result.mapError inExpression
