@@ -55,6 +55,10 @@ module EvalFixtures =
 
     let largest (xs: 'T list) = List.max xs
 
+    let withAnonymousRecord (x: int) =
+        let r = {| A = x |}
+        r.A + 1
+
     type Bag<'T when 'T: equality>(items: 'T list) =
         member _.Has(x: 'T) = List.contains x items
 
@@ -628,3 +632,13 @@ let ``F# constraints of generic frames`` () =
         evaluateGeneric [ typeof<int> ] [] has [ EvalFixtures.Bag [ 1; 2 ]; 2 ] "List.contains x items && x = x"
     )
 
+[<Fact>]
+let ``frame values whose type has no F# view are left out`` () =
+    // `r` is of an anonymous record type, which is not an entity of the assembly's signature.
+    let frameMethod = methodOf fixtures "withAnonymousRecord"
+    Assert.Equal<string list>([ "r" ], (frameOf frameMethod).Locals |> List.map _.Name)
+    Assert.Equal((box 2, "int"), evaluate frameMethod [ 1 ] "x + 1")
+
+    match compile frameMethod "r" with
+    | Ok _ -> failwith "expected r not to be in scope"
+    | Error diagnostics -> Assert.Contains(diagnostics, fun d -> d.Number = 39)

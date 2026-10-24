@@ -12,6 +12,12 @@
     <NoWarn>$(NoWarn);NU5125</NoWarn>
     <NoWarn>$(NoWarn);64;1204</NoWarn>         <!--Temporary fix for sourcebuild -->
     <AssemblyName>FSharp.Compiler.Service</AssemblyName>
+    <!-- A private build for the F# expression evaluator VSIX (opt in with
+         -p:FSharpExpressionEvaluatorBuild=true): its own assembly identity, so it loads next to
+         Visual Studio's FCS, and unsigned, so the evaluator (unsigned too) can be a friend. -->
+    <AssemblyName Condition="'$(FSharpExpressionEvaluatorBuild)' == 'true'">FSharp.ExpressionEvaluator.Compiler</AssemblyName>
+    <SignAssembly Condition="'$(FSharpExpressionEvaluatorBuild)' == 'true'">false</SignAssembly>
+    <PublicSign Condition="'$(FSharpExpressionEvaluatorBuild)' == 'true'">false</PublicSign>
     <AllowCrossTargeting>true</AllowCrossTargeting>
     <DefineConstants>$(DefineConstants);COMPILER</DefineConstants>
 	<DefineConstants Condition="$(DotNetBuildUseMonoRuntime) == 'true'">$(DefineConstants);BUILD_USING_MONO</DefineConstants>
@@ -62,8 +68,11 @@
   </PropertyGroup>
 
   <PropertyGroup Condition="'$(BUILDING_USING_DOTNET)' == 'true'">
-    <OutputPath>$(ArtifactsDir)/bin/$(MSBuildProjectName)/$(Configuration)/</OutputPath>
-    <IntermediateOutputPath>$(ArtifactsDir)obj/$(MSBuildProjectName)/$(Configuration)/</IntermediateOutputPath>
+    <!-- The expression evaluator's private build gets its own folders, apart from the normal build's. -->
+    <OutDirName>$(MSBuildProjectName)</OutDirName>
+    <OutDirName Condition="'$(FSharpExpressionEvaluatorBuild)' == 'true'">FSharp.ExpressionEvaluator.Compiler</OutDirName>
+    <OutputPath>$(ArtifactsDir)/bin/$(OutDirName)/$(Configuration)/</OutputPath>
+    <IntermediateOutputPath>$(ArtifactsDir)obj/$(OutDirName)/$(Configuration)/</IntermediateOutputPath>
   </PropertyGroup>
 
   <ItemGroup>
@@ -101,6 +110,8 @@
     <InternalsVisibleTo Include="FSharp.Editor" />
     <InternalsVisibleTo Include="FSharp.Compiler.LanguageServer" />
     <InternalsVisibleTo Include="FSharp.VisualStudio.Extension" />
+    <!-- The F# expression evaluator for Visual Studio (Debugging/ExpressionEvaluation.fs) -->
+    <InternalsVisibleTo Include="FSharp.ExpressionEvaluator.ExpressionCompiler" />
   </ItemGroup>
 
   <ItemGroup>

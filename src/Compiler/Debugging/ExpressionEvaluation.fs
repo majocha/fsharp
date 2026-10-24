@@ -1224,6 +1224,18 @@ type EvaluationSession(tcConfig: TcConfig, tcGlobals: TcGlobals.TcGlobals, tcImp
             let importType ty =
                 Import.ImportILType amap m frameTinst ty
 
+            // Some types of frame values have no F# view: anonymous record types, for example, are
+            // not entities of their assembly's signature.
+            let tryImportType ty =
+                let logger = CapturingDiagnosticsLogger("ExpressionEvaluation")
+                use _ = UseDiagnosticsLogger logger
+
+                try
+                    let imported = importType ty
+                    if logger.ErrorCount = 0 then Some imported else None
+                with _ ->
+                    None
+
             let isValueType = declaringType.IsStruct
 
             let thisILType =
@@ -1294,17 +1306,19 @@ type EvaluationSession(tcConfig: TcConfig, tcGlobals: TcGlobals.TcGlobals, tcImp
                     && not (f.Name.Contains "@")
                     && not (f.Name.StartsWith "_")
                     && not (isGenerated (rescopeILType dllInfo.ILScopeRef f.FieldType)))
-                |> List.map (fun f ->
+                |> List.choose (fun f ->
                     let formalType = rescopeILType dllInfo.ILScopeRef f.FieldType
                     let fieldType = instILType ownerType.GenericArgs formalType
-                    let ty = importType fieldType
-                    let field = mkILFieldSpecInTy (ownerType, f.Name, formalType)
 
-                    f.Name,
-                    fieldType,
-                    ty,
-                    (fun m -> mkAsmExpr ([ mkNormalLdfld field ], [], [ owner m ], [ ty ], m)),
-                    (fun m value -> mkAsmExpr ([ mkNormalStfld field ], [], [ owner m; value ], [], m)))
+                    tryImportType fieldType
+                    |> Option.map (fun ty ->
+                        let field = mkILFieldSpecInTy (ownerType, f.Name, formalType)
+
+                        f.Name,
+                        fieldType,
+                        ty,
+                        (fun m -> mkAsmExpr ([ mkNormalLdfld field ], [], [ owner m ], [ ty ], m)),
+                        (fun m value -> mkAsmExpr ([ mkNormalStfld field ], [], [ owner m; value ], [], m))))
 
             // Plumbing fields of state machines, not user variables: those of resumable code
             // (`task`), and of `seq` (a GeneratedSequenceBase<_> subclass).
@@ -1407,7 +1421,9 @@ type EvaluationSession(tcConfig: TcConfig, tcGlobals: TcGlobals.TcGlobals, tcImp
             let parameterVals =
                 methodDef.Parameters
                 |> List.mapi (fun i p ->
-                    let ty = importType p.Type
+                    // A parameter keeps its position among the query's arguments: `obj` when its type
+                    // can't be imported.
+                    let ty = tryImportType p.Type |> Option.defaultValue g.obj_ty_ambivalent
                     mkVariable (defaultArg p.Name $"arg{i}") ty)
 
             // The frame's locals, typed from its own local signature: decoded from the module's
@@ -1435,15 +1451,15 @@ type EvaluationSession(tcConfig: TcConfig, tcGlobals: TcGlobals.TcGlobals, tcImp
                             })
                     | _ -> []
 
-            let localVals =
+            // Locals whose type can't be imported are left out.
+            let typedLocals =
                 frame.Locals
                 |> List.filter (fun l -> l.Slot < frameLocalSignature.Length)
-                |> List.map (fun l -> mkVariable l.Name (importType frameLocalSignature[l.Slot].Type))
+                |> List.choose (fun l -> tryImportType frameLocalSignature[l.Slot].Type |> Option.map (fun ty -> l, ty))
 
-            let localSlots =
-                frame.Locals
-                |> List.filter (fun l -> l.Slot < frameLocalSignature.Length)
-                |> List.map _.Slot
+            let localVals = typedLocals |> List.map (fun (l, ty) -> mkVariable l.Name ty)
+
+            let localSlots = typedLocals |> List.map (fun (l, _) -> l.Slot)
 
             let frameVals = thisVal @ parameterVals @ localVals
 
