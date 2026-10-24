@@ -117,6 +117,29 @@ type CompiledExpression =
         BoolResult: bool
     }
 
+/// A variable of the Locals window: the query method that reads it.
+type CompiledLocal =
+    {
+        /// The variable's name, as an expression names it (`x`, `this`, `$exception`).
+        Name: string
+
+        MethodName: string
+
+        /// The F# type of the variable, for display.
+        ResultType: string
+
+        /// The variable can't be assigned to.
+        ReadOnlyResult: bool
+    }
+
+/// The Locals window's query: an assembly with one method per variable.
+type CompiledLocals =
+    {
+        Assembly: byte[]
+        TypeName: string
+        Locals: CompiledLocal list
+    }
+
 /// A diagnostic from compiling an expression.
 type EvaluationDiagnostic =
     {
@@ -146,6 +169,14 @@ type EvaluationSession =
     member CompileExpression:
         frame: FrameContext * text: string * ?localsAsParameters: bool ->
             Result<CompiledExpression, EvaluationDiagnostic list>
+
+    /// Compiles the Locals window's query for a frame: one method per variable shown, in order:
+    /// the debugger's aliases, `this`, the parameters, a closure's captured values or a state
+    /// machine's hoisted variables, then the locals in scope. Compiler temporaries are left out.
+    /// With `argumentsOnly`, only the parameters (for the call stack's argument values).
+    member CompileLocals:
+        frame: FrameContext * argumentsOnly: bool * ?localsAsParameters: bool ->
+            Result<CompiledLocals, EvaluationDiagnostic list>
 
     /// Compiles `target <- value` in the context of a frame, as for the debugger's edits of a
     /// value: the frame's parameters, locals and the fields of `this` can be assigned. The query

@@ -87,6 +87,21 @@ type CompiledExpression =
         BoolResult: bool
     }
 
+type CompiledLocal =
+    {
+        Name: string
+        MethodName: string
+        ResultType: string
+        ReadOnlyResult: bool
+    }
+
+type CompiledLocals =
+    {
+        Assembly: byte[]
+        TypeName: string
+        Locals: CompiledLocal list
+    }
+
 type EvaluationDiagnostic =
     {
         Number: int
@@ -111,6 +126,11 @@ let private QueryTypeName = "<>x"
 
 [<Literal>]
 let private QueryMethodName = "<>m0"
+
+/// The name of the n-th query method of the query module: `<>m0`, `<>m1`, ...
+let private queryMethodName (n: int) = $"<>m{n}"
+
+let private isQueryMethodName (name: string) = name.StartsWith "<>m"
 
 let private queryFileName = "<>x.fs"
 
@@ -194,35 +214,31 @@ let private fsharpEntities (ccu: CcuThunk) (enclosing: ILTypeDef list) =
 
             types nsEntity (name :: (nested |> List.map _.Name)) []
 
-/// The path of a module or type as written in F# source, e.g. `global.TestDebuggee.Program`.
+/// The path of a module or namespace as an `open` names it, e.g. `global.TestDebuggee.Program`.
 let private sourcePath (e: Entity) =
-    let parents =
-        e.CompilationPath.MangledPath
-        |> List.map PrettyNaming.NormalizeIdentifierBackticks
+    PrettyNaming.MangledGlobalName :: e.CompilationPath.MangledPath @ [ e.DisplayName ]
 
-    String.Join(
-        ".",
-        "global" :: parents
-        @ [ PrettyNaming.NormalizeIdentifierBackticks e.DisplayName ]
-    )
-
-/// Lines of the query source before the expression: the module, the opens (at least one line),
-/// `let <>m0 () =` and `(`.
-let private linesBeforeExpression (opens: string list) = 3 + max 1 opens.Length
+/// Lines of the query source before the expression: the module, `let <>m0 () =` and `(`.
+[<Literal>]
+let private LinesBeforeExpression = 3
 
 /// Columns the expression is indented by in the query source.
 [<Literal>]
 let private ExpressionIndent = 8
 
-/// The source of the query module: opens, then `let <>m0 () = (expression)`.
-let private querySource (opens: string list) (text: string) =
-    let indented =
-        text.Replace("\r\n", "\n").Split('\n')
-        |> Array.map (fun line -> String(' ', ExpressionIndent) + line)
-        |> String.concat "\n"
+/// The source of the query module: `let <>m0 () = (expression)` and so on, one method per
+/// expression. The frame's opens are not in it but in the environment it is checked in, under the
+/// frame's values, which an open would otherwise shadow.
+let private querySource (texts: string list) =
+    let query n (text: string) =
+        let indented =
+            text.Replace("\r\n", "\n").Split('\n')
+            |> Array.map (fun line -> String(' ', ExpressionIndent) + line)
+            |> String.concat "\n"
 
-    let openLines = opens |> List.map (fun o -> $"open {o}") |> String.concat "\n"
-    $"module ``{QueryTypeName}``\n{openLines}\nlet ``{QueryMethodName}`` () =\n    (\n{indented}\n    )\n"
+        $"let ``{queryMethodName n}`` () =\n    (\n{indented}\n    )\n"
+
+    $"module ``{QueryTypeName}``\n" + String.concat "" (List.mapi query texts)
 
 /// The end of the lexical unit of `text` at `i`: past a string or character literal, a
 /// backticked name or a line comment starting there, otherwise `i + 1`.
@@ -304,7 +320,7 @@ let private quoteDollarNames (text: string) =
 
 /// Maps a range of the query source onto the user's expression text (before `$name` quoting):
 /// lines from 1, columns from 0, in a file named "expression". Ranges outside it map to None.
-let private rangeInExpression (opens: string list) (text: string) (quoted: string) (origins: int[]) (r: range) =
+let private rangeInExpression (text: string) (quoted: string) (origins: int[]) (r: range) =
     let lineStarts (s: string) =
         [|
             yield 0
@@ -315,7 +331,7 @@ let private rangeInExpression (opens: string list) (text: string) (quoted: strin
 
     let quotedStarts = lineStarts quoted
     let textStarts = lineStarts text
-    let first = linesBeforeExpression opens + 1
+    let first = LinesBeforeExpression + 1
 
     let toExpression (p: pos) =
         let line = p.Line - first
@@ -557,10 +573,10 @@ let private bindFrameValues
     (writes: (Val * (range -> Expr -> Expr)) list)
     (contents: ModuleOrNamespaceContents)
     =
-    let checkedBody = ref None
+    let checkedBodies = Collections.Generic.Dictionary<string, Expr * TType>()
 
     let rewriteBinding (TBind(v, expr, sp) as bind) =
-        if v.LogicalName <> QueryMethodName then
+        if not (isQueryMethodName v.LogicalName) then
             bind
         else
             let expr =
@@ -600,7 +616,7 @@ let private bindFrameValues
 
                 v.SetValReprInfo(Some(ValReprInfo(ValReprInfo.InferTyparInfo frameTypars, args, ValReprInfo.unnamedRetVal)))
                 v.SetType(tyOfExpr g lambda)
-                checkedBody.Value <- Some(body0, bodyTy)
+                checkedBodies[v.LogicalName] <- (body0, bodyTy)
                 TBind(v, lambda, sp)
             | _ -> bind
 
@@ -620,7 +636,7 @@ let private bindFrameValues
         | TMDefOpens _ -> contents
 
     let contents = rewrite contents
-    contents, checkedBody.Value
+    contents, checkedBodies
 
 /// FSharp.Core functions known to have no side effects, by module and name.
 let private pureFSharpCoreFunctions =
@@ -701,6 +717,46 @@ let private mayHaveSideEffects (g: TcGlobals.TcGlobals) (expr: Expr) =
     |> ignore
 
     sideEffects
+
+/// What the query module is compiled for.
+[<RequireQualifiedAccess>]
+type private QueryRequest =
+    /// One expression (or assignment) as the user wrote it.
+    | Expression of text: string
+    /// One query per variable the Locals window shows (only the parameters with argumentsOnly).
+    | Locals of argumentsOnly: bool
+
+/// Compiler temporaries the Locals window doesn't show (docs/DESIGN.md §6.4); expressions can
+/// still name them.
+let private isHiddenLocalName (name: string) =
+    name.Contains "@"
+    || name.StartsWith "_arg"
+    || name.StartsWith "activePatternResult"
+    || name.StartsWith "unitVar"
+    || List.contains
+        name
+        [
+            "matchValue"
+            "copyOfStruct"
+            "tupledArg"
+            "patternInput"
+            "inputSequence"
+            "enumerator"
+            "resultOfApply"
+            "objectArg"
+        ]
+
+/// A query of the module: its method and the properties of its result.
+type private CompiledQuery =
+    {
+        /// The variable, for a Locals query
+        Name: string
+        MethodName: string
+        ResultType: string
+        PotentialSideEffect: bool
+        ReadOnlyResult: bool
+        BoolResult: bool
+    }
 
 /// A PE image holding only a metadata blob and embedded managed resources (at their original
 /// offsets in the resources directory): enough for the IL reader to import a reference.
@@ -1117,26 +1173,78 @@ type EvaluationSession(tcConfig: TcConfig, tcGlobals: TcGlobals.TcGlobals, tcImp
 
     member this.CompileExpression(frame: FrameContext, text: string, ?localsAsParameters: bool) =
         let text, formatSpecifiers = splitFormatSpecifiers text
-        this.Compile(frame, text, formatSpecifiers, defaultArg localsAsParameters false, false)
+
+        this.Compile(frame, QueryRequest.Expression text, defaultArg localsAsParameters false, false)
+        |> Result.map (fun (assembly, queries) ->
+            let query = List.exactlyOne queries
+
+            {
+                Assembly = assembly
+                TypeName = QueryTypeName
+                MethodName = query.MethodName
+                ResultType = query.ResultType
+                FormatSpecifiers = formatSpecifiers
+                PotentialSideEffect = query.PotentialSideEffect
+                ReadOnlyResult = query.ReadOnlyResult
+                BoolResult = query.BoolResult
+            })
 
     member this.CompileAssignment(frame: FrameContext, target: string, value: string, ?localsAsParameters: bool) =
         let text = $"{target} <- (\n{value}\n)"
-        this.Compile(frame, text, [], defaultArg localsAsParameters false, true)
 
-    member private _.Compile(frame: FrameContext, text: string, formatSpecifiers: string list, localsAsParameters: bool, assigning: bool) =
+        this.Compile(frame, QueryRequest.Expression text, defaultArg localsAsParameters false, true)
+        |> Result.map (fun (assembly, queries) ->
+            let query = List.exactlyOne queries
+
+            {
+                Assembly = assembly
+                TypeName = QueryTypeName
+                MethodName = query.MethodName
+                ResultType = query.ResultType
+                FormatSpecifiers = []
+                PotentialSideEffect = query.PotentialSideEffect
+                ReadOnlyResult = query.ReadOnlyResult
+                BoolResult = query.BoolResult
+            })
+
+    member this.CompileLocals(frame: FrameContext, argumentsOnly: bool, ?localsAsParameters: bool) =
+        this.Compile(frame, QueryRequest.Locals argumentsOnly, defaultArg localsAsParameters false, false)
+        |> Result.map (fun (assembly, queries) ->
+            {
+                Assembly = assembly
+                TypeName = QueryTypeName
+                Locals =
+                    queries
+                    |> List.map (fun q ->
+                        {
+                            Name = q.Name
+                            MethodName = q.MethodName
+                            ResultType = q.ResultType
+                            ReadOnlyResult = q.ReadOnlyResult
+                        })
+            })
+
+    member private _.Compile(frame: FrameContext, request: QueryRequest, localsAsParameters: bool, assigning: bool) =
         let g = tcGlobals
         let m = range0
-        let text = text.Replace("\r\n", "\n")
+
+        let text =
+            match request with
+            | QueryRequest.Expression text -> text.Replace("\r\n", "\n")
+            | QueryRequest.Locals _ -> ""
+
         let quoted, origins = quoteDollarNames text
-        let opensUsed = ref []
 
         // Ranges of diagnostics are given in the user's text, as far as they fall in it.
         let inExpression (diagnostics: EvaluationDiagnostic list) =
-            diagnostics
-            |> List.map (fun d ->
-                { d with
-                    Range = d.Range |> Option.bind (rangeInExpression opensUsed.Value text quoted origins)
-                })
+            match request with
+            | QueryRequest.Expression _ ->
+                diagnostics
+                |> List.map (fun d ->
+                    { d with
+                        Range = d.Range |> Option.bind (rangeInExpression text quoted origins)
+                    })
+            | QueryRequest.Locals _ -> diagnostics |> List.map (fun d -> { d with Range = None })
 
         result {
             // The frame's method and the F# entities enclosing it.
@@ -1169,11 +1277,10 @@ type EvaluationSession(tcConfig: TcConfig, tcGlobals: TcGlobals.TcGlobals, tcImp
                             && not (EntityHasWellKnownAttribute g WellKnownEntityAttributes.RequireQualifiedAccessAttribute e)
                         then
                             sourcePath e
-                    yield! frame.Opens
+                    for o in frame.Opens do
+                        List.ofArray (o.Split '.')
                 ]
                 |> List.distinct
-
-            opensUsed.Value <- opens
 
             // `this` and the parameters, as locals the expression can name.
             let declaringType = enclosing |> List.last
@@ -1343,7 +1450,8 @@ type EvaluationSession(tcConfig: TcConfig, tcGlobals: TcGlobals.TcGlobals, tcImp
             // Fields of `this` as variables: a closure's captured values, a class's `let` fields, a
             // state machine's hoisted variables. A hoisted `this` also brings the fields of the
             // original `this`, shadowed by the frame's own.
-            let fieldVariables =
+            // Also the names of the frame's own fields, which a generated frame's Locals flatten.
+            let fieldVariables, ownFieldNames =
                 match thisVal with
                 | [ thisVal ] ->
                     let own =
@@ -1359,8 +1467,9 @@ type EvaluationSession(tcConfig: TcConfig, tcGlobals: TcGlobals.TcGlobals, tcImp
                         | _ -> []
 
                     (ofOriginalThis @ own)
-                    |> List.map (fun (name, _, ty, read, write) -> mkVariable name ty, read, write)
-                | _ -> []
+                    |> List.map (fun (name, _, ty, read, write) -> mkVariable name ty, read, write),
+                    own |> List.map (fun (name, _, _, _, _) -> name)
+                | _ -> [], []
 
             // The debugger's aliases, read through its intrinsic methods (as Roslyn binds them).
             let aliasVariables =
@@ -1479,9 +1588,62 @@ type EvaluationSession(tcConfig: TcConfig, tcGlobals: TcGlobals.TcGlobals, tcImp
                 @ localVals
                 @ (aliasVariables |> List.map fst)
 
+            // The query module's expressions, each with what it stands for: the user's expression,
+            // or one per variable the Locals window shows. Locals with no variable to show still
+            // compile one (unnamed, `()`), which is not returned.
+            let queries =
+                match request with
+                | QueryRequest.Expression _ -> [ text, quoted ]
+                | QueryRequest.Locals argumentsOnly ->
+                    let localNames = localVals |> List.map _.LogicalName |> set
+
+                    // Pieces of a tuple parameter (`pair_0`, `pair_1`) when the tuple is a local (`pair`)
+                    let isTuplePiece (name: string) =
+                        match name.LastIndexOf '_' with
+                        | i when i > 0 && i + 1 < name.Length ->
+                            localNames.Contains(name.Substring(0, i))
+                            && Seq.forall Char.IsDigit (name.Substring(i + 1))
+                        | _ -> false
+
+                    let parameters =
+                        parameterVals
+                        |> List.map _.LogicalName
+                        |> List.filter (fun name -> not (isHiddenLocalName name || isTuplePiece name))
+
+                    let fieldNames =
+                        fieldVariables |> List.map (fun (v: Val, _, _) -> v.LogicalName) |> set
+
+                    let names =
+                        if argumentsOnly then
+                            parameters
+                        else
+                            [
+                                yield! frame.Aliases |> List.map _.Name
+                                // `this` as the user wrote it: a generated frame's own `this` is hidden,
+                                // its hoisted `this` field stands for it.
+                                if
+                                    thisVal |> List.exists (fun v -> v.LogicalName = "this")
+                                    || fieldNames.Contains "this"
+                                then
+                                    "this"
+                                yield! parameters
+                                // A closure's captured values and a state machine's hoisted variables,
+                                // flattened; a class's own fields are shown under `this`.
+                                if isGeneratedFrame then
+                                    yield!
+                                        ownFieldNames
+                                        |> List.filter (fun name ->
+                                            name <> "this" && fieldNames.Contains name && not (isHiddenLocalName name))
+                                yield! localVals |> List.map _.LogicalName |> List.filter (not << isHiddenLocalName)
+                            ]
+
+                    match List.distinct names with
+                    | [] -> [ "", "()" ]
+                    | names -> names |> List.map (fun name -> name, $"``{name}``")
+
             let! parsed =
                 withDiagnostics BuildPhase.Parse (fun () ->
-                    let source = querySource opens quoted
+                    let source = querySource (List.map snd queries)
 
                     ParseOneInputSourceText(
                         tcConfig,
@@ -1512,12 +1674,22 @@ type EvaluationSession(tcConfig: TcConfig, tcGlobals: TcGlobals.TcGlobals, tcImp
                     let tcState =
                         GetInitialTcState(m, QueryTypeName, tcConfig, tcGlobals, tcImports, tcEnv0, openDecls0)
 
+                    // The access rights are computed from the paths here, as the opens below need them.
                     let tcEnv =
+                        let internalsVisible = accessPaths @ tcEnv0.eInternalsVisibleCompPaths
+
                         { tcEnv0 with
-                            eInternalsVisibleCompPaths = accessPaths @ tcEnv0.eInternalsVisibleCompPaths
+                            eInternalsVisibleCompPaths = internalsVisible
+                            eAccessRights = ComputeAccessRights tcEnv0.eAccessPath internalsVisible tcEnv0.eFamilyType
                         }
 
                     let tcEnv = AddDeclaredTypars NoCheckForDuplicateTypars frameTypars tcEnv
+
+                    let tcEnv =
+                        (tcEnv, opens)
+                        ||> List.fold (fun env path ->
+                            let longId = path |> List.map (fun name -> Ident(name, m))
+                            fst (TcOpenModuleOrNamespaceDecl TcResultsSink.NoSink g amap m env (longId, m)))
 
                     let tcEnv =
                         (tcEnv, scopedVals)
@@ -1547,19 +1719,7 @@ type EvaluationSession(tcConfig: TcConfig, tcGlobals: TcGlobals.TcGlobals, tcImp
 
                     tcState, topAttrs, implFile, tcEnvAtEnd.DisplayEnv)
 
-            let queryVal =
-                let rec find (mty: ModuleOrNamespaceType) =
-                    match mty.AllValsAndMembers |> Seq.tryFind (fun v -> v.LogicalName = QueryMethodName) with
-                    | Some v -> Some v
-                    | None ->
-                        mty.ModuleAndNamespaceDefinitions
-                        |> List.tryPick (fun e -> find e.ModuleOrNamespaceType)
-
-                match find implFile.Signature with
-                | Some v -> v
-                | None -> failwith $"'{QueryMethodName}' not found in the checked query module"
-
-            let implFile, checkedBody =
+            let implFile, checkedBodies =
                 let (CheckedImplFile(qualifiedNameOfFile,
                                      signature,
                                      contents,
@@ -1569,7 +1729,7 @@ type EvaluationSession(tcConfig: TcConfig, tcGlobals: TcGlobals.TcGlobals, tcImp
                                      namedDebugPoints)) =
                     implFile
 
-                let rewrittenContents, checkedBody =
+                let rewrittenContents, checkedBodies =
                     bindFrameValues
                         g
                         frameTypars
@@ -1587,7 +1747,7 @@ type EvaluationSession(tcConfig: TcConfig, tcGlobals: TcGlobals.TcGlobals, tcImp
                     anonRecdTypes,
                     namedDebugPoints
                 ),
-                checkedBody
+                checkedBodies
 
             if not frameTypars.IsEmpty then
                 do!
@@ -1611,11 +1771,6 @@ type EvaluationSession(tcConfig: TcConfig, tcGlobals: TcGlobals.TcGlobals, tcImp
                         )
                         |> ignore)
 
-            let resultType =
-                match checkedBody with
-                | Some(_, ty) -> NicePrint.prettyStringOfTyNoCx denv ty
-                | None -> NicePrint.prettyStringOfTyNoCx denv (snd (stripFunTy g queryVal.Type))
-
             // Variables an assignment can target: the frame's values, fields of `this`, and the
             // user's Immediate-window variables.
             let assignable =
@@ -1629,15 +1784,25 @@ type EvaluationSession(tcConfig: TcConfig, tcGlobals: TcGlobals.TcGlobals, tcImp
                 |> List.map _.Stamp
                 |> set
 
-            let potentialSideEffect, readOnlyResult, boolResult =
-                match checkedBody with
-                | Some(body, ty) ->
-                    mayHaveSideEffects g body,
-                    (match stripDebugPoints body with
-                     | Expr.Val(vref, _, _) -> not (vref.IsMutable || assignable.Contains vref.Stamp)
-                     | _ -> true),
-                    typeEquiv g ty g.bool_ty
-                | None -> true, true, false
+            let compiledQueries =
+                queries
+                |> List.mapi (fun i (name, _) ->
+                    let methodName = queryMethodName i
+
+                    match checkedBodies.TryGetValue methodName with
+                    | true, (body, ty) ->
+                        {
+                            Name = name
+                            MethodName = methodName
+                            ResultType = NicePrint.prettyStringOfTyNoCx denv ty
+                            PotentialSideEffect = mayHaveSideEffects g body
+                            ReadOnlyResult =
+                                match stripDebugPoints body with
+                                | Expr.Val(vref, _, _) -> not (vref.IsMutable || assignable.Contains vref.Stamp)
+                                | _ -> true
+                            BoolResult = typeEquiv g ty g.bool_ty
+                        }
+                    | _ -> failwith $"'{methodName}' not found in the checked query module")
 
             let! assembly =
                 withDiagnostics BuildPhase.IlxGen (fun () ->
@@ -1717,7 +1882,10 @@ type EvaluationSession(tcConfig: TcConfig, tcGlobals: TcGlobals.TcGlobals, tcImp
                             else
                                 let queryMethod = td.Methods.FindByName QueryMethodName |> List.exactlyOne
 
-                                if classTyparCount > 0 && td.Methods.AsList().Length > 1 then
+                                if
+                                    classTyparCount > 0
+                                    && td.Methods.AsList() |> List.exists (fun md -> not (isQueryMethodName md.Name))
+                                then
                                     failwith "Expressions that define functions are not supported yet in generic classes"
 
                                 td.With(
@@ -1726,7 +1894,7 @@ type EvaluationSession(tcConfig: TcConfig, tcGlobals: TcGlobals.TcGlobals, tcImp
                                         mkILMethods (
                                             td.Methods.AsList()
                                             |> List.map (fun md ->
-                                                if md.Name = QueryMethodName then
+                                                if isQueryMethodName md.Name then
                                                     rewriteQueryMethod md
                                                 else
                                                     md)
@@ -1786,15 +1954,9 @@ type EvaluationSession(tcConfig: TcConfig, tcGlobals: TcGlobals.TcGlobals, tcImp
                     fst (WriteILBinaryInMemory(options, ilModule, id)))
 
             return
-                {
-                    Assembly = assembly
-                    TypeName = QueryTypeName
-                    MethodName = QueryMethodName
-                    ResultType = resultType
-                    FormatSpecifiers = formatSpecifiers
-                    PotentialSideEffect = potentialSideEffect
-                    ReadOnlyResult = readOnlyResult
-                    BoolResult = boolResult
-                }
+                assembly,
+                (match request with
+                 | QueryRequest.Expression _ -> compiledQueries
+                 | QueryRequest.Locals _ -> compiledQueries |> List.filter (fun q -> q.Name <> ""))
         }
         |> Result.mapError inExpression

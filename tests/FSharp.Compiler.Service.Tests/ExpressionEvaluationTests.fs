@@ -22,6 +22,8 @@ module EvalFixtures =
 
     let greet (name: string) = "hello " + name
 
+    let shadowing (moduleValue: int) (set: string) = moduleValue + set.Length
+
     let withLocals (x: int) =
         let doubled = x * 2
         let label = "n" + string doubled
@@ -54,6 +56,10 @@ module EvalFixtures =
     let pairUp (x: 'a) (n: int) = (x, n)
 
     let largest (xs: 'T list) = List.max xs
+
+    let tupled (pair: int * string) (z: int) =
+        let total = fst pair + z
+        total
 
     let withAnonymousRecord (x: int) =
         let r = {| A = x |}
@@ -304,6 +310,12 @@ let ``let fields of a class member frame`` () =
     let account = EvalFixtures.Account "ann"
     Assert.Equal((box 110, "int"), evaluate deposit [ account; 10 ] "balance + amount")
     Assert.Equal((box "ann!", "string"), evaluate deposit [ account; 10 ] "owner + \"!\"")
+
+[<Fact>]
+let ``frame values shadow the opened modules`` () =
+    // `moduleValue` of the frame's own module, `set` of FSharp.Core
+    let shadowing = methodOf fixtures "shadowing"
+    Assert.Equal((box 7, "int"), evaluate shadowing [ 4; "abc" ] "moduleValue + set.Length")
 
 [<Fact>]
 let ``generic results are fixed to obj`` () =
@@ -662,4 +674,91 @@ let ``list and array expressions don't use collector structs`` () =
 
             Assert.False(referencesCollector, text)
             Assert.Equal(expected, (queryMethod compiled).Invoke(null, [| box 1; box 3 |]))
+
+/// The Locals window's variables of a frame, with their values read by running each query method.
+let private localsOf (frame: FrameContext) (frameMethod: MethodBase) (args: obj list) argumentsOnly =
+    match session.Value.CompileLocals(frame, argumentsOnly, localsAsParameters = true) with
+    | Error diagnostics -> failwithf "%A" diagnostics
+    | Ok compiled ->
+        let queryType = Assembly.Load(compiled.Assembly).GetType(compiled.TypeName)
+
+        [
+            for local in compiled.Locals ->
+                let value =
+                    queryType.GetMethod(local.MethodName, all).Invoke(null, Array.ofList args)
+
+                local.Name, value, local.ResultType, local.ReadOnlyResult
+        ]
+
+[<Fact>]
+let ``locals of a function: parameters, then locals`` () =
+    let withLocals = methodOf fixtures "withLocals"
+
+    Assert.Equal<(string * obj * string * bool) list>(
+        [ "x", box 3, "int", false; "doubled", box 6, "int", false; "label", box "n6", "string", false ],
+        localsOf (frameOf withLocals) withLocals [ 3; 6; "n6" ] false
+    )
+
+    // Only the parameters, for the call stack's argument values
+    Assert.Equal<string list>([ "x" ], localsOf (frameOf withLocals) withLocals [ 3; 6; "n6" ] true |> List.map (fun (n, _, _, _) -> n))
+
+[<Fact>]
+let ``locals show a tuple parameter as the tuple`` () =
+    let tupled = methodOf fixtures "tupled"
+    let frame = frameOf tupled
+    // pair_0, pair_1 (parameters), z, then the locals pair and total
+    let names = localsOf frame tupled [ 1; "a"; 2; (1, "a"); 3 ] false |> List.map (fun (n, _, _, _) -> n)
+    Assert.Equal<string list>([ "z"; "pair"; "total" ], names)
+
+[<Fact>]
+let ``locals of a member: this first, the class's fields under it`` () =
+    let deposit = methodOf typeof<EvalFixtures.Account> "Deposit"
+    let names = localsOf (frameOf deposit) deposit [ EvalFixtures.Account "ann"; 5 ] false |> List.map (fun (n, _, _, _) -> n)
+    Assert.Equal<string list>([ "this"; "amount" ], names)
+
+[<Fact>]
+let ``locals of a closure and a state machine are flattened`` () =
+    let closure = EvalFixtures.makeClosure ()
+    let invoke = closure.GetType().GetMethod("Invoke", [| typeof<int> |])
+
+    Assert.Equal<(string * obj * string * bool) list>(
+        [ "x", box 1, "int", false; "captured", box 5, "int", false ],
+        localsOf (frameOf invoke) invoke [ closure; 1 ] false
+    )
+
+    let moveNext, machine = stateMachine fixtures "taskSum" [ "x", box 3; "doubled", box 6 ]
+    let names = localsOf (frameOf moveNext) moveNext [ machine; "n6" ] false |> List.map (fun (n, _, _, _) -> n)
+    Assert.Equal<string list>([ "x"; "doubled"; "label" ], names)
+
+    let moveNext, machine =
+        stateMachine fixtures "DepositLater" [ "this", box (EvalFixtures.Account "ann"); "amount", box 5 ]
+
+    let names =
+        localsOf (frameOf moveNext) moveNext (machine :: localDefaults moveNext) false
+        |> List.map (fun (n, _, _, _) -> n)
+
+    Assert.Equal<string list>([ "this"; "amount" ], List.truncate 2 names)
+
+[<Fact>]
+let ``locals start with the debugger's aliases`` () =
+    IntrinsicMethods.Exception <- InvalidOperationException "boom"
+    let add = methodOf fixtures "add"
+
+    let frame =
+        { frameOf add with
+            Aliases =
+                [
+                    {
+                        Name = "$exception"
+                        Kind = AliasKind.Exception
+                        TypeName = typeof<InvalidOperationException>.AssemblyQualifiedName
+                    }
+                ]
+        }
+
+    let locals = localsOf frame add [ 1; 2 ] false
+    Assert.Equal<string list>([ "$exception"; "x"; "y" ], locals |> List.map (fun (n, _, _, _) -> n))
+    let _, value, ty, _ = List.head locals
+    Assert.Equal("boom", (value :?> exn).Message)
+    Assert.Equal("System.InvalidOperationException", ty)
 
