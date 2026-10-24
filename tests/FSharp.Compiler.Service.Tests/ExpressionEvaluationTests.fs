@@ -53,6 +53,11 @@ module EvalFixtures =
 
     let pairUp (x: 'a) (n: int) = (x, n)
 
+    let largest (xs: 'T list) = List.max xs
+
+    type Bag<'T when 'T: equality>(items: 'T list) =
+        member _.Has(x: 'T) = List.contains x items
+
     let countUp (limit: int) =
         seq {
             for i in 1..limit do
@@ -386,7 +391,7 @@ let ``an alias of a type the session can't find reads as obj`` () =
 let ``generic method frames`` () =
     let pairUp = methodOf fixtures "pairUp"
     let evaluate = evaluateGeneric [] [ typeof<string> ] pairUp [ "hi"; 2 ]
-    Assert.Equal((box ("hi", 3), "('a * int)"), evaluate "(x, n + 1)")
+    Assert.Equal((box ("hi", 3), "'a * int"), evaluate "(x, n + 1)")
     Assert.Equal((box "String", "string"), evaluate "typeof<'a>.Name")
 
 [<Fact>]
@@ -394,7 +399,7 @@ let ``generic class frames`` () =
     let boxType = typedefof<EvalFixtures.Box<_>>
     let get = methodOf boxType "Get"
     let evaluate = evaluateGeneric [ typeof<string> ] [] get [ EvalFixtures.Box "v"; 2 ]
-    Assert.Equal((box ("v", 2), "('T * int)"), evaluate "(value, n)")
+    Assert.Equal((box ("v", 2), "'T * int"), evaluate "(value, n)")
     Assert.Equal((box "v!", "string"), evaluate "string this.Value + \"!\"")
     Assert.Equal((box [ "v"; "v" ], "'T list"), evaluate "[ 1..n ] |> List.map (fun _ -> value)")
 
@@ -404,7 +409,7 @@ let ``generic methods of generic classes`` () =
     let f = fun (s: string) -> s.Length
 
     Assert.Equal(
-        (box (1, "v"), "('U * 'T)"),
+        (box (1, "v"), "'U * 'T"),
         evaluateGeneric [ typeof<string> ] [ typeof<int> ] map [ EvalFixtures.Box "v"; f ] "(f value, value)"
     )
 
@@ -499,9 +504,9 @@ let ``trailing format specifiers are split off`` () =
     Assert.Equal(("string", [ "nq" ]), specifiers "\"a, h\", nq")
     Assert.Equal(("int list", [ "view(simple)" ]), specifiers "[ x, y ] |> List.map fst, view(simple)")
     // Not specifiers: a tuple, and a tuple in parentheses
-    Assert.Equal(("(int * int)", []), specifiers "x, y")
-    Assert.Equal(("(int * int)", []), specifiers "(x, y)")
-    Assert.Equal((box (3, 4), "(int * int)"), evaluate add [ 3; 4 ] "x, y")
+    Assert.Equal(("int * int", []), specifiers "x, y")
+    Assert.Equal(("int * int", []), specifiers "(x, y)")
+    Assert.Equal((box (3, 4), "int * int"), evaluate add [ 3; 4 ] "x, y")
 
 [<Fact>]
 let ``result properties`` () =
@@ -604,3 +609,22 @@ let ``diagnostics are positioned in the expression text`` () =
 
     let frame = { frameOf add with Aliases = [ objectId ] }
     Assert.Equal((1, 5, 1, 19), rangeOf (session.Value.CompileExpression(frame, "$1 + undefinedThing")))
+
+[<Fact>]
+let ``F# constraints of generic frames`` () =
+    // 'T: comparison, which IL does not record
+    let largest = methodOf fixtures "largest"
+
+    Assert.Equal(
+        (box "c", "'T"),
+        evaluateGeneric [] [ typeof<string> ] largest [ [ "a"; "c"; "b" ] ] "List.max xs"
+    )
+
+    // 'T: equality on a class
+    let has = methodOf typedefof<EvalFixtures.Bag<_>> "Has"
+
+    Assert.Equal(
+        (box true, "bool"),
+        evaluateGeneric [ typeof<int> ] [] has [ EvalFixtures.Bag [ 1; 2 ]; 2 ] "List.contains x items && x = x"
+    )
+

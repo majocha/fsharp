@@ -1182,15 +1182,43 @@ type EvaluationSession(tcConfig: TcConfig, tcGlobals: TcGlobals.TcGlobals, tcImp
                 mkRefForNestedILTypeDef dllInfo.ILScopeRef (enclosing |> List.take (enclosing.Length - 1), declaringType)
 
             // The frame's type parameters, class ones first (as IL numbers them), become rigid
-            // typars the expression can name and that `<>m0` is generic over.
-            let classTypars =
-                declaringType.GenericParams
-                |> List.map (fun p -> Construct.NewRigidTypar p.Name m)
+            // typars the expression can name and that `<>m0` is generic over. When the frame's
+            // method is an F# value (a module function or a member), they are copies of its
+            // typars, so they keep the F# constraints IL does not record (comparison, equality,
+            // member constraints); a member's typars are its class's and then its own.
+            let typarCount = declaringType.GenericParams.Length + methodDef.GenericParams.Length
 
-            let methodTypars =
-                methodDef.GenericParams |> List.map (fun p -> Construct.NewRigidTypar p.Name m)
+            let frameVal =
+                match List.tryLast entities with
+                | Some entity when typarCount > 0 && entities.Length = enclosing.Length ->
+                    // A module's values are in its own table; a type's members on the type.
+                    let candidates =
+                        if entity.IsModuleOrNamespace then
+                            Seq.toList entity.ModuleOrNamespaceType.AllValsAndMembers
+                        else
+                            entity.MembersOfFSharpTyconSorted |> List.map _.Deref
 
-            let frameTypars = classTypars @ methodTypars
+                    candidates
+                    |> List.tryFind (fun v ->
+                        v.Typars.Length = typarCount
+                        && v.CompiledName g.CompilerGlobalState = methodDef.Name)
+                | _ -> None
+
+            let frameTypars =
+                match frameVal with
+                | Some v ->
+                    let copies = copyTypars false v.Typars
+                    let inst = mkTyparInst v.Typars (copies |> List.map mkTyparTy)
+
+                    for copy, original in List.zip copies v.Typars do
+                        copy.SetConstraints(instTyparConstraints inst original.Constraints)
+
+                    copies
+                | None ->
+                    (declaringType.GenericParams @ methodDef.GenericParams)
+                    |> List.map (fun p -> Construct.NewRigidTypar p.Name m)
+
+            let classTypars = List.take declaringType.GenericParams.Length frameTypars
             let frameTinst = frameTypars |> List.map mkTyparTy
 
             let importType ty =
@@ -1456,9 +1484,9 @@ type EvaluationSession(tcConfig: TcConfig, tcGlobals: TcGlobals.TcGlobals, tcImp
                 ]
 
             // In a generic frame the checker sees the frame's typars as free in `<>m0` until
-            // `bindFrameValues` makes it generic over them, so its scope errors (FS3188) wait for
+            // `bindFrameValues` makes it generic over them, so its scope errors (FS3187, FS3188) wait for
             // the post-inference checks rerun on the rewritten tree.
-            let deferredErrors = if frameTypars.IsEmpty then [] else [ 3188 ]
+            let deferredErrors = if frameTypars.IsEmpty then [] else [ 3187; 3188 ]
 
             let! tcState, topAttrs, implFile, denv =
                 withDiagnosticsIgnoring deferredErrors BuildPhase.TypeCheck (fun () ->
@@ -1569,8 +1597,8 @@ type EvaluationSession(tcConfig: TcConfig, tcGlobals: TcGlobals.TcGlobals, tcImp
 
             let resultType =
                 match checkedBody with
-                | Some(_, ty) -> NicePrint.prettyStringOfTy denv ty
-                | None -> NicePrint.prettyStringOfTy denv (snd (stripFunTy g queryVal.Type))
+                | Some(_, ty) -> NicePrint.prettyStringOfTyNoCx denv ty
+                | None -> NicePrint.prettyStringOfTyNoCx denv (snd (stripFunTy g queryVal.Type))
 
             // Variables an assignment can target: the frame's values, fields of `this`, and the
             // user's Immediate-window variables.
