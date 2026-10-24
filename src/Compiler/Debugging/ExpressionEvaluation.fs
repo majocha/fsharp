@@ -1651,7 +1651,32 @@ type EvaluationSession(tcConfig: TcConfig, tcGlobals: TcGlobals.TcGlobals, tcImp
                         CreateIlxAssemblyGenerator(tcConfig, tcImports, g, tcVal, tcState.Ccu)
 
                     let codegen =
-                        GenerateIlxCode(IlWriteBackend, false, tcConfig, topAttrs, optimized, QueryTypeName, ilxGenerator)
+                        // As GenerateIlxCode, but without lowering list and array expressions to
+                        // collector structs: the debugger's IL interpreter passes a struct local to a
+                        // call by copy, so `[ 1 .. 3 ]` would come out empty. They become calls into
+                        // FSharp.Core over sequence objects instead.
+                        let options: IlxGenOptions =
+                            {
+                                generateFilterBlocks = tcConfig.generateFilterBlocks
+                                emitConstantArraysUsingStaticDataBlobs = true
+                                workAroundReflectionEmitBugs = false
+                                generateDebugSymbols = false
+                                fragName = QueryTypeName
+                                localOptimizationsEnabled = tcConfig.optSettings.LocalOptimizationsEnabled
+                                testFlagEmitFeeFeeAs100001 = false
+                                mainMethodInfo = None
+                                ilxBackend = IlWriteBackend
+                                fsiMultiAssemblyEmit = false
+                                useReflectionFreeCodeGen = false
+                                isInteractive = false
+                                isInteractiveItExpr = false
+                                alwaysCallVirt = tcConfig.alwaysCallVirt
+                                parallelIlxGenEnabled = false
+                                alwaysInline = tcConfig.alwaysInline
+                                lowerComputedCollections = false
+                            }
+
+                        ilxGenerator.GenerateCode(options, optimized, topAttrs.assemblyAttrs, topAttrs.netModuleAttrs)
 
                     // The frame's class type parameters move from `<>m0` to `<>x`, as the debugger
                     // instantiates the query class like the frame's: IL numbers class type parameters

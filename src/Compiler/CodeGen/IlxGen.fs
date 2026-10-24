@@ -281,6 +281,11 @@ type IlxGenOptions =
         parallelIlxGenEnabled: bool
 
         alwaysInline: bool
+
+        /// Lower list and array expressions ([start..finish], [ for … ]) to loops filling FSharp.Core's
+        /// ListCollector/ArrayCollector structs. The debugger's expression evaluator turns it off: the
+        /// debugger runs its queries with an IL interpreter that passes struct locals to calls by copy.
+        lowerComputedCollections: bool
     }
 
 /// Compilation environment for compiling a fragment of an assembly
@@ -3277,7 +3282,7 @@ and GenExprPreSteps (cenv: cenv) (cgbuf: CodeGenBuffer) eenv expr sequel =
         //ProcessDebugPointForExpr cenv cgbuf expr
 
         let lowering =
-            if compileSequenceExpressions then
+            if compileSequenceExpressions && cenv.options.lowerComputedCollections then
                 let ilTyForTy ty = GenType cenv expr.Range eenv.tyenv ty
                 LowerComputedCollectionExpressions.LowerComputedListOrArrayExpr cenv.tcVal g cenv.amap ilTyForTy expr
             else

@@ -642,3 +642,24 @@ let ``frame values whose type has no F# view are left out`` () =
     match compile frameMethod "r" with
     | Ok _ -> failwith "expected r not to be in scope"
     | Error diagnostics -> Assert.Contains(diagnostics, fun d -> d.Number = 39)
+
+[<Fact>]
+let ``list and array expressions don't use collector structs`` () =
+    // The debugger's IL interpreter passes a struct local to a call by copy: a ListCollector filled
+    // through `ldloca` would stay empty there.
+    let add = methodOf fixtures "add"
+
+    for text, expected in [ "[ x .. y ]", box [ 1; 2; 3 ]; "[| for i in 1 .. y -> i * x |]", box [| 1; 2; 3 |] ] do
+        match compileWith false add text with
+        | Error diagnostics -> failwithf "%A" diagnostics
+        | Ok compiled ->
+            let referencesCollector =
+                use pe = new System.Reflection.PortableExecutable.PEReader(new MemoryStream(compiled.Assembly))
+                let md = pe.GetMetadataReader()
+
+                md.TypeReferences
+                |> Seq.exists (fun h -> (md.GetString (md.GetTypeReference h).Name).Contains "Collector")
+
+            Assert.False(referencesCollector, text)
+            Assert.Equal(expected, (queryMethod compiled).Invoke(null, [| box 1; box 3 |]))
+

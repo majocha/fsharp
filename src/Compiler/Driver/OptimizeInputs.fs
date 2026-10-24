@@ -603,6 +603,7 @@ let GenerateIlxCode
             alwaysCallVirt = tcConfig.alwaysCallVirt
             parallelIlxGenEnabled = tcConfig.parallelIlxGen
             alwaysInline = tcConfig.alwaysInline
+            lowerComputedCollections = true
         }
 
     ilxGenerator.GenerateCode(ilxGenOpts, optimizedImpls, topAttrs.assemblyAttrs, topAttrs.netModuleAttrs)

@@ -64,6 +64,9 @@ type internal IlxGenOptions =
 
         /// Indicates if inline functions are being inlined or emitted as calls
         alwaysInline: bool
+
+        /// Lower list and array expressions to loops filling FSharp.Core's collector structs
+        lowerComputedCollections: bool
     }
 
 /// The results of the ILX compilation of one fragment of an assembly
