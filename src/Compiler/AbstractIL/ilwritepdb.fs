@@ -153,6 +153,8 @@ type PdbData =
         TableRowCounts: int[]
     }
 
+type InMemorySourceDocument = { DocumentName: string; Text: string }
+
 type BinaryChunk = { size: int32; addr: int32 }
 
 type idd =
@@ -175,17 +177,18 @@ type HashAlgorithm =
 let guidSha1 = Guid("ff1816ec-aa5e-4d10-87f7-6f4963833460")
 let guidSha2 = Guid("8829d00f-11b8-4213-878b-770e8597ac16")
 
+let checkSumOfStream (stream: Stream) (checksumAlgorithm: HashAlgorithm) =
+    let guid, alg =
+        match checksumAlgorithm with
+        | HashAlgorithm.Sha1 -> guidSha1, SHA1.Create() :> System.Security.Cryptography.HashAlgorithm
+        | HashAlgorithm.Sha256 -> guidSha2, SHA256.Create() :> System.Security.Cryptography.HashAlgorithm
+
+    guid, alg.ComputeHash stream
+
 let checkSum (url: string) (checksumAlgorithm: HashAlgorithm) =
     try
         use file = FileSystem.OpenFileForReadShim(url)
-
-        let guid, alg =
-            match checksumAlgorithm with
-            | HashAlgorithm.Sha1 -> guidSha1, SHA1.Create() :> System.Security.Cryptography.HashAlgorithm
-            | HashAlgorithm.Sha256 -> guidSha2, SHA256.Create() :> System.Security.Cryptography.HashAlgorithm
-
-        let checkSum = alg.ComputeHash file
-        Some(guid, checkSum)
+        Some(checkSumOfStream file checksumAlgorithm)
     with _ ->
         None
 
@@ -348,6 +351,7 @@ type PortablePdbGenerator
     (
         embedAllSource: bool,
         embedSourceList: string list,
+        inMemorySources: Map<string, InMemorySourceDocument>,
         sourceLink: string,
         checksumAlgorithm,
         info: PdbData,
@@ -364,6 +368,14 @@ type PortablePdbGenerator
         info.Documents |> Array.sortBy (fun d -> PathMap.apply pathMap d.File)
 
     let metadata = MetadataBuilder()
+
+    let inMemorySourceBytes =
+        inMemorySources |> Map.map (fun _ source -> Encoding.UTF8.GetBytes source.Text)
+
+    let documentName (file: string) =
+        match inMemorySources.TryFind file with
+        | Some source -> source.DocumentName
+        | None -> file
 
     let serializeDocumentName (name: string) =
         let name = PathMap.apply pathMap name
@@ -406,33 +418,41 @@ type PortablePdbGenerator
     /// </summary>
     let sourceCompressionThreshold = 200
 
+    let sourceBlob (stream: Stream) =
+        let length64 = stream.Length
+
+        if length64 > int64 Int32.MaxValue then
+            raise (IOException("File is too long"))
+
+        let builder = new BlobBuildingStream()
+        let length = int length64
+
+        if length < sourceCompressionThreshold then
+            builder.WriteInt32 0
+            builder.TryWriteBytes(stream, length) |> ignore
+        else
+            builder.WriteInt32 length
+            use deflater = new DeflateStream(builder, CompressionMode.Compress, true)
+            stream.CopyTo deflater
+
+        builder.ToImmutableArray()
+
+    let documentCheckSum (file: string) =
+        match inMemorySourceBytes.TryFind file with
+        | Some bytes -> Some(checkSumOfStream (new MemoryStream(bytes)) checksumAlgorithm)
+        | None -> checkSum file checksumAlgorithm
+
     let includeSource (file: string) =
         let isInList =
             embedSourceList
             |> List.exists (fun f -> String.Compare(file, f, StringComparison.OrdinalIgnoreCase) = 0)
 
-        if not embedAllSource && not isInList || not (FileSystem.FileExistsShim file) then
-            None
-        else
+        match inMemorySourceBytes.TryFind file with
+        | Some bytes -> Some(sourceBlob (new MemoryStream(bytes)))
+        | None when not embedAllSource && not isInList || not (FileSystem.FileExistsShim file) -> None
+        | None ->
             use stream = FileSystem.OpenFileForReadShim(file)
-
-            let length64 = stream.Length
-
-            if length64 > int64 Int32.MaxValue then
-                raise (IOException("File is too long"))
-
-            let builder = new BlobBuildingStream()
-            let length = int length64
-
-            if length < sourceCompressionThreshold then
-                builder.WriteInt32 0
-                builder.TryWriteBytes(stream, length) |> ignore
-            else
-                builder.WriteInt32 length
-                use deflater = new DeflateStream(builder, CompressionMode.Compress, true)
-                stream.CopyTo deflater
-
-            Some(builder.ToImmutableArray())
+            Some(sourceBlob stream)
 
     // Build Document table in deterministic order
     let documentIndex =
@@ -445,10 +465,10 @@ type PortablePdbGenerator
 
         for doc in docsSorted do
             let handle =
-                match checkSum doc.File checksumAlgorithm with
+                match documentCheckSum doc.File with
                 | Some(hashAlg, checkSum) ->
                     let dbgInfo =
-                        (serializeDocumentName doc.File,
+                        (serializeDocumentName (documentName doc.File),
                          metadata.GetOrAddGuid hashAlg,
                          metadata.GetOrAddBlob(checkSum.ToImmutableArray()),
                          metadata.GetOrAddGuid corSymLanguageTypeId)
@@ -467,7 +487,7 @@ type PortablePdbGenerator
                     dbgInfo
                 | None ->
                     let dbgInfo =
-                        (serializeDocumentName doc.File,
+                        (serializeDocumentName (documentName doc.File),
                          metadata.GetOrAddGuid(Guid.Empty),
                          metadata.GetOrAddBlob(ImmutableArray<byte>.Empty),
                          metadata.GetOrAddGuid corSymLanguageTypeId)
@@ -890,6 +910,7 @@ type PortablePdbGenerator
 let generatePortablePdb
     (embedAllSource: bool)
     (embedSourceList: string list)
+    (inMemorySources: Map<string, InMemorySourceDocument>)
     (sourceLink: string)
     checksumAlgorithm
     (info: PdbData)
@@ -901,6 +922,7 @@ let generatePortablePdb
         PortablePdbGenerator(
             embedAllSource,
             embedSourceList,
+            inMemorySources,
             sourceLink,
             checksumAlgorithm,
             info,

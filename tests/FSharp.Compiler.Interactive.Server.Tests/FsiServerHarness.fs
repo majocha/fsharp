@@ -281,7 +281,7 @@ type FsiServerHarness
     member this.Initialize() =
         this.Request<InitializeResult> Methods.Initialize
 
-    static member ExecuteParams(code: string, ?sourcePath: string, ?startLine: int) : ExecuteRequest =
+    static member ExecuteParams(code: string, ?sourcePath: string, ?startLine: int, ?debug: bool) : ExecuteRequest =
         {
             code = code
             sourcePath = Option.toObj sourcePath
@@ -289,13 +289,14 @@ type FsiServerHarness
                 match startLine with
                 | Some line -> Nullable line
                 | None -> Nullable()
+            debug = defaultArg debug false
         }
 
     /// Submit one interaction and return the structured result.
-    member this.Execute(code: string, ?sourcePath: string, ?startLine: int, ?timeout: TimeSpan) =
+    member this.Execute(code: string, ?sourcePath: string, ?startLine: int, ?debug: bool, ?timeout: TimeSpan) =
         this.Request<ExecutionResult>(
             Methods.Execute,
-            FsiServerHarness.ExecuteParams(code, ?sourcePath = sourcePath, ?startLine = startLine),
+            FsiServerHarness.ExecuteParams(code, ?sourcePath = sourcePath, ?startLine = startLine, ?debug = debug),
             ?timeout = timeout
         )
 

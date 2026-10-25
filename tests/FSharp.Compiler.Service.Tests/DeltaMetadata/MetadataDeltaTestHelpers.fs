@@ -119,6 +119,7 @@ module internal MetadataDeltaTestHelpers =
           embeddedPDB = false
           embedAllSource = false
           embedSourceList = []
+          inMemorySources = Map.empty
           allGivenSources = []
           sourceLink = ""
           checksumAlgorithm = ILPdbWriter.HashAlgorithm.Sha256

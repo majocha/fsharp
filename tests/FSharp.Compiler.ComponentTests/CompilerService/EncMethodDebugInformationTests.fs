@@ -558,6 +558,7 @@ module private Plumbing =
                 embeddedPDB = false
                 embedAllSource = false
                 embedSourceList = []
+                inMemorySources = Map.empty
                 allGivenSources = []
                 sourceLink = ""
                 checksumAlgorithm = HashAlgorithm.Sha256

@@ -3866,6 +3866,7 @@ type options =
      embeddedPDB: bool
      embedAllSource: bool
      embedSourceList: string list
+     inMemorySources: Map<string, InMemorySourceDocument>
      allGivenSources: ILSourceDocument list
      sourceLink: string
      checksumAlgorithm: HashAlgorithm
@@ -4048,6 +4049,7 @@ let writeBinaryAux (stream: Stream, options: options, modul, normalizeAssemblyRe
                     generatePortablePdb
                         options.embedAllSource
                         options.embedSourceList
+                        options.inMemorySources
                         options.sourceLink
                         options.checksumAlgorithm
                         pdbData

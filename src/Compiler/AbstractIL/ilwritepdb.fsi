@@ -98,6 +98,10 @@ val sizeof_IMAGE_DEBUG_DIRECTORY: System.Int32
 
 val logDebugInfo: string -> PdbData -> unit
 
+/// Source text to embed in the PDB for a document that exists only in memory. The PDB records it
+/// under DocumentName rather than under the file name the IL refers to it by.
+type InMemorySourceDocument = { DocumentName: string; Text: string }
+
 type BinaryChunk = { size: int32; addr: int32 }
 
 type idd =
@@ -116,6 +120,7 @@ type HashAlgorithm =
 val generatePortablePdb:
     embedAllSource: bool ->
     embedSourceList: string list ->
+    inMemorySources: Map<string, InMemorySourceDocument> ->
     sourceLink: string ->
     checksumAlgorithm: HashAlgorithm ->
     info: PdbData ->

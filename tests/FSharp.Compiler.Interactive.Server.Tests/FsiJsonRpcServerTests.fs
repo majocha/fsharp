@@ -416,6 +416,28 @@ let ``keeps serving after a failed interaction`` () =
         Assert.True(session.WaitForOutput "val it: int = 42", describe session result))
 
 //-------------------------------------------------------------------------
+// Debugging
+//-------------------------------------------------------------------------
+
+let private jitOptimizerDisabledScript =
+    """let jitOptimizerDisabled =
+    System.Reflection.Assembly.GetExecutingAssembly().GetCustomAttributes(typeof<System.Diagnostics.DebuggableAttribute>, false)
+    |> Array.exists (fun a -> (a :?> System.Diagnostics.DebuggableAttribute).IsJITOptimizerDisabled)"""
+
+[<Fact>]
+let ``a debug submission is compiled for the debugger and later ones are not`` () =
+    withInitializedSession (fun session ->
+        // The session keeps fsi's optimizing defaults; debug overrides them for its own submission
+        // only. With no debugger attached, the break it injects must not stop the session.
+        let jitOptimizerDisabled debug =
+            let result = session.Execute(jitOptimizerDisabledScript, debug = debug)
+            Assert.True(succeeded result, describe session result)
+            (result.values |> Array.find (fun value -> value.name = "jitOptimizerDisabled")).value
+
+        Assert.Equal("true", jitOptimizerDisabled true)
+        Assert.Equal("false", jitOptimizerDisabled false))
+
+//-------------------------------------------------------------------------
 // Files and search paths
 //-------------------------------------------------------------------------
 

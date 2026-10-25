@@ -17,6 +17,8 @@ type options =
         embeddedPDB: bool
         embedAllSource: bool
         embedSourceList: string list
+        /// Documents with no file on disk whose source is embedded in the PDB, keyed by the file name the IL uses.
+        inMemorySources: Map<string, InMemorySourceDocument>
         allGivenSources: ILSourceDocument list
         sourceLink: string
         checksumAlgorithm: HashAlgorithm

@@ -5,6 +5,11 @@ namespace Scripting
 open Xunit
 
 open System
+open System.Reflection.Metadata
+open System.Reflection.Metadata.Ecma335
+open Internal.Utilities
+open FSharp.Compiler.AbstractIL
+open FSharp.Compiler.AbstractIL.IL
 open FSharp.Test.Compiler
 open FSharp.Test.ScriptHelpers
 open FSharp.Compiler.Interactive.Shell
@@ -376,12 +381,15 @@ asm.GetCustomAttributes(typeof<System.Diagnostics.DebuggableAttribute>, false)
             Assert.True(not (isNull field), $"Could not find private field '{fieldName}' on {ownerName}")
             field.GetValue(instance)
 
+        let private scriptingSymbolsPath (session: FSharpScript) =
+            let dynamicCompiler = getPrivateField session.Fsi "fsiDynamicCompiler" "FsiEvaluationSession"
+            getPrivateField dynamicCompiler "scriptingSymbolsPath" "FsiDynamicCompiler" :?> string
+
         let private assertPdbArtifact debugOption expectPdb =
             let args: string array = [| "--multiemit+"; debugOption |]
             use session = new FSharpScript(additionalArgs = args)
 
-            let dynamicCompiler = getPrivateField session.Fsi "fsiDynamicCompiler" "FsiEvaluationSession"
-            let symbolsPath = getPrivateField dynamicCompiler "scriptingSymbolsPath" "FsiDynamicCompiler" :?> string
+            let symbolsPath = scriptingSymbolsPath session
             let _, errors = session.Eval("let submittedValue = 1")
 
             Assert.Empty(errors)
@@ -398,9 +406,83 @@ asm.GetCustomAttributes(typeof<System.Diagnostics.DebuggableAttribute>, false)
         let ``multi-emit PDB artifact is absent with --debug-`` () =
             assertPdbArtifact "--debug-" false
 
+        // .NET Core takes a submission's symbols from memory; only .NET Framework needs the file.
         [<Fact>]
-        let ``multi-emit PDB artifact is present with --debug+`` () =
+        let ``multi-emit PDB artifact is written with --debug+ only on .NET Framework`` () =
+#if NETCOREAPP
+            assertPdbArtifact "--debug+" false
+#else
             assertPdbArtifact "--debug+" true
+#endif
+
+        let private throwingFrameScript =
+            "let frame =
+    try failwith \"boom\"
+    with e -> System.Diagnostics.StackTrace(e, true).GetFrame 0
+frame.GetFileName(), frame.GetFileLineNumber()"
+
+        [<FSharp.Test.FactForNETCOREAPP>]
+        let ``each submission records its source under its own document name, with lines from in-memory symbols`` () =
+            let args: string array = [| "--multiemit+"; "--debug+" |]
+            use session = new FSharpScript(additionalArgs = args)
+            let symbolsPath = scriptingSymbolsPath session
+
+            let throwingFrame () =
+                match session.Eval throwingFrameScript with
+                | Result.Ok(Some v), [||] -> v.ReflectionValue :?> string * int
+                | result, errors -> failwith $"Unexpected evaluation result %A{result}, errors %A{errors}"
+
+            let firstFile, firstLine = throwingFrame ()
+            let secondFile, _ = throwingFrame ()
+
+            Assert.Equal(2, firstLine)
+            Assert.StartsWith(symbolsPath, firstFile, StringComparison.Ordinal)
+            Assert.EndsWith("input.fsx", firstFile, StringComparison.Ordinal)
+            Assert.NotEqual<string>(firstFile, secondFile)
+
+        [<Fact>]
+        let ``in-memory source is embedded and checksummed under its document name`` () =
+            let text = "let x = 1
+"
+            let documentName = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "1", "input.fsx")
+
+            let info: ILPdbWriter.PdbData =
+                {
+                    EntryPoint = None
+                    Timestamp = 0
+                    ModuleID = Array.zeroCreate 16
+                    Documents = [| ILSourceDocument.Create(None, None, None, "input.fsx") |]
+                    Methods = [||]
+                    TableRowCounts = Array.zeroCreate MetadataTokens.TableCount
+                }
+
+            let inMemorySources =
+                Map.ofList [ "input.fsx", ({ DocumentName = documentName; Text = text }: ILPdbWriter.InMemorySourceDocument) ]
+
+            let _, _, stream, _, _ =
+                ILPdbWriter.generatePortablePdb false [] inMemorySources "" ILPdbWriter.HashAlgorithm.Sha256 info PathMap.empty [] Map.empty
+
+            stream.Position <- 0L
+            use provider = MetadataReaderProvider.FromPortablePdbStream stream
+            let reader = provider.GetMetadataReader()
+            let handle = reader.Documents |> Seq.exactlyOne
+            let document = reader.GetDocument handle
+            let textBytes = Text.Encoding.UTF8.GetBytes text
+
+            Assert.Equal(documentName, reader.GetString document.Name)
+            Assert.Equal(BitConverter.ToString(Security.Cryptography.SHA256.Create().ComputeHash textBytes), BitConverter.ToString(reader.GetBlobBytes document.Hash))
+
+            let embeddedSourceKind = Guid("0e8a571b-6926-466e-b4ad-8ab04611f5fe")
+
+            let embedded =
+                reader.GetCustomDebugInformation(DocumentHandle.op_Implicit handle : EntityHandle)
+                |> Seq.map reader.GetCustomDebugInformation
+                |> Seq.find (fun info -> reader.GetGuid info.Kind = embeddedSourceKind)
+                |> fun info -> reader.GetBlobBytes info.Value
+
+            // A leading zero marks a blob too small to be worth compressing.
+            Assert.Equal(0, BitConverter.ToInt32(embedded, 0))
+            Assert.Equal(text, Text.Encoding.UTF8.GetString(embedded, 4, embedded.Length - 4))
 
     // https://github.com/dotnet/fsharp/issues/14454
     [<FSharp.Test.FactForNETCOREAPP>]

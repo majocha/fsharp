@@ -210,6 +210,12 @@ type FsiEvaluationSession =
         code: string * scriptFileName: string * ?cancellationToken: CancellationToken ->
             Choice<FsiValue option, exn> * FSharpDiagnostic[]
 
+    /// As EvalInteractionNonThrowing. With debug, the code is compiled to be stepped through in a debugger,
+    /// whatever the session's own settings, and breaks into an attached debugger before its first breakable line.
+    member internal EvalInteractionNonThrowing:
+        code: string * scriptFileName: string * debug: bool * cancellationToken: CancellationToken ->
+            Choice<FsiValue option, exn> * FSharpDiagnostic[]
+
     /// Execute the given script. Stop on first error, discarding the rest
     /// of the script. Errors are sent to the output writer, a 'true' return value indicates there
     /// were no errors overall. Execution is performed on the 'Run()' thread.

@@ -1825,6 +1825,11 @@ type internal FsiDynamicCompiler
 
     let dynamicAssemblies = ResizeArray<Assembly>()
 
+    let mutable inMemorySources: Map<string, ILPdbWriter.InMemorySourceDocument> =
+        Map.empty
+
+    let mutable inMemorySourceCount = 0
+
     let mutable hasDelayedDependencyManagerText = false
 
     let mutable delayedReferences = ResizeArray<_>()
@@ -1977,6 +1982,7 @@ type internal FsiDynamicCompiler
                 embeddedPDB = false
                 embedAllSource = false
                 embedSourceList = []
+                inMemorySources = inMemorySources
                 allGivenSources = []
                 sourceLink = tcConfig.sourceLink
                 checksumAlgorithm = tcConfig.checksumAlgorithm
@@ -1994,7 +2000,7 @@ type internal FsiDynamicCompiler
 
         let asm =
             match opts.pdbfile, pdbBytes with
-            | Some pdbfile, Some pdbBytes ->
+            | Some pdbfile, Some pdbBytes when not isRunningOnCoreClr ->
                 File.WriteAllBytes(pdbfile, pdbBytes)
 #if FOR_TESTING
                 Directory.CreateDirectory(scriptingSymbolsPath.Value) |> ignore
@@ -2720,17 +2726,56 @@ type internal FsiDynamicCompiler
         let defA = SynModuleDecl.Let(false, [ bindingA ], m, SynModuleDeclLetTrivia.Zero)
         [ defA ]
 
-    // Construct an invisible call to Debugger.Break(), in the specified range
-    member _.CreateDebuggerBreak(m: range) =
-        let breakPath = [ "System"; "Diagnostics"; "Debugger"; "Break" ]
-        let dots = List.replicate (breakPath.Length - 1) m
+    /// Debug info generated while f runs records the code of fileName, which has no file on disk, as text.
+    /// Each call embeds it under its own document name, so a debugger never confuses two submissions.
+    member _.EmbeddingSource(fileName: string, text: string, f: unit -> 'T) =
+        inMemorySourceCount <- inMemorySourceCount + 1
 
-        let methCall =
-            SynExpr.LongIdent(false, SynLongIdent(List.map (mkSynId m) breakPath, dots, List.replicate breakPath.Length None), None, m)
+        let source: ILPdbWriter.InMemorySourceDocument =
+            {
+                DocumentName = Path.Combine(scriptingSymbolsPath, string inMemorySourceCount, Path.GetFileName fileName)
+                Text = text
+            }
+
+        let saved = inMemorySources
+
+        // The IL refers to a file by the path TcGlobals resolves it to.
+        let ilDocumentFile =
+            FileSystem.GetFullFilePathInDirectoryShim tcGlobals.directoryToResolveRelativePaths fileName
+
+        inMemorySources <- saved |> Map.add ilDocumentFile source
+
+        try
+            f ()
+        finally
+            inMemorySources <- saved
+
+    // Construct an invisible 'if Debugger.IsAttached then Debugger.Break()', in the specified range.
+    // Unguarded, Debugger.Break() terminates a .NET process that has no debugger attached.
+    member _.CreateDebuggerBreak(m: range) =
+        let debuggerMember name =
+            let path = [ "System"; "Diagnostics"; "Debugger"; name ]
+            let dots = List.replicate (path.Length - 1) m
+            SynExpr.LongIdent(false, SynLongIdent(List.map (mkSynId m) path, dots, List.replicate path.Length None), None, m)
 
         let args = SynExpr.Const(SynConst.Unit, m)
-        let breakStatement = SynExpr.App(ExprAtomicFlag.Atomic, false, methCall, args, m)
-        SynModuleDecl.Expr(breakStatement, m)
+
+        let breakStatement =
+            SynExpr.App(ExprAtomicFlag.Atomic, false, debuggerMember "Break", args, m)
+
+        let trivia: SynExprIfThenElseTrivia =
+            {
+                IfKeyword = m
+                IsElif = false
+                ThenKeyword = m
+                ElseKeyword = None
+                IfToThenRange = m
+            }
+
+        let guardedBreak =
+            SynExpr.IfThenElse(debuggerMember "IsAttached", breakStatement, None, DebugPointAtBinding.NoneAtInvisible, false, m, trivia)
+
+        SynModuleDecl.Expr(guardedBreak, m)
 
     /// Resolve and register an assembly reference, delaying the actual addition of the reference
     /// to tcImports until a whole set of references has been collected.
@@ -3740,6 +3785,37 @@ type InteractionGroup =
 
     | HashDirectives of hashDirective: ParsedHashDirective list
 
+/// Code compiled while f runs can be stepped through in a debugger, whatever the session's own settings.
+let withDebuggableCode (tcConfigB: TcConfigBuilder) f =
+    let optSettings = tcConfigB.optSettings
+    let onlyEssentialOptimizationData = tcConfigB.onlyEssentialOptimizationData
+    let doDetuple = tcConfigB.doDetuple
+    let doTLR = tcConfigB.doTLR
+    let doFinalSimplify = tcConfigB.doFinalSimplify
+    let emitTailcalls = tcConfigB.emitTailcalls
+    let debuginfo = tcConfigB.debuginfo
+    let portablePDB = tcConfigB.portablePDB
+    let embeddedPDB = tcConfigB.embeddedPDB
+    let jitTracking = tcConfigB.jitTracking
+
+    SetOptimizeSwitch tcConfigB OptionSwitch.Off
+    SetTailcallSwitch tcConfigB OptionSwitch.Off
+    SetDebugSwitch tcConfigB (Some "pdbonly") OptionSwitch.On
+
+    try
+        f ()
+    finally
+        tcConfigB.optSettings <- optSettings
+        tcConfigB.onlyEssentialOptimizationData <- onlyEssentialOptimizationData
+        tcConfigB.doDetuple <- doDetuple
+        tcConfigB.doTLR <- doTLR
+        tcConfigB.doFinalSimplify <- doFinalSimplify
+        tcConfigB.emitTailcalls <- emitTailcalls
+        tcConfigB.debuginfo <- debuginfo
+        tcConfigB.portablePDB <- portablePDB
+        tcConfigB.embeddedPDB <- embeddedPDB
+        tcConfigB.jitTracking <- jitTracking
+
 //----------------------------------------------------------------------------
 // Process one parsed interaction.  This runs on the GUI thread.
 // It might be simpler if it ran on the parser thread.
@@ -4409,7 +4485,7 @@ type FsiInteractionProcessor
             |> fst
         )
 
-    member _.EvalInteraction(ctok, sourceText, scriptFileName, diagnosticsLogger, ?cancellationToken) =
+    member _.EvalInteraction(ctok, sourceText, scriptFileName, diagnosticsLogger, debug, ?cancellationToken) =
         let cancellationToken = defaultArg cancellationToken CancellationToken.None
         use _ = UseBuildPhase BuildPhase.Interactive
         use _ = UseDiagnosticsLogger diagnosticsLogger
@@ -4450,12 +4526,29 @@ type FsiInteractionProcessor
                     run istate value
             | _ -> istate, status
 
-        run currState None |> commitResult
+        let evaluate istate =
+            if tcConfigB.debuginfo && not (FileSystem.FileExistsShim scriptFileName) then
+                fsiDynamicCompiler.EmbeddingSource(scriptFileName, sourceText, (fun () -> run istate None))
+            else
+                run istate None
+
+        if debug then
+            let result =
+                withDebuggableCode tcConfigB (fun () -> evaluate { currState with debugBreak = true })
+                |> commitResult
+
+            // The break is injected before the first breakable line; without one, it must not leak into later submissions.
+            if currState.debugBreak then
+                setCurrState { currState with debugBreak = false }
+
+            result
+        else
+            evaluate currState |> commitResult
 
     member this.EvalScript(ctok, scriptPath, diagnosticsLogger) =
         // Todo: this runs the script as expected but errors are displayed one line to far in debugger
         let sourceText = sprintf "#load @\"%s\" " scriptPath
-        this.EvalInteraction(ctok, sourceText, scriptPath, diagnosticsLogger)
+        this.EvalInteraction(ctok, sourceText, scriptPath, diagnosticsLogger, false)
 
     member _.EvalExpression(ctok, sourceText, scriptFileName, diagnosticsLogger) =
         use _unwind1 = UseBuildPhase BuildPhase.Interactive
@@ -5052,7 +5145,7 @@ type FsiEvaluationSession
         let ctok = AssumeCompilationThreadWithoutEvidence()
         let cancellationToken = defaultArg cancellationToken CancellationToken.None
 
-        fsiInteractionProcessor.EvalInteraction(ctok, code, scriptFileName, diagnosticsLogger, cancellationToken)
+        fsiInteractionProcessor.EvalInteraction(ctok, code, scriptFileName, diagnosticsLogger, false, cancellationToken)
         |> commitResult
         |> ignore
 
@@ -5061,18 +5154,21 @@ type FsiEvaluationSession
         this.EvalInteractionNonThrowing(code, dummyScriptFileName, cancellationToken)
 
     member this.EvalInteractionNonThrowing(code, scriptFileName, ?cancellationToken) =
+        let cancellationToken = defaultArg cancellationToken CancellationToken.None
+        this.EvalInteractionNonThrowing(code, scriptFileName, false, cancellationToken)
+
+    member internal _.EvalInteractionNonThrowing(code, scriptFileName, debug, cancellationToken) =
         // Explanation: When the user of the FsiInteractiveSession object calls this method, the
         // code is parsed, checked and evaluated on the calling thread. This means EvalExpression
         // is not safe to call concurrently.
         let ctok = AssumeCompilationThreadWithoutEvidence()
-        let cancellationToken = defaultArg cancellationToken CancellationToken.None
 
         let errorOptions = TcConfig.Create(tcConfigB, validate = false).diagnosticsOptions
 
         let diagnosticsLogger =
             CompilationDiagnosticLogger("EvalInteraction", errorOptions, eagerFormat)
 
-        fsiInteractionProcessor.EvalInteraction(ctok, code, scriptFileName, diagnosticsLogger, cancellationToken)
+        fsiInteractionProcessor.EvalInteraction(ctok, code, scriptFileName, diagnosticsLogger, debug, cancellationToken)
         |> commitResultNonThrowing errorOptions scriptFileName diagnosticsLogger
 
     member _.EvalScript(filePath) : unit =

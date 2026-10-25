@@ -299,7 +299,7 @@ type internal FsiRpcTarget
         with _ ->
             ()
 
-    let runInteraction (code: string) (scriptPath: string) =
+    let runInteraction (code: string) (scriptPath: string) (debug: bool) =
         let cancellation = new CancellationTokenSource()
 
         lock interruptLock (fun () -> currentCancellation <- cancellation)
@@ -308,7 +308,7 @@ type internal FsiRpcTarget
             values.Clear()
 
             let outcome, diagnostics =
-                evaluateOnEventLoop (fun () -> fsiSession.EvalInteractionNonThrowing(code, scriptPath, cancellation.Token))
+                evaluateOnEventLoop (fun () -> fsiSession.EvalInteractionNonThrowing(code, scriptPath, debug, cancellation.Token))
 
             flushConsole ()
             toExecutionResult outcome diagnostics (values.ToArray()) cancellation.IsCancellationRequested
@@ -380,7 +380,7 @@ type internal FsiRpcTarget
             else
                 request.sourcePath
 
-        queueInteraction (fun () -> runInteraction text scriptPath)
+        queueInteraction (fun () -> runInteraction text scriptPath request.debug)
 
     member _.ExecuteFile(request: ExecuteFileRequest) : Task<ExecutionResult> =
         requireInitialized ()
@@ -388,7 +388,7 @@ type internal FsiRpcTarget
 
         // Routed through #load so that the file joins the session the same way it would from a
         // script, rather than being replayed as anonymous text.
-        queueInteraction (fun () -> runInteraction $"#load {verbatimString request.path}" request.path)
+        queueInteraction (fun () -> runInteraction $"#load {verbatimString request.path}" request.path false)
 
     /// Apply the host's notion of where to look for sources and references, expressed as the
     /// directives a script would use.
@@ -421,7 +421,9 @@ type internal FsiRpcTarget
                 toExecutionResult (Choice1Of2 None) [||] [||] false
             else
                 let previousDirectory = Directory.GetCurrentDirectory()
-                let result = runInteraction (String.Join("\n", directives)) DefaultInteractionName
+
+                let result =
+                    runInteraction (String.Join("\n", directives)) DefaultInteractionName false
 
                 if result.success && not (String.IsNullOrWhiteSpace request.workingDirectory) then
                     try
@@ -431,7 +433,7 @@ type internal FsiRpcTarget
                             workingDirectory = Directory.GetCurrentDirectory()
                         }
                     with e ->
-                        runInteraction $"#silentCd {verbatimString previousDirectory}" DefaultInteractionName
+                        runInteraction $"#silentCd {verbatimString previousDirectory}" DefaultInteractionName false
                         |> ignore
 
                         toExecutionResult (Choice2Of2 e) [||] [||] false

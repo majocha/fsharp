@@ -70,6 +70,12 @@ type ExecuteRequest =
         sourcePath: string
 
         startLine: System.Nullable<int>
+
+        /// <summary>
+        /// Compile this submission to be stepped through in a debugger, whatever the session's own
+        /// settings, and break into an attached debugger before its first breakable line.
+        /// </summary>
+        debug: bool
     }
 
 [<CLIMutable>]

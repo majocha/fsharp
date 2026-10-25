@@ -1150,6 +1150,7 @@ let main6
                             embeddedPDB = false
                             embedAllSource = tcConfig.embedAllSource
                             embedSourceList = tcConfig.embedSourceList
+                            inMemorySources = Map.empty
                             allGivenSources = ilSourceDocs
                             sourceLink = tcConfig.sourceLink
                             checksumAlgorithm = tcConfig.checksumAlgorithm
@@ -1183,6 +1184,7 @@ let main6
                             embeddedPDB = tcConfig.embeddedPDB
                             embedAllSource = tcConfig.embedAllSource
                             embedSourceList = tcConfig.embedSourceList
+                            inMemorySources = Map.empty
                             allGivenSources = ilSourceDocs
                             sourceLink = tcConfig.sourceLink
                             checksumAlgorithm = tcConfig.checksumAlgorithm
