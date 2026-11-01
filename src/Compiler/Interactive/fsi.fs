@@ -2000,7 +2000,7 @@ type internal FsiDynamicCompiler
 
         let asm =
             match opts.pdbfile, pdbBytes with
-            | Some pdbfile, Some pdbBytes when not isRunningOnCoreClr ->
+            | Some pdbfile, Some pdbBytes ->
                 File.WriteAllBytes(pdbfile, pdbBytes)
 #if FOR_TESTING
                 Directory.CreateDirectory(scriptingSymbolsPath.Value) |> ignore

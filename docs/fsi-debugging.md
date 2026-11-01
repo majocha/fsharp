@@ -30,7 +30,7 @@ editor / interactive window  ──►  fsi process  ──►  submission assem
 |---|---|---|
 | Non-optimized IL, no tail calls | `tcConfigB.optSettings`, `emitTailcalls`; read per submission through `TcConfig.Create(tcConfigB)` in `ProcessInputs` | fsi presets `--optimize+ -g --tailcalls+` (search `Preset:` in fsi.fs). |
 | JIT optimizer off | `DebuggableAttribute(DisableOptimizations)` on the submission manifest when local optimizations are off ([#19921](https://github.com/dotnet/fsharp/pull/19921)) | Multi-emit only. With `--multiemit-`, the single dynamic assembly gets its attribute once, at session start. |
-| Symbols | Portable PDB per submission, passed to `Assembly.Load` | On .NET the runtime and the debugger take them from memory; only .NET Framework still gets the file in the session's scripting-symbols temp directory. |
+| Symbols | Portable PDB per submission, passed to `Assembly.Load` and written to the session's scripting-symbols temp directory | Both are needed. The runtime uses the in-memory copy for stack traces. Visual Studio finds no symbols without the file: no breakpoint binds and stepping leaves the submission. |
 | Source | Document on disk, or source embedded in the PDB | See below. |
 | A first stop | `#dbgbreak` / `debug = true` inject `if Debugger.IsAttached then Debugger.Break()` before the first breakable line (`FsiDynamicCompiler.CreateDebuggerBreak`) | The `IsAttached` guard matters: an unguarded `Debugger.Break()` terminates a .NET process with no debugger. |
 
@@ -58,7 +58,6 @@ Not covered:
 Branch `fsi-debugging-prototype` on [majocha/fsharp](https://github.com/majocha/fsharp/tree/fsi-debugging-prototype), based on `main` at `fe180deb55`, implements:
 
 - embedded sources for in-memory documents;
-- no on-disk PDB on .NET;
 - the `debug` field on `fsi/execute`;
 - the guarded break.
 
@@ -67,19 +66,26 @@ Tests:
 - `tests/FSharp.Compiler.ComponentTests/Scripting/Interactive.fs`, module `PortablePdb`:
   - PDB round trip of an in-memory document;
   - unique document names, and line numbers from in-memory symbols, through a stack trace;
-  - the PDB file is written only on .NET Framework.
+  - the PDB file is written unless debug info is off.
 - `tests/FSharp.Compiler.Interactive.Server.Tests/FsiJsonRpcServerTests.fs`, section "Debugging": a debug submission is compiled unoptimized, the next one is not.
+
+Verified by driving Visual Studio 2026 Insiders (18.12) through DTE, in a clean hive, against a JSON-RPC session with `debug = true`:
+
+- the guarded break stops in the submission;
+- code with no file opens from the source embedded in the PDB, on the right lines;
+- code with a `sourcePath` opens the real file, and a breakpoint set there binds;
+- stepping walks the submission's lines, over and into its functions.
+
+Attach with the CoreCLR engine. `Process.Attach()` or an automatic engine choice can leave `Debugger.IsAttached` false, and then the guard silently skips the break.
 
 Not verified:
 
-- A real VS debugger session: whether embedded source is displayed, whether breakpoints bind, and whether stepping works.
-- Whether the break is injected. It cannot be observed without a debugger.
 - The .NET Framework run of the changed tests (only net11.0 was run).
 
 ## Next steps
 
-1. **Try it in VS.** Build fsi from the branch, start it with `--fsi-server-jsonrpc`, attach VS to the reported PID, then `fsi/execute` with `debug = true`.
-2. **Watch and Locals** ([#14572](https://github.com/dotnet/fsharp/issues/14572)). Re-test with `--optimize-` now that #19921 landed. Hypothesis for the Roslyn expression evaluator's `MetadataDecoder` assert: every submission is named `FSI-ASSEMBLY`, distinguished only by a version that counts down (`EmitInMemoryAssembly`). Separately, top-level `let` values are static members of `FSI_000N` types, not locals, so evaluating them needs the right scope.
+1. **Frame names.** VS shows `<Unknown function>` for a submission's `main@`, and inside a function of a later submission it shows `<StartupCode$FSI_0001>.$FSI_0001.main@`, the frame name of a different submission. Line mapping is right, so symbols are found by module while names are resolved against another assembly of the same name. Try a name unique to each submission; `InternalsVisibleTo("FSI-ASSEMBLY-MULTI")` is what ties submissions to one name today.
+2. **Watch and Locals** ([#14572](https://github.com/dotnet/fsharp/issues/14572)). Evaluating a top-level `let` from a submission reports "Internal error in the F# compiler". In the default hive, with the out-of-tree `FSharp.ExpressionEvaluator` extension, its warm-up also fails with `ImportILTypeRef: unexpected local scope`, and VS terminated once on an `InvalidCastException` in Roslyn's `CompilationExtensions.GetType`, reached through that extension's `GetClrLocalVariableQuery`. Hypothesis for the Roslyn failures: every submission is named `FSI-ASSEMBLY-MULTI`, distinguished only by a version that counts down (`EmitInMemoryAssembly`). Separately, top-level `let` values are static members of `FSI_000N` types, not locals, so evaluating them needs the right scope.
 3. **The new VS window (#20565).**
    - "Debug in Interactive" still routes to the legacy window's `Hooks.OnMLSend … DebugSelection`, which that PR no longer registers. Implement it in the new window: read `processId` from the handshake, attach with `Process2.Attach2` and the CoreCLR engine, then send `debug = true`.
    - Carry the source origin with each submission instead of the single pending slot.

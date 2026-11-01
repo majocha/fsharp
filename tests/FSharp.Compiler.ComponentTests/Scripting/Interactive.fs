@@ -406,14 +406,10 @@ asm.GetCustomAttributes(typeof<System.Diagnostics.DebuggableAttribute>, false)
         let ``multi-emit PDB artifact is absent with --debug-`` () =
             assertPdbArtifact "--debug-" false
 
-        // .NET Core takes a submission's symbols from memory; only .NET Framework needs the file.
+        // The runtime reads a submission's symbols from memory, but Visual Studio only finds them in this file.
         [<Fact>]
-        let ``multi-emit PDB artifact is written with --debug+ only on .NET Framework`` () =
-#if NETCOREAPP
-            assertPdbArtifact "--debug+" false
-#else
+        let ``multi-emit PDB artifact is written with --debug+`` () =
             assertPdbArtifact "--debug+" true
-#endif
 
         let private throwingFrameScript =
             "let frame =
