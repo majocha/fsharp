@@ -3043,12 +3043,6 @@ and GenManifestPass3 cenv m =
         else cenv.entrypoint <- Some (false, GetModuleRefAsIdx cenv mref)
     | None -> ()
 
-and newGuid (modul: ILModuleDef) =
-    let n = timestamp
-    let m = hash n
-    let m2 = hash modul.Name
-    [| b0 m; b1 m; b2 m; b3 m; b0 m2; b1 m2; b2 m2; b3 m2; 0xa7uy; 0x45uy; 0x03uy; 0x83uy; b0 n; b1 n; b2 n; b3 n |]
-
 and deterministicGuid (modul: ILModuleDef) =
     let n = 16909060
     let m2 = Seq.sum (Seq.mapi (fun i x -> i + int x) modul.Name) // use a stable hash
@@ -3056,7 +3050,9 @@ and deterministicGuid (modul: ILModuleDef) =
 
 and GetModuleAsRow (cenv: cenv) (modul: ILModuleDef) =
     // Store the generated MVID in the environment (needed for generating debug information)
-    let modulGuid = if cenv.deterministic then deterministicGuid modul else newGuid modul
+    // Random, not derived from the process and the module name: F# Interactive writes many modules with the same
+    // name in one process, and debuggers tell modules apart by MVID.
+    let modulGuid = if cenv.deterministic then deterministicGuid modul else System.Guid.NewGuid().ToByteArray()
     cenv.moduleGuid <- modulGuid
     UnsharedRow
         [| UShort (uint16 0x0)

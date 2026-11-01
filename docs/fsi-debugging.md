@@ -30,9 +30,21 @@ editor / interactive window  ──►  fsi process  ──►  submission assem
 |---|---|---|
 | Non-optimized IL, no tail calls | `tcConfigB.optSettings`, `emitTailcalls`; read per submission through `TcConfig.Create(tcConfigB)` in `ProcessInputs` | fsi presets `--optimize+ -g --tailcalls+` (search `Preset:` in fsi.fs). |
 | JIT optimizer off | `DebuggableAttribute(DisableOptimizations)` on the submission manifest when local optimizations are off ([#19921](https://github.com/dotnet/fsharp/pull/19921)) | Multi-emit only. With `--multiemit-`, the single dynamic assembly gets its attribute once, at session start. |
-| Symbols | Portable PDB per submission, passed to `Assembly.Load` and written to the session's scripting-symbols temp directory | Both are needed. The runtime uses the in-memory copy for stack traces. Visual Studio finds no symbols without the file: no breakpoint binds and stepping leaves the submission. |
+| A unique identity | A random MVID for each module (`GetModuleAsRow` in `ilwrite.fs`) | Debuggers tell modules apart by MVID, and every submission has the same assembly name. See below. |
+| Symbols | Portable PDB per submission | On .NET it is embedded in the assembly and nothing goes to disk; stack traces and Visual Studio both read it from the loaded image. .NET Framework passes the bytes to `Assembly.Load` and writes the file to the session's scripting-symbols temp directory. |
 | Source | Document on disk, or source embedded in the PDB | See below. |
 | A first stop | `#dbgbreak` / `debug = true` inject `if Debugger.IsAttached then Debugger.Break()` before the first breakable line (`FsiDynamicCompiler.CreateDebuggerBreak`) | The `IsAttached` guard matters: an unguarded `Debugger.Break()` terminates a .NET process with no debugger. |
+
+### Why each submission needs its own MVID
+
+The MVID used to be derived from a timestamp taken once per process and from the module name. That is harmless for fsc, which writes one module per process, but multi-emit writes many modules with one name, so every submission of a session had the same MVID. Debuggers then treated all submissions as one module:
+
+- frames showed `<Unknown function>`, or the `main@` of a different submission;
+- a later submission opened the decompiled source of an earlier one;
+- an embedded PDB was not loaded with Just My Code off, so breakpoints stayed unbound and VS decompiled the submission to C#;
+- expression evaluation failed, and Roslyn's evaluator terminated VS once with an `InvalidCastException` in `CompilationExtensions.GetType`, which finds types by module id.
+
+The same bytes loaded from another session worked, because there the MVID was unique. A PDB file hid part of this, because VS found it by path.
 
 ### Source for code with no file
 
@@ -57,7 +69,9 @@ Not covered:
 
 Branch `fsi-debugging-prototype` on [majocha/fsharp](https://github.com/majocha/fsharp/tree/fsi-debugging-prototype), based on `main` at `fe180deb55`, implements:
 
+- a unique MVID for each submission;
 - embedded sources for in-memory documents;
+- an embedded PDB on .NET, with no PDB file on disk;
 - the `debug` field on `fsi/execute`;
 - the guarded break.
 
@@ -66,27 +80,18 @@ Tests:
 - `tests/FSharp.Compiler.ComponentTests/Scripting/Interactive.fs`, module `PortablePdb`:
   - PDB round trip of an in-memory document;
   - unique document names, and line numbers from in-memory symbols, through a stack trace;
-  - the PDB file is written unless debug info is off.
+  - the PDB file is written only on .NET Framework;
+  - each submission has its own MVID.
 - `tests/FSharp.Compiler.Interactive.Server.Tests/FsiJsonRpcServerTests.fs`, section "Debugging": a debug submission is compiled unoptimized, the next one is not.
 
-Verified by driving Visual Studio 2026 Insiders (18.12) through DTE, in a clean hive, against a JSON-RPC session with `debug = true`:
+Verified by driving Visual Studio 2026 Insiders (18.12) through DTE against a JSON-RPC session with `debug = true`, with Just My Code on and off:
 
 - the guarded break stops in the submission;
-- code with no file opens from the source embedded in the PDB, on the right lines;
-- code with a `sourcePath` opens the real file, and a breakpoint set there binds;
-- stepping walks the submission's lines, over and into its functions.
-
-How symbols reach VS decides whether any of this works:
-
-| Symbols | Just My Code on | Just My Code off |
-|---|---|---|
-| PDB file, plus bytes to `Assembly.Load` (what fsi does) | works | works |
-| Embedded in the assembly, no file | works | not loaded |
-| Bytes to `Assembly.Load` only, no file | not loaded | not loaded |
-
-When symbols are not loaded, breakpoints stay unbound and stepping leaves the submission. With Just My Code off, VS also decompiles the submission to C# and steps through that; turning off `debugging.general.enableAutomaticDecompilation` removes the C# but does not load the symbols, and setting `debugging.symbols.load.moduleFilterMode` to `loadAllButExcluded` changes nothing. 
-
-The embedded row applies only to a submission fsi itself loads. All of these worked with Just My Code off, with the breakpoint bound and hit: a library with an embedded PDB loaded from a file; the same library loaded with `Assembly.Load(bytes)`, built by C# or by fsc; one named `FSI-ASSEMBLY-MULTI`; and the dumped bytes of a submission, loaded by a later submission. So the PDB format, the image, the shared name and loading from bytes are not the cause on their own. Neither are the injected break (a breakpoint in a submission run without `debug` is not bound either, and is with a PDB file) or timing (a two-second delay between load and execution changes nothing). What differs for a submission fsi loads is not known, and VS's own reason has not been read, so the file stays.
+- frames show the right names, such as `FSI_0003.sq`;
+- code with no file opens from the source embedded in the PDB, on the right lines, and each submission gets its own document;
+- code with a `sourcePath` opens the real file, and a breakpoint set there binds and is hit;
+- stepping walks the submission's lines, over and into its functions;
+- no PDB file is written.
 
 Attach with the CoreCLR engine. `Process.Attach()` or an automatic engine choice can leave `Debugger.IsAttached` false, and then the guard silently skips the break.
 
@@ -96,11 +101,10 @@ Not verified:
 
 ## Next steps
 
-1. **Frame names.** VS shows `<Unknown function>` for a submission's `main@`, and inside a function of a later submission it shows `<StartupCode$FSI_0001>.$FSI_0001.main@`, the frame name of a different submission. Line mapping is right, so symbols are found by module while names are resolved against another assembly of the same name. Try a name unique to each submission; `InternalsVisibleTo("FSI-ASSEMBLY-MULTI")` is what ties submissions to one name today.
-2. **Watch and Locals** ([#14572](https://github.com/dotnet/fsharp/issues/14572)). With a fixed build of the out-of-tree `FSharp.ExpressionEvaluator` extension, Locals shows a submission's top-level values, and the Immediate window evaluates them and expressions such as `[1;2;3] |> List.rev`. A function from the same submission is not resolved: `sq 2` reports FS0039. Without that fix, the extension's warm-up failed with `ImportILTypeRef: unexpected local scope`, and VS terminated once on an `InvalidCastException` in Roslyn's `CompilationExtensions.GetType`. Without the extension, evaluating a top-level `let` reported "Internal error in the F# compiler" in a clean hive.
-3. **The new VS window (#20565).**
+1. **Watch and Locals** ([#14572](https://github.com/dotnet/fsharp/issues/14572)). With the out-of-tree `FSharp.ExpressionEvaluator` extension, locals of a function and expressions such as `[1;2;3] |> List.rev` evaluate, and neither the extension's assert nor the Roslyn crash has come back. The extension does not yet resolve module-level names outside the current frame: `sq 2`, a value from an earlier submission, or a top-level value from inside a function report FS0039.
+2. **The new VS window (#20565).**
    - "Debug in Interactive" still routes to the legacy window's `Hooks.OnMLSend … DebugSelection`, which that PR no longer registers. Implement it in the new window: read `processId` from the handshake, attach with `Process2.Attach2` and the CoreCLR engine, then send `debug = true`.
    - Carry the source origin with each submission instead of the single pending slot.
-4. **Legacy window attach.** It uses `Process.Attach()` with no engine specified; use `Attach2` with the right engine.
-5. **Console stdin source.** Needs a text-to-line mapping that survives the line resets above, possibly from `FsiStdinSyphon`.
-6. **`--multiemit` stays** ([#17308](https://github.com/dotnet/fsharp/issues/17308)). `--multiemit-` is a real workaround for serializers and for hosts such as Rhino. It simply does not get per-submission debug settings.
+3. **Legacy window attach.** It uses `Process.Attach()` with no engine specified; use `Attach2` with the right engine.
+4. **Console stdin source.** Needs a text-to-line mapping that survives the line resets above, possibly from `FsiStdinSyphon`.
+5. **`--multiemit` stays** ([#17308](https://github.com/dotnet/fsharp/issues/17308)). `--multiemit-` is a real workaround for serializers and for hosts such as Rhino. It simply does not get per-submission debug settings.

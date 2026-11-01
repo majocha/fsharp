@@ -1979,7 +1979,8 @@ type internal FsiDynamicCompiler
                 emitTailcalls = tcConfig.emitTailcalls
                 deterministic = tcConfig.deterministic
                 portablePDB = true
-                embeddedPDB = false
+                // The runtime and Visual Studio both read a PDB embedded in the loaded image, so on .NET nothing goes to disk.
+                embeddedPDB = isRunningOnCoreClr && tcConfig.debuginfo
                 embedAllSource = false
                 embedSourceList = []
                 inMemorySources = inMemorySources

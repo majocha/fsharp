@@ -406,10 +406,29 @@ asm.GetCustomAttributes(typeof<System.Diagnostics.DebuggableAttribute>, false)
         let ``multi-emit PDB artifact is absent with --debug-`` () =
             assertPdbArtifact "--debug-" false
 
-        // The runtime reads a submission's symbols from memory, but Visual Studio only finds them in this file.
+        // On .NET the PDB is embedded in the submission; only .NET Framework needs the file.
         [<Fact>]
-        let ``multi-emit PDB artifact is written with --debug+`` () =
+        let ``multi-emit PDB artifact is written with --debug+ only on .NET Framework`` () =
+#if NETCOREAPP
+            assertPdbArtifact "--debug+" false
+#else
             assertPdbArtifact "--debug+" true
+#endif
+
+        // Debuggers tell modules apart by MVID. A shared one makes them treat all submissions as a single module.
+        [<Fact>]
+        let ``each multi-emit submission has its own MVID`` () =
+            let args: string array = [| "--multiemit+" |]
+            use session = new FSharpScript(additionalArgs = args)
+
+            for i in 1..3 do
+                let _, errors = session.Eval($"let submittedValue{i} = {i}")
+                Assert.Empty(errors)
+
+            let mvids = session.Fsi.DynamicAssemblies |> Array.map _.ManifestModule.ModuleVersionId
+
+            Assert.True(mvids.Length >= 3, $"Expected at least three submissions, got {mvids.Length}")
+            Assert.Equal(mvids.Length, (Array.distinct mvids).Length)
 
         let private throwingFrameScript =
             "let frame =
