@@ -76,6 +76,8 @@ Verified by driving Visual Studio 2026 Insiders (18.12) through DTE, in a clean 
 - code with a `sourcePath` opens the real file, and a breakpoint set there binds;
 - stepping walks the submission's lines, over and into its functions.
 
+All of this works with Just My Code on or off. An embedded PDB (`embeddedPDB = true`) avoids the file and works with it on, but with it off VS decompiles the submission to C#, steps through that, and leaves breakpoints unbound. Why VS treats the two differently is not known, so the file stays.
+
 Attach with the CoreCLR engine. `Process.Attach()` or an automatic engine choice can leave `Debugger.IsAttached` false, and then the guard silently skips the break.
 
 Not verified:
@@ -85,7 +87,7 @@ Not verified:
 ## Next steps
 
 1. **Frame names.** VS shows `<Unknown function>` for a submission's `main@`, and inside a function of a later submission it shows `<StartupCode$FSI_0001>.$FSI_0001.main@`, the frame name of a different submission. Line mapping is right, so symbols are found by module while names are resolved against another assembly of the same name. Try a name unique to each submission; `InternalsVisibleTo("FSI-ASSEMBLY-MULTI")` is what ties submissions to one name today.
-2. **Watch and Locals** ([#14572](https://github.com/dotnet/fsharp/issues/14572)). Evaluating a top-level `let` from a submission reports "Internal error in the F# compiler". In the default hive, with the out-of-tree `FSharp.ExpressionEvaluator` extension, its warm-up also fails with `ImportILTypeRef: unexpected local scope`, and VS terminated once on an `InvalidCastException` in Roslyn's `CompilationExtensions.GetType`, reached through that extension's `GetClrLocalVariableQuery`. Hypothesis for the Roslyn failures: every submission is named `FSI-ASSEMBLY-MULTI`, distinguished only by a version that counts down (`EmitInMemoryAssembly`). Separately, top-level `let` values are static members of `FSI_000N` types, not locals, so evaluating them needs the right scope.
+2. **Watch and Locals** ([#14572](https://github.com/dotnet/fsharp/issues/14572)). With a fixed build of the out-of-tree `FSharp.ExpressionEvaluator` extension, Locals shows a submission's top-level values, and the Immediate window evaluates them and expressions such as `[1;2;3] |> List.rev`. A function from the same submission is not resolved: `sq 2` reports FS0039. Without that fix, the extension's warm-up failed with `ImportILTypeRef: unexpected local scope`, and VS terminated once on an `InvalidCastException` in Roslyn's `CompilationExtensions.GetType`. Without the extension, evaluating a top-level `let` reported "Internal error in the F# compiler" in a clean hive.
 3. **The new VS window (#20565).**
    - "Debug in Interactive" still routes to the legacy window's `Hooks.OnMLSend … DebugSelection`, which that PR no longer registers. Implement it in the new window: read `processId` from the handshake, attach with `Process2.Attach2` and the CoreCLR engine, then send `debug = true`.
    - Carry the source origin with each submission instead of the single pending slot.
