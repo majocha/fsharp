@@ -84,7 +84,9 @@ How symbols reach VS decides whether any of this works:
 | Embedded in the assembly, no file | works | not loaded |
 | Bytes to `Assembly.Load` only, no file | not loaded | not loaded |
 
-When symbols are not loaded, breakpoints stay unbound and stepping leaves the submission. With Just My Code off, VS also decompiles the submission to C# and steps through that; turning off `debugging.general.enableAutomaticDecompilation` removes the C# but does not load the symbols, and setting `debugging.symbols.load.moduleFilterMode` to `loadAllButExcluded` changes nothing. The inference is that Just My Code forces VS to read an embedded PDB, to decide what is user code, and that nothing else does. VS's own reason has not been read, so the file stays.
+When symbols are not loaded, breakpoints stay unbound and stepping leaves the submission. With Just My Code off, VS also decompiles the submission to C# and steps through that; turning off `debugging.general.enableAutomaticDecompilation` removes the C# but does not load the symbols, and setting `debugging.symbols.load.moduleFilterMode` to `loadAllButExcluded` changes nothing. 
+
+The embedded row applies only to a submission fsi itself loads. All of these worked with Just My Code off, with the breakpoint bound and hit: a library with an embedded PDB loaded from a file; the same library loaded with `Assembly.Load(bytes)`, built by C# or by fsc; one named `FSI-ASSEMBLY-MULTI`; and the dumped bytes of a submission, loaded by a later submission. So the PDB format, the image, the shared name and loading from bytes are not the cause on their own. Neither are the injected break (a breakpoint in a submission run without `debug` is not bound either, and is with a PDB file) or timing (a two-second delay between load and execution changes nothing). What differs for a submission fsi loads is not known, and VS's own reason has not been read, so the file stays.
 
 Attach with the CoreCLR engine. `Process.Attach()` or an automatic engine choice can leave `Debugger.IsAttached` false, and then the guard silently skips the break.
 
