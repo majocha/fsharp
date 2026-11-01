@@ -76,7 +76,15 @@ Verified by driving Visual Studio 2026 Insiders (18.12) through DTE, in a clean 
 - code with a `sourcePath` opens the real file, and a breakpoint set there binds;
 - stepping walks the submission's lines, over and into its functions.
 
-All of this works with Just My Code on or off. An embedded PDB (`embeddedPDB = true`) avoids the file and works with it on, but with it off VS decompiles the submission to C#, steps through that, and leaves breakpoints unbound. Why VS treats the two differently is not known, so the file stays.
+How symbols reach VS decides whether any of this works:
+
+| Symbols | Just My Code on | Just My Code off |
+|---|---|---|
+| PDB file, plus bytes to `Assembly.Load` (what fsi does) | works | works |
+| Embedded in the assembly, no file | works | not loaded |
+| Bytes to `Assembly.Load` only, no file | not loaded | not loaded |
+
+When symbols are not loaded, breakpoints stay unbound and stepping leaves the submission. With Just My Code off, VS also decompiles the submission to C# and steps through that; turning off `debugging.general.enableAutomaticDecompilation` removes the C# but does not load the symbols, and setting `debugging.symbols.load.moduleFilterMode` to `loadAllButExcluded` changes nothing. The inference is that Just My Code forces VS to read an embedded PDB, to decide what is user code, and that nothing else does. VS's own reason has not been read, so the file stays.
 
 Attach with the CoreCLR engine. `Process.Attach()` or an automatic engine choice can leave `Debugger.IsAttached` false, and then the guard silently skips the break.
 
