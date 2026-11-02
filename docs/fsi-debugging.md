@@ -59,7 +59,7 @@ Diagnostics keep the original file name; only the PDB, and therefore stack trace
 Not covered:
 
 - **Console stdin.** Its lines keep counting across submissions, or reset with `# 1 "stdin"` from the legacy VS window, so one submission's text does not line up with the line numbers in its PDB.
-- **A `sourcePath` that does not exist** (an unsaved script). The embedded text includes the line directive the server prepends, so lines are off by one.
+- **A `sourcePath` that does not exist** (an unsaved script). The embedded text is the submission behind the line directive the server prepends, so its code starts at line 2 while the PDB records `startLine`. Embedding the whole unsaved document instead would fix it; left as an edge case.
 
 ### Per-submission debugging
 
