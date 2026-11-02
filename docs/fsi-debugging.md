@@ -65,6 +65,15 @@ Not covered:
 
 `fsi/execute` with `debug = true` calls the internal `FsiEvaluationSession.EvalInteractionNonThrowing(code, scriptFileName, debug, cancellationToken)`. For that call only, `withDebuggableCode` switches `tcConfigB` to `--optimize- --tailcalls- --debug:pdbonly`, restoring the saved fields afterwards, and the interactive state's `debugBreak` is set. The flag is cleared afterwards even when the code had no breakable line, so the break never leaks into a later submission. This replaces the legacy window's session-wide "debug mode" option and the session restart it needs.
 
+### Debug in Interactive (new VS window)
+
+Branch `fsi-debug-in-interactive` merges #20565 into this one. In the new window:
+
+- `FSharpInteractiveCommandFilter` handles `cmdIDDebugSelection` alongside Execute Selection and Execute Line, and hides it while the debugger is attached to another process. The editor's `FsiCommandFilter`, which sent it to the legacy window, is gone.
+- `SubmissionOrigins` carries a `debug` flag with each submission's `sourcePath` and `startLine`, so only the submission sent for debugging is debugged.
+- Before running a debug submission, `FSharpInteractiveEvaluator` starts the session if needed and attaches to its `processId` (`InteractiveDebugger.attachAsync`: `Process2.Attach2` with the CoreCLR engine; nothing to do when already attached). If attaching fails, the submission is not run.
+- `fsi/execute` then gets `debug = true`.
+
 ## Status
 
 Branch `fsi-debugging-prototype` on [majocha/fsharp](https://github.com/majocha/fsharp/tree/fsi-debugging-prototype), based on `main` at `fe180deb55`, implements:
@@ -98,13 +107,12 @@ Attach with the CoreCLR engine. `Process.Attach()` or an automatic engine choice
 Not verified:
 
 - The .NET Framework run of the changed tests (only net11.0 was run).
+- Debug in Interactive in the new window. It builds, and `SubmissionOriginsTests` covers the flag, but the F# extension built from `main` does not load in VS 18.12 Insiders: `main` flows Roslyn 5.13 and System.* 10.0.14, the IDE has 5.12 and 10.0.10. `start-vs-VisualFSharpSln.ps1` overrides Roslyn (#20528 extends it to local Roslyn builds); overriding System.* to 10.0.10 as well gets the F# MEF parts to scan, but `FSharpPackage` still fails at `LanguageService.fs` line 387 because the workspace has no `IFSharpWorkspaceService`. Needs a newer VS Insiders.
 
 ## Next steps
 
 1. **Watch and Locals** ([#14572](https://github.com/dotnet/fsharp/issues/14572)). With the out-of-tree `FSharp.ExpressionEvaluator` extension, locals of a function and expressions such as `[1;2;3] |> List.rev` evaluate, and neither the extension's assert nor the Roslyn crash has come back. The extension does not yet resolve module-level names outside the current frame: `sq 2`, a value from an earlier submission, or a top-level value from inside a function report FS0039.
-2. **The new VS window (#20565).**
-   - "Debug in Interactive" still routes to the legacy window's `Hooks.OnMLSend … DebugSelection`, which that PR no longer registers. Implement it in the new window: read `processId` from the handshake, attach with `Process2.Attach2` and the CoreCLR engine, then send `debug = true`.
-   - Carry the source origin with each submission instead of the single pending slot.
+2. **Verify Debug in Interactive in VS** on a VS Insiders that loads an extension built from `main`. The new window has nothing for the legacy "Attach/Detach Debugger" commands yet.
 3. **Legacy window attach.** It uses `Process.Attach()` with no engine specified; use `Attach2` with the right engine.
 4. **Console stdin source.** Needs a text-to-line mapping that survives the line resets above, possibly from `FsiStdinSyphon`.
 5. **`--multiemit` stays** ([#17308](https://github.com/dotnet/fsharp/issues/17308)). `--multiemit-` is a real workaround for serializers and for hosts such as Rhino. It simply does not get per-submission debug settings.

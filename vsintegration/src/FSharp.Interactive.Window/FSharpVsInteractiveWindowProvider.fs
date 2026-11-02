@@ -69,7 +69,7 @@ type internal FSharpVsInteractiveWindowProvider
         let host = new InteractiveHostClient(Process.GetCurrentProcess().Id)
 
         let created =
-            new FSharpInteractiveEvaluator(host, InteractiveHostOptionsFactory.create, scanners)
+            new FSharpInteractiveEvaluator(host, InteractiveHostOptionsFactory.create, scanners, InteractiveDebugger.attachAsync)
 
         evaluator <- ValueSome created
 
@@ -113,9 +113,15 @@ type internal FSharpVsInteractiveWindowProvider
         toolWindow.Show focus
         toolWindow
 
-    member this.SubmitFromEditor(text: string, sourcePath: string, startLine: int) =
+    member _.IsDebuggingElsewhere =
+        evaluator
+        |> ValueOption.bind _.SessionProcessId
+        |> InteractiveDebugger.isDebuggingElsewhere
+
+    member this.SubmitFromEditor(text: string, sourcePath: string, startLine: int, debug: bool) =
         let toolWindow = this.Open(0, focus = false)
 
-        evaluator |> ValueOption.iter _.AddSubmissionOrigin(text, sourcePath, startLine)
+        evaluator
+        |> ValueOption.iter _.AddSubmissionOrigin(text, sourcePath, startLine, debug)
 
         toolWindow.InteractiveWindow.SubmitAsync [| text |] |> ignore

@@ -105,7 +105,6 @@
     <Compile Include="Commands\HelpContextService.fs" />
     <Compile Include="Commands\InteractiveLexicalScanner.fs" />
     <Compile Include="Commands\InteractiveLexicalScannerExport.fs" />
-    <Compile Include="Commands\FsiCommandService.fs" />
     <Compile Include="Commands\XmlDocCommandService.fs" />
     <Compile Include="Refactor\AddReturnType.fs" />
     <Compile Include="Refactor\ChangeTypeofWithNameToNameofExpression.fs" />

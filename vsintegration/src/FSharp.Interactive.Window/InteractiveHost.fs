@@ -475,15 +475,19 @@ type internal InteractiveHostClient(clientProcessId: int) =
         takeCurrent () |> ValueOption.iter _.Dispose()
         this.EnsureStartedAsync(options, ?cancellationToken = cancellationToken)
 
-    member _.ExecuteAsync(code: string, origin: struct (string * int) voption, ?cancellationToken) =
+    member _.SessionProcessId =
+        tryCurrent () |> ValueOption.map _.Initialization.processId
+
+    member _.ExecuteAsync(code: string, origin: struct (string * int * bool) voption, ?cancellationToken) =
         let request =
             {
                 code = code
-                sourcePath = origin |> ValueOption.map (fun struct (path, _) -> path) |> ValueOption.toObj
+                sourcePath = origin |> ValueOption.map (fun struct (path, _, _) -> path) |> ValueOption.toObj
                 startLine =
                     origin
-                    |> ValueOption.map (fun struct (_, line) -> line)
+                    |> ValueOption.map (fun struct (_, line, _) -> line)
                     |> ValueOption.toNullable
+                debug = origin |> ValueOption.exists (fun struct (_, _, debug) -> debug)
             }
 
         task {

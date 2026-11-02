@@ -38,7 +38,12 @@ module internal ResultRendering =
 
 [<Sealed>]
 type internal FSharpInteractiveEvaluator
-    (host: InteractiveHostClient, getOptions: unit -> InteractiveHostOptions, scanners: ILexicalScannerFactory) =
+    (
+        host: InteractiveHostClient,
+        getOptions: unit -> InteractiveHostOptions,
+        scanners: ILexicalScannerFactory,
+        attachDebugger: int -> Task<Result<unit, string>>
+    ) =
 
     let mutable currentWindow: IInteractiveWindow | null = null
     let mutable subscriptions: IDisposable list = []
@@ -88,9 +93,18 @@ type internal FSharpInteractiveEvaluator
 
         subscriptions <- []
 
-    member _.AddSubmissionOrigin(text: string, sourcePath: string, startLine: int) =
-        if not (String.IsNullOrEmpty sourcePath) then
-            origins.Add(text, sourcePath, startLine)
+    let readyToDebugAsync () =
+        task {
+            match! host.EnsureStartedAsync(getOptions ()) with
+            | Result.Error message -> return Result.Error message
+            | Result.Ok session -> return! attachDebugger session.Initialization.processId
+        }
+
+    member _.SessionProcessId = host.SessionProcessId
+
+    member _.AddSubmissionOrigin(text: string, sourcePath: string, startLine: int, debug: bool) =
+        if debug || not (String.IsNullOrEmpty sourcePath) then
+            origins.Add(text, sourcePath, startLine, debug)
 
     interface IInteractiveEvaluator with
 
@@ -132,13 +146,23 @@ type internal FSharpInteractiveEvaluator
                 if not started.IsSuccessful || String.IsNullOrWhiteSpace text then
                     return started
                 else
-                    match! host.ExecuteAsync(SubmissionAnalysis.withTerminator scanners text, origin) with
+                    let! ready =
+                        match origin with
+                        | ValueSome(struct (_, _, true)) -> readyToDebugAsync ()
+                        | _ -> Task.FromResult(Result.Ok())
+
+                    match ready with
                     | Result.Error message ->
                         writeErrorLine message
                         return ExecutionResult false
-                    | Result.Ok result ->
-                        reportDiagnostics result
-                        return ExecutionResult result.success
+                    | Result.Ok() ->
+                        match! host.ExecuteAsync(SubmissionAnalysis.withTerminator scanners text, origin) with
+                        | Result.Error message ->
+                            writeErrorLine message
+                            return ExecutionResult false
+                        | Result.Ok result ->
+                            reportDiagnostics result
+                            return ExecutionResult result.success
             }
 
         member _.AbortExecution() = host.InterruptAsync() |> ignore

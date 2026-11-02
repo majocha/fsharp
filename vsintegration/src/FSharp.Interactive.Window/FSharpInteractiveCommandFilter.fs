@@ -16,10 +16,12 @@ open Microsoft.VisualStudio.Utilities
 type internal SendToInteractiveKind =
     | Selection
     | Line
+    | DebugSelection
 
     member kind.Status =
         match kind with
-        | Selection -> OLECMDF.OLECMDF_SUPPORTED ||| OLECMDF.OLECMDF_ENABLED
+        | Selection
+        | DebugSelection -> OLECMDF.OLECMDF_SUPPORTED ||| OLECMDF.OLECMDF_ENABLED
         | Line ->
             OLECMDF.OLECMDF_SUPPORTED
             ||| OLECMDF.OLECMDF_ENABLED
@@ -33,6 +35,7 @@ module private InteractiveCommand =
         match group = VSConstants.VsStd11, enum<VSConstants.VSStd11CmdID> (int commandId) with
         | true, VSConstants.VSStd11CmdID.ExecuteSelectionInInteractive -> ValueSome Selection
         | true, VSConstants.VSStd11CmdID.ExecuteLineInInteractive -> ValueSome Line
+        | _ when group = Guids.guidInteractive && commandId = uint32 Guids.cmdIDDebugSelection -> ValueSome DebugSelection
         | _ -> ValueNone
 
 type internal EditorSubmission =
@@ -98,7 +101,7 @@ type internal FSharpInteractiveCommandFilter
             | SendToInteractive kind ->
                 EditorSubmission.readAndAdvanceCaret documentFactory view kind
                 |> ValueOption.iter (fun submission ->
-                    provider.SubmitFromEditor(submission.Text, submission.SourcePath, submission.OneBasedStartLine))
+                    provider.SubmitFromEditor(submission.Text, submission.SourcePath, submission.OneBasedStartLine, kind.IsDebugSelection))
 
                 VSConstants.S_OK
             | _ ->
@@ -112,6 +115,7 @@ type internal FSharpInteractiveCommandFilter
             let statuses =
                 Array.init (int cCmds) (fun i ->
                     match group, prgCmds[i].cmdID with
+                    | SendToInteractive DebugSelection when provider.IsDebuggingElsewhere -> ValueSome OLECMDF.OLECMDF_INVISIBLE
                     | SendToInteractive kind -> ValueSome kind.Status
                     | _ -> ValueNone)
 
